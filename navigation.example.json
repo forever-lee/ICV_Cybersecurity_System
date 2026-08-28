@@ -1,0 +1,9 @@
+{
+  "latitude": 31.2304,
+  "longitude": 121.4737,
+  "speed_kph": 42.6,
+  "heading_deg": 88.0,
+  "accuracy_m": 2.1,
+  "coordinate_system": "WGS84",
+  "source": "GNSS+CAN-DEMO"
+}

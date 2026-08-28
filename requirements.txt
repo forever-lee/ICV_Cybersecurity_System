@@ -1,0 +1,7 @@
+# Legacy-compatible dependency set; the validated TM / Python 3.10 environment
+# may use newer compatible releases already installed in that environment.
+fastapi==0.103.2
+uvicorn[standard]==0.22.0
+opencv-python==4.5.2.54
+numpy==1.21.5
+websockets>=10.0,<12.0

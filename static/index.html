@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07111f" />
+    <meta name="description" content="智能网联汽车攻防与安全运营平台" />
+    <title>V-SHIELD · 智能网联汽车攻防平台</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <div class="brand-block">
+          <div class="brand-emblem"><span>V</span></div>
+          <div><strong>V-SHIELD</strong><small>VEHICLE CYBER RANGE</small></div>
+        </div>
+
+        <div class="platform-label"><span>智能网联汽车</span><b>攻防平台</b></div>
+
+        <nav class="side-nav" aria-label="系统导航">
+          <p class="nav-section-title">安全态势</p>
+          <button class="side-link active" data-view="overview"><i>态</i><span>全局安全态势</span></button>
+
+          <p class="nav-section-title">车辆域控</p>
+          <button class="side-link" data-view="telematics"><i>联</i><span>车联网域</span><em class="nav-count">2</em></button>
+          <button class="side-link" data-view="adas"><i>智</i><span>智能驾驶域</span><em class="nav-state online">在线</em></button>
+          <button class="side-link" data-view="chassis"><i>底</i><span>底盘域</span><em class="domain-dot" data-domain-indicator="chassis"></em></button>
+          <button class="side-link" data-view="powertrain"><i>动</i><span>动力域</span><em class="domain-dot" data-domain-indicator="powertrain"></em></button>
+          <button class="side-link" data-view="body"><i>身</i><span>车身域</span><em class="domain-dot" data-domain-indicator="body"></em></button>
+          <button class="side-link" data-view="cockpit"><i>舱</i><span>智能座舱域</span><em class="domain-dot" data-domain-indicator="cockpit"></em></button>
+
+          <p class="nav-section-title">攻防中心</p>
+          <button class="side-link" data-view="attack"><i class="attack-icon">攻</i><span>攻击验证</span><em class="nav-state plan">规划</em></button>
+          <button class="side-link" data-view="defense"><i class="defense-icon">防</i><span>检测防御</span><em class="nav-state plan">规划</em></button>
+          <button class="side-link" data-view="events"><i>事</i><span>安全事件</span><em class="nav-count muted">0</em></button>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="service-state"><i></i><span><b>平台服务正常</b><small>Cloud node · CN-01</small></span></div>
+          <div class="version-row"><span>V-SHIELD CONSOLE</span><b>v2.0</b></div>
+        </div>
+      </aside>
+
+      <main class="main-shell">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobileMenu" aria-label="打开导航">☰</button>
+          <div class="breadcrumb"><span>安全运营中心</span><i>/</i><strong id="currentViewName">全局安全态势</strong></div>
+          <div class="top-actions">
+            <div class="vehicle-picker"><span>目标车辆</span><select id="vehicleSelect" aria-label="选择车辆"><option value="VHC-001">VHC-001</option></select></div>
+            <div class="top-clock"><strong id="clock">--:--:--</strong><span id="date">----/--/--</span></div>
+            <div class="connection-pill offline" id="connectionPill"><span class="pulse-dot"></span><span id="connectionText">等待车端</span></div>
+          </div>
+        </header>
+
+        <div class="workspace">
+          <section class="content-view active" data-view-panel="overview">
+            <div class="page-heading overview-heading">
+              <div><p class="eyebrow">CYBER SECURITY SITUATION</p><h1>全局安全态势</h1><p>车辆域控资产、通信链路与攻防能力统一监测</p></div>
+              <div class="heading-meta"><span><i class="status-light green"></i>监测运行中</span><span>最后刷新 <b id="lastRefresh">--:--:--</b></span></div>
+            </div>
+
+            <div class="kpi-grid">
+              <article class="kpi-card primary"><div class="kpi-icon">盾</div><div><span>综合安全评分</span><strong id="securityScore">86<small>/ 100</small></strong><p>资产基线状态良好</p></div><em>↑ 2.4%</em></article>
+              <article class="kpi-card"><div class="kpi-icon cyan">资</div><div><span>域控资产</span><strong>7<small>个</small></strong><p><b id="activeDomainCount">2</b> 个数据源已接入</p></div><em class="neutral">资产盘点</em></article>
+              <article class="kpi-card"><div class="kpi-icon amber">面</div><div><span>待验证攻击面</span><strong>12<small>项</small></strong><p>覆盖无线、诊断与车载网络</p></div><em class="warning">待测试</em></article>
+              <article class="kpi-card"><div class="kpi-icon purple">事</div><div><span>今日安全事件</span><strong>0<small>起</small></strong><p>当前未发现高危告警</p></div><em class="success">安全</em></article>
+            </div>
+
+            <div class="overview-grid">
+              <article class="panel topology-panel">
+                <div class="panel-title"><div><p class="eyebrow">VEHICLE E/E ARCHITECTURE</p><h2>车辆域控安全拓扑</h2></div><span class="tag live">实时映射</span></div>
+                <div class="topology-map">
+                  <div class="topology-lines"></div>
+                  <button class="domain-node node-adas active" data-open-view="adas"><i>智</i><span><b>智能驾驶域</b><small>视频流已接入</small></span><em>ONLINE</em></button>
+                  <button class="domain-node node-telematics active" data-open-view="telematics"><i>联</i><span><b>车联网域</b><small>WiFi / BLE</small></span><em>2 LINKS</em></button>
+                  <button class="domain-node node-chassis" data-open-view="chassis"><i>底</i><span><b>底盘域</b><small>CAN / 制动 / 转向</small></span><em data-domain-label="chassis">待接入</em></button>
+                  <button class="domain-node node-power" data-open-view="powertrain"><i>动</i><span><b>动力域</b><small>VCU / BMS / 电驱</small></span><em data-domain-label="powertrain">待接入</em></button>
+                  <button class="domain-node node-body" data-open-view="body"><i>身</i><span><b>车身域</b><small>BCM / PEPS / TPMS</small></span><em data-domain-label="body">待接入</em></button>
+                  <button class="domain-node node-cockpit" data-open-view="cockpit"><i>舱</i><span><b>智能座舱域</b><small>IVI / 蓝牙 / 应用</small></span><em data-domain-label="cockpit">待接入</em></button>
+                  <div class="vehicle-core"><span class="car-roof"></span><div class="car-body"><i></i><i></i><b>中央网关</b><small>SECURITY GATEWAY</small></div></div>
+                </div>
+              </article>
+
+              <article class="panel posture-panel">
+                <div class="panel-title"><div><p class="eyebrow">SECURITY POSTURE</p><h2>防护能力覆盖</h2></div><span class="tag">基线</span></div>
+                <div class="radial-score"><div><strong>42</strong><small>%</small></div><span>能力建设进度</span></div>
+                <div class="posture-list">
+                  <div><span>资产可视化</span><b>78%</b><i><em style="width:78%"></em></i></div>
+                  <div><span>攻击面验证</span><b>15%</b><i><em class="amber" style="width:15%"></em></i></div>
+                  <div><span>入侵检测</span><b>32%</b><i><em class="purple" style="width:32%"></em></i></div>
+                  <div><span>响应处置</span><b>20%</b><i><em class="blue" style="width:20%"></em></i></div>
+                </div>
+                <button class="text-action" data-open-view="defense">查看防御能力矩阵 <span>→</span></button>
+              </article>
+            </div>
+
+            <div class="overview-bottom">
+              <article class="panel threat-panel">
+                <div class="panel-title"><div><p class="eyebrow">ATTACK SURFACE</p><h2>关键攻击面</h2></div><button class="text-link" data-open-view="attack">进入攻击验证</button></div>
+                <div class="surface-list">
+                  <div><i class="risk-high">H</i><span><b>无线接入链路</b><small>WiFi、BLE 身份认证与协议安全</small></span><em>高关注</em></div>
+                  <div><i class="risk-mid">M</i><span><b>车载诊断接口</b><small>UDS 会话、权限与重放攻击面</small></span><em>待验证</em></div>
+                  <div><i class="risk-mid">M</i><span><b>车内 CAN 网络</b><small>报文注入、模糊测试与异常检测</small></span><em>待接入</em></div>
+                  <div><i class="risk-low">L</i><span><b>视频传输链路</b><small>数据完整性与链路抗干扰能力</small></span><em>监测中</em></div>
+                </div>
+              </article>
+              <article class="panel event-preview">
+                <div class="panel-title"><div><p class="eyebrow">RECENT EVENTS</p><h2>最近安全事件</h2></div><span class="tag safe">无高危</span></div>
+                <div class="empty-events"><div class="empty-shield">✓</div><strong>当前态势平稳</strong><p>尚未接收到攻击检测告警<br/>接入检测引擎后将在此汇总事件</p></div>
+              </article>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="telematics">
+            <div class="page-heading"><div><p class="eyebrow">TELEMATICS DOMAIN</p><h1>车联网域安全</h1><p>T-Box、WiFi 与蓝牙无线链路资产监测</p></div><div class="domain-summary"><span class="status-chip active">2 条采集链路</span><span class="status-chip">攻击能力待接入</span></div></div>
+            <div class="domain-stat-grid">
+              <article><span>无线资产</span><strong>2</strong><small>WiFi / BLE</small></article>
+              <article><span>接收报文</span><strong id="wirelessPacketTotal">0</strong><small>累计数据包</small></article>
+              <article><span>开放攻击面</span><strong>5</strong><small>待验证项目</small></article>
+              <article><span>防御策略</span><strong>0</strong><small>尚未配置</small></article>
+            </div>
+            <article class="panel data-module" aria-labelledby="bluetoothTitle">
+              <div class="module-head"><div class="module-ident ble"><i>BT</i><span><p class="eyebrow">BLUETOOTH TELEMETRY</p><h2 id="bluetoothTitle">蓝牙数据采集</h2><small>BLE 转 UDP · 文本与 HEX 实时解析</small></span></div><div class="module-actions"><span class="module-status offline" id="bluetoothStatus"><i></i><span>等待数据</span></span><button class="primary-button" id="bluetoothTestButton" type="button">生成测试数据</button></div></div>
+              <div class="telemetry-layout">
+                <div class="latest-packet"><span class="label">最新报文</span><strong id="bluetoothText">尚未收到蓝牙数据</strong><div class="packet-stats"><span>累计 <b id="bluetoothPacketCount">0</b></span><span>RSSI <b id="bluetoothRssi">—</b></span><span>时间 <b id="bluetoothTime">—</b></span></div><div class="hex-view"><span>HEX</span><code id="bluetoothHex">—</code></div></div>
+                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="bluetoothHistory" class="history-list"><div class="history-empty">等待蓝牙模块发送数据…</div></div></div>
+              </div>
+            </article>
+            <article class="panel data-module wifi-module" aria-labelledby="wifiTitle">
+              <div class="module-head"><div class="module-ident wifi"><i>WF</i><span><p class="eyebrow">WIFI TELEMETRY</p><h2 id="wifiTitle">WiFi 数据采集</h2><small>WiFi 转 UDP · 信号与传输数据实时解析</small></span></div><div class="module-actions"><span class="module-status offline" id="wifiStatus"><i></i><span>等待数据</span></span><button class="primary-button blue" id="wifiTestButton" type="button">生成测试数据</button></div></div>
+              <div class="telemetry-layout">
+                <div class="latest-packet"><span class="label">最新报文</span><strong id="wifiText">尚未收到 WiFi 数据</strong><div class="packet-stats"><span>累计 <b id="wifiPacketCount">0</b></span><span>RSSI <b id="wifiRssi">—</b></span><span>时间 <b id="wifiTime">—</b></span></div><div class="hex-view blue"><span>HEX</span><code id="wifiHex">—</code></div></div>
+                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="wifiHistory" class="history-list"><div class="history-empty">等待 WiFi 模块发送数据…</div></div></div>
+              </div>
+            </article>
+          </section>
+
+          <section class="content-view" data-view-panel="adas">
+            <div class="page-heading"><div><p class="eyebrow">AUTONOMOUS DRIVING DOMAIN</p><h1>智能驾驶域安全</h1><p>感知摄像头、车辆位置、行驶速度与数据链路安全状态监测</p></div><div class="domain-summary"><span class="status-chip active">前视摄像头</span><span class="status-chip" id="navigationHeadingStatus">定位待接入</span><span class="status-chip">完整性监测</span></div></div>
+            <div class="adas-layout">
+              <article class="panel video-panel">
+                <div class="video-head"><div class="camera-title"><span class="camera-indicator"></span><div><strong>前视主摄像头 · CAM-FRONT-01</strong><small id="streamProfile">等待视频参数</small></div></div><div class="video-actions"><button id="snapshotButton">保存画面</button><button id="fullscreenButton">全屏查看</button></div></div>
+                <div class="video-stage" id="videoStage"><canvas id="videoCanvas" aria-label="车辆实时视频"></canvas><div class="scan-line"></div><div class="video-placeholder" id="videoPlaceholder"><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待车端视频流</strong><p>启动 run_vehicle.py 后画面将在此自动出现</p></div><div class="video-overlay top-left"><span class="live-tag"><i></i> LIVE</span><span id="sequenceTag">SEQ —</span></div><div class="video-overlay bottom-left"><span id="overlayVehicle">VHC-001</span><span id="overlayTimestamp">--:--:--.---</span></div><div class="video-overlay bottom-right"><span id="overlayTransport">WS / JPEG</span></div></div>
+              </article>
+              <aside class="metrics-column">
+                <article class="metric-card panel accent"><div class="metric-label"><span>端到端延迟</span><i>LATENCY</i></div><div class="metric-value"><strong id="latencyValue">—</strong><small>ms</small></div><div class="metric-foot"><span id="latencyState" class="good">等待测量</span><span>连续播放优先</span></div></article>
+                <article class="metric-card panel"><div class="metric-label"><span>云端接收帧率</span><i>FPS</i></div><div class="metric-value"><strong id="fpsValue">—</strong><small>FPS</small></div><div class="spark-bars" id="fpsBars"></div></article>
+                <article class="metric-card panel"><div class="metric-label"><span>上行传输速率</span><i>UPLINK</i></div><div class="metric-value"><strong id="bitrateValue">—</strong><small>Mbps</small></div><div class="metric-foot"><span id="qualityLabel">JPEG Q—</span><span id="frameSizeLabel">— KB/帧</span></div></article>
+                <article class="metric-card panel compact"><div class="health-row"><span>链路健康度</span><strong id="healthValue">—</strong></div><div class="health-track"><i id="healthBar"></i></div><div class="health-details"><span>丢帧 <b id="dropValue">—</b></span><span>观看端 <b id="viewerValue">0</b></span><span>重连 <b id="reconnectValue">0</b></span></div></article>
+              </aside>
+            </div>
+            <article class="panel vehicle-location-panel">
+              <div class="panel-title location-title">
+                <div><p class="eyebrow">LIVE VEHICLE LOCATION</p><h2>车辆实时位置与速度</h2></div>
+                <div class="location-title-meta"><span id="navigationDataSourceTag" class="tag">数据源：边缘端 GNSS / CAN</span><span id="navigationStatus" class="tag">等待定位数据</span><span id="navigationAge">—</span></div>
+              </div>
+              <div class="vehicle-location-layout">
+                <div class="map-shell">
+                  <div id="vehicleMap" class="vehicle-map" aria-label="车辆实时位置地图"></div>
+                  <div id="mapPlaceholder" class="map-placeholder"><i></i><strong>正在准备高德地图</strong><p>优先显示边缘端定位；未接入GNSS时可临时使用访问手机定位</p></div>
+                  <div class="map-coordinate-chip"><span>坐标</span><b id="coordinateSystem">—</b></div>
+                </div>
+                <aside class="driving-telemetry" aria-label="车辆实时行驶数据">
+                  <div class="speed-display">
+                    <div class="speed-ring"><span><strong id="vehicleSpeed">—</strong><small>km/h</small></span></div>
+                    <div><p>实时车速</p><b id="speedSource">等待边缘端</b></div>
+                  </div>
+                  <div class="location-data-grid">
+                    <div><span>经度 LONGITUDE</span><strong id="vehicleLongitude">—</strong></div>
+                    <div><span>纬度 LATITUDE</span><strong id="vehicleLatitude">—</strong></div>
+                    <div><span>航向 HEADING</span><strong id="vehicleHeading">—</strong></div>
+                    <div><span>定位精度 ACCURACY</span><strong id="vehicleAccuracy">—</strong></div>
+                  </div>
+                  <div class="navigation-source-row"><span><i id="navigationPulse"></i><b id="navigationSource">GNSS / CAN 数据待接入</b></span><time id="navigationTime">--:--:--</time></div>
+                </aside>
+              </div>
+            </article>
+            <div class="adas-bottom">
+              <article class="panel trend-panel"><div class="panel-title"><div><p class="eyebrow">LINK TREND</p><h2>视频链路趋势</h2></div><div class="chart-legend"><span><i></i>延迟</span><span><i></i>速率</span></div></div><div class="chart-wrap"><canvas id="trendChart" aria-label="延迟与码率趋势图"></canvas></div></article>
+              <article class="panel integrity-panel"><div class="panel-title"><div><p class="eyebrow">SECURITY CHECK</p><h2>感知链路安全检查</h2></div><span class="tag plan">待接入</span></div><div class="check-list"><div><i>01</i><span><b>视频流完整性校验</b><small>检测帧替换、重放与异常中断</small></span><em>规划中</em></div><div><i>02</i><span><b>摄像头身份认证</b><small>验证设备身份与链路可信状态</small></span><em>规划中</em></div><div><i>03</i><span><b>感知数据异常检测</b><small>识别干扰、欺骗与数据漂移</small></span><em>规划中</em></div></div></article>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="chassis"><div class="domain-page" data-domain-page="chassis"></div></section>
+          <section class="content-view" data-view-panel="powertrain"><div class="domain-page" data-domain-page="powertrain"></div></section>
+          <section class="content-view" data-view-panel="body"><div class="domain-page" data-domain-page="body"></div></section>
+          <section class="content-view" data-view-panel="cockpit"><div class="domain-page" data-domain-page="cockpit"></div></section>
+
+          <section class="content-view" data-view-panel="attack">
+            <div class="page-heading"><div><p class="eyebrow red">ATTACK VALIDATION LAB</p><h1>攻击验证中心</h1><p>面向车辆各域的安全测试场景编排与授权验证</p></div><div class="notice-pill">实验能力尚未接入 · 当前仅展示规划</div></div>
+            <div class="capability-banner attack-banner"><div><i>!</i><span><strong>受控攻击验证区</strong><p>所有测试能力接入后应仅在授权车辆、隔离环境和明确测试窗口内运行。</p></span></div><button disabled>新建验证任务</button></div>
+            <div class="scenario-grid">
+              <article><div class="scenario-top"><i>CAN</i><span class="risk-tag high">高风险</span></div><h2>车载网络模糊测试</h2><p>CAN 报文注入、信号边界变异与异常响应观测</p><div class="scenario-meta"><span>目标：底盘 / 动力 / 车身</span><b>引擎待接入</b></div><button disabled>配置场景</button></article>
+              <article><div class="scenario-top"><i>UDS</i><span class="risk-tag high">高风险</span></div><h2>诊断服务安全验证</h2><p>会话控制、安全访问、刷写流程与重放风险验证</p><div class="scenario-meta"><span>目标：全车 ECU</span><b>引擎待接入</b></div><button disabled>配置场景</button></article>
+              <article><div class="scenario-top"><i>RF</i><span class="risk-tag medium">中风险</span></div><h2>无线链路安全评估</h2><p>WiFi / BLE 发现、认证、弱口令与协议健壮性检查</p><div class="scenario-meta"><span>目标：车联网 / 座舱</span><b>模块待接入</b></div><button disabled>配置场景</button></article>
+              <article><div class="scenario-top"><i>API</i><span class="risk-tag medium">中风险</span></div><h2>车云接口安全测试</h2><p>身份鉴权、越权访问、数据重放与接口输入验证</p><div class="scenario-meta"><span>目标：T-Box / 云平台</span><b>模块待接入</b></div><button disabled>配置场景</button></article>
+              <article><div class="scenario-top"><i>IVI</i><span class="risk-tag medium">中风险</span></div><h2>座舱应用安全分析</h2><p>应用权限、组件暴露、敏感数据与供应链风险检查</p><div class="scenario-meta"><span>目标：智能座舱</span><b>工具待接入</b></div><button disabled>配置场景</button></article>
+              <article><div class="scenario-top"><i>OTA</i><span class="risk-tag low">低风险</span></div><h2>升级链路验证</h2><p>升级包签名、版本回滚、传输完整性与失败恢复检查</p><div class="scenario-meta"><span>目标：OTA 系统</span><b>模块待接入</b></div><button disabled>配置场景</button></article>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="defense">
+            <div class="page-heading"><div><p class="eyebrow purple-text">DETECTION &amp; RESPONSE</p><h1>检测防御中心</h1><p>车端检测、网关防护、云端分析与事件响应能力建设</p></div><div class="notice-pill purple">防御引擎尚未接入 · 当前仅展示规划</div></div>
+            <div class="defense-kpis"><article><span>检测规则</span><strong>0</strong><small>待配置</small></article><article><span>防护策略</span><strong>0</strong><small>待下发</small></article><article><span>覆盖域控</span><strong>0/7</strong><small>建设中</small></article><article><span>自动处置</span><strong>OFF</strong><small>未启用</small></article></div>
+            <div class="defense-layout">
+              <article class="panel defense-matrix"><div class="panel-title"><div><p class="eyebrow">DEFENSE MATRIX</p><h2>纵深防御能力矩阵</h2></div><span class="tag plan">规划态</span></div><div class="matrix-table"><div class="matrix-row head"><span>防护层级</span><span>资产发现</span><span>异常检测</span><span>访问控制</span><span>响应处置</span></div><div class="matrix-row"><b>车云边界</b><span class="ready">已接入</span><span>待配置</span><span>基础鉴权</span><span>待接入</span></div><div class="matrix-row"><b>无线通信</b><span class="ready">已接入</span><span>待接入</span><span>待接入</span><span>待接入</span></div><div class="matrix-row"><b>中央网关</b><span>待接入</span><span>待接入</span><span>待接入</span><span>待接入</span></div><div class="matrix-row"><b>域控制器</b><span>待接入</span><span>待接入</span><span>待接入</span><span>待接入</span></div><div class="matrix-row"><b>车载网络</b><span>待接入</span><span>待接入</span><span>待接入</span><span>待接入</span></div></div></article>
+              <article class="panel defense-stack"><div class="panel-title"><div><p class="eyebrow">PLANNED MODULES</p><h2>待建设防御模块</h2></div></div><div class="stack-list"><div><i>IDS</i><span><b>车载网络入侵检测</b><small>CAN / 以太网异常报文识别</small></span><em>未接入</em></div><div><i>FW</i><span><b>安全网关策略</b><small>跨域流量访问控制与审计</small></span><em>未接入</em></div><div><i>OTA</i><span><b>安全升级校验</b><small>签名、版本与完整性验证</small></span><em>未接入</em></div><div><i>EDR</i><span><b>车端运行时防护</b><small>进程、文件与行为异常监测</small></span><em>未接入</em></div></div></article>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="events">
+            <div class="page-heading"><div><p class="eyebrow">SECURITY EVENTS</p><h1>安全事件中心</h1><p>统一汇聚检测告警、攻击验证结果与响应处置记录</p></div><div class="domain-summary"><span class="status-chip active">实时监听</span><span class="status-chip">0 条事件</span></div></div>
+            <div class="event-toolbar"><div class="fake-search">⌕ <span>搜索事件 ID、车辆或资产</span></div><div><button class="filter-active">全部</button><button>高危</button><button>中危</button><button>低危</button></div></div>
+            <article class="panel event-table"><div class="event-table-head"><span>事件时间</span><span>风险等级</span><span>事件类型</span><span>目标资产</span><span>来源模块</span><span>处置状态</span></div><div class="event-table-empty"><div class="empty-radar"><i></i></div><strong>暂无安全事件</strong><p>攻击验证或检测防御模块接入后，告警将在这里统一呈现。</p></div></article>
+          </section>
+        </div>
+      </main>
+    </div>
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
