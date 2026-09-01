@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Runtime output
+navigation_live.json
+navigation_live.json.tmp
+*_udp_log.txt
+*.log
+
+# Local environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+conda enviroments/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db

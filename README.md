@@ -14,6 +14,7 @@
 ## 1. 本机快速演示
 
 使用指定环境：`D:\Anconda\envs\TM\python.exe`。
+环境安装包：链接:`https://pan.baidu.com/s/1flLG-GHmJnyapGaTVPzGBA` 提取码: uh28 
 
 ### PyCharm 直接运行（推荐）
 
@@ -120,13 +121,23 @@ python run_cloud.py
 }
 ```
 
-有两种车端接入方式：
+车端导航支持以下接入方式：
 
 1. Jetson 运行 `Navigation_Module_Board.py`，它把边缘端GNSS/CAN数据原子写入同目录的 `navigation_live.json`。`run_vehicle_jetson.py` 默认每秒读取并随现有WebSocket遥测上传，无需额外配置文件路径。
-2. GNSS串口输出标准NMEA时运行：`python3 Navigation_Module_Board.py --mode serial --serial-device /dev/ttyUSB0 --baud 9600`。
+2. EC20 双串口模式直接运行 `python3 Navigation_Module_Board.py --mode serial`。程序通过 `/dev/ttyUSB2` 发送 `AT`、`AT+QGPSCFG="outport","usbnmea"`、`AT+QGPS?` 和必要的 `AT+QGPS=1`，同时从 `/dev/ttyUSB1` 持续读取 GGA、RMC、GNS、VTG；退出时发送 `AT+QGPSEND`。终端会标明报文是有效定位、尚未定位、校验失败还是辅助数据。NMEA 不落盘为 TXT，只有取得有效经纬度后才会创建并更新 `navigation_live.json`。
 3. GNSS/CAN适配程序输出JSON时运行：`python3 Navigation_Module_Board.py --mode udp`，然后向Jetson UDP 7000发送上面的JSON。允许GNSS先发送经纬度、CAN再单独发送 `{"speed_kph":42.6,"source":"EDGE-CAN"}`，模块会自动合并最新值。
 4. 没有真实设备时运行 `python3 Navigation_Module_Board.py --mode test`，可在地图上验证边缘端测试轨迹。测试模式使用Jetson生成的坐标，不读取手机或浏览器定位。
 5. 独立导航进程也可以鉴权调用 `POST /api/vehicles/{vehicle_id}/navigation`。请求体就是上面的JSON，`Authorization` 使用与车端一致的Bearer Token。
+
+EC20 默认使用 115200 波特率。设备名或速率不同时可覆盖：
+
+```bash
+python3 Navigation_Module_Board.py --mode serial \
+  --at-device /dev/ttyUSB2 --at-baud 115200 \
+  --nmea-device /dev/ttyUSB1 --nmea-baud 115200
+```
+
+旧参数 `--serial-device` 和 `--baud` 仍可使用，分别等价于 `--nmea-device` 和 `--nmea-baud`。
 
 实际车速优先使用导航数据中的 `speed_kph`；未提供时，页面会回退显示底盘域 `domains.chassis.speed_kph`。位置超过 10 秒未更新会明确标记为过期。
 
@@ -176,3 +187,38 @@ Content-Type: application/json
 - `POST /api/vehicles/{vehicle_id}/bluetooth/test`：网页随机蓝牙测试数据入口。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 数据上传入口，需要 Bearer Token。
 - `POST /api/vehicles/{vehicle_id}/wifi/test`：网页随机 WiFi 测试数据入口。
+
+## 团队提交规范
+
+团队成员上传代码前应当写清楚 commit 日志，说明本次提交做了什么、影响了哪些模块。
+
+推荐格式：
+
+```text
+<type>: <简短说明>
+```
+
+常用 `type`：
+
+- `feat`：新增功能
+- `fix`：修复问题
+- `docs`：文档更新
+- `refactor`：代码重构
+- `test`：测试相关
+- `chore`：依赖、脚本、配置等杂项
+
+示例：
+
+```text
+feat: add lubancat edge sender skeleton
+docs: add cpolar deployment notes
+fix: handle websocket reconnect error
+```
+
+不要使用含义不清的提交信息，例如：
+
+```text
+update
+test
+修改
+```

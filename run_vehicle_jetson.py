@@ -178,7 +178,7 @@ def main():
         "--navigation-file", NAVIGATION_FILE,
     ]
 
-    from h264_vehicle_agent2 import main as run_agent
+    from h264_vehicle_agent import main as run_agent
 
     print("=" * 68)
     print("V-SHIELD Jetson TX2 车端正在启动")

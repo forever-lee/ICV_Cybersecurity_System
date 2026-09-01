@@ -7,7 +7,7 @@ writes the latest vehicle navigation sample for ``h264_vehicle_agent.py``.
 
 Examples:
     python3 Navigation_Module_Board.py --mode udp
-    python3 Navigation_Module_Board.py --mode serial --serial-device /dev/ttyUSB0
+    python3 Navigation_Module_Board.py --mode serial
     python3 Navigation_Module_Board.py --mode test
 """
 
@@ -22,10 +22,79 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUTPUT = os.path.join(BASE_DIR, "navigation_live.json")
+DEFAULT_AT_DEVICE = "/dev/ttyUSB2"
+DEFAULT_NMEA_DEVICE = "/dev/ttyUSB1"
+DEFAULT_SERIAL_BAUD = 115200
+AT_COMMAND_TIMEOUT_SECONDS = 5.0
+
+
+class GnssAtError(RuntimeError):
+    """Raised when the EC20 rejects an AT command or does not answer in time."""
 
 
 def now_ms():
     return int(time.time() * 1000)
+
+
+def serial_text(raw):
+    if isinstance(raw, bytes):
+        return raw.decode("ascii", "replace").strip()
+    return str(raw or "").strip()
+
+
+def send_at_command(port, command, timeout=AT_COMMAND_TIMEOUT_SECONDS):
+    """Send one EC20 AT command and return response lines preceding ``OK``."""
+    try:
+        port.reset_input_buffer()
+    except (AttributeError, OSError):
+        pass
+
+    try:
+        port.write((command + "\r\n").encode("ascii"))
+        port.flush()
+    except (OSError, ValueError) as exc:
+        raise GnssAtError("AT命令发送失败 {}: {}".format(command, exc))
+
+    response = []
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while time.monotonic() < deadline:
+        try:
+            line = serial_text(port.readline())
+        except OSError as exc:
+            raise GnssAtError("AT响应读取失败 {}: {}".format(command, exc))
+        if not line or line == command:
+            continue
+        if line == "OK":
+            return response
+        if line == "ERROR" or line.startswith("+CME ERROR"):
+            raise GnssAtError("EC20拒绝命令 {}: {}".format(command, line))
+        response.append(line)
+    raise GnssAtError("等待EC20响应超时: {}".format(command))
+
+
+def parse_qgps_state(response):
+    for line in response:
+        if not line.startswith("+QGPS:"):
+            continue
+        value = line.split(":", 1)[1].strip()
+        if value in ("0", "1"):
+            return int(value)
+    raise GnssAtError("AT+QGPS?未返回有效GNSS状态: {}".format(", ".join(response)))
+
+
+def start_gnss_session(port, timeout=AT_COMMAND_TIMEOUT_SECONDS):
+    """Configure EC20 USB NMEA output and ensure a continuous GNSS session."""
+    send_at_command(port, "AT", timeout)
+    send_at_command(port, 'AT+QGPSCFG="outport","usbnmea"', timeout)
+    state = parse_qgps_state(send_at_command(port, "AT+QGPS?", timeout))
+    if state == 0:
+        send_at_command(port, "AT+QGPS=1", timeout)
+        return True
+    return False
+
+
+def stop_gnss_session(port, timeout=AT_COMMAND_TIMEOUT_SECONDS):
+    send_at_command(port, "AT+QGPSEND", timeout)
 
 
 def finite_number(value, minimum, maximum):
@@ -120,6 +189,48 @@ def nmea_coordinate(value, hemisphere):
     return coordinate
 
 
+def nmea_message_type(sentence):
+    sentence = sentence.strip()
+    if not sentence.startswith("$"):
+        return "UNKNOWN"
+    body = sentence[1:].split("*", 1)[0]
+    first_field = body.split(",", 1)[0]
+    return first_field[-3:].upper() if first_field else "UNKNOWN"
+
+
+def nmea_rejection_reason(sentence):
+    """Explain why a received NMEA sentence does not contain a usable fix."""
+    sentence = sentence.strip()
+    if not sentence:
+        return "空报文"
+    if not sentence.startswith("$"):
+        return "不是NMEA报文"
+    if not nmea_checksum_valid(sentence):
+        return "校验和错误"
+
+    fields = sentence[1:].split("*", 1)[0].split(",")
+    message_type = fields[0][-3:].upper() if fields else ""
+    if message_type == "RMC":
+        if len(fields) < 9:
+            return "RMC字段不完整"
+        if fields[2].upper() != "A":
+            return "RMC状态为{}，尚未定位".format(fields[2] or "空")
+        return "RMC经纬度无效"
+    if message_type == "GGA":
+        if len(fields) < 7:
+            return "GGA字段不完整"
+        return "GGA定位质量为{}，尚未定位".format(fields[6] or "0")
+    if message_type == "GNS":
+        if len(fields) < 7:
+            return "GNS字段不完整"
+        return "GNS模式为{}，尚未定位".format(fields[6] or "N")
+    if message_type == "VTG":
+        return "速度/航向报文，等待GGA、RMC或GNS经纬度"
+    if message_type in ("GSA", "GSV"):
+        return "卫星状态报文，不包含完整经纬度"
+    return "暂不支持的NMEA类型 {}".format(message_type or "UNKNOWN")
+
+
 def parse_nmea(sentence):
     sentence = sentence.strip()
     if not sentence or not nmea_checksum_valid(sentence):
@@ -163,6 +274,22 @@ def parse_nmea(sentence):
             "longitude": longitude,
             "coordinate_system": "WGS84",
             "source": "EDGE-GNSS-GGA",
+            "captured_at_ms": now_ms(),
+        }
+
+    if message_type == "GNS" and len(fields) >= 7:
+        mode = fields[6].upper()
+        if not mode or all(character == "N" for character in mode):
+            return None
+        latitude = nmea_coordinate(fields[2], fields[3].upper())
+        longitude = nmea_coordinate(fields[4], fields[5].upper())
+        if latitude is None or longitude is None:
+            return None
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "coordinate_system": "WGS84",
+            "source": "EDGE-GNSS-GNS",
             "captured_at_ms": now_ms(),
         }
 
@@ -257,18 +384,68 @@ def run_serial(args, state):
         import serial
     except ImportError:
         raise SystemExit("串口模式需要安装 pyserial：python3 -m pip install pyserial")
-    print("边缘GNSS串口：{} @ {}".format(args.serial_device, args.baud))
+
+    at_port = None
+    nmea_port = None
+    session_active = False
+    print("EC20 AT串口：{} @ {}".format(args.at_device, args.at_baud))
+    print("EC20 NMEA串口：{} @ {}".format(args.nmea_device, args.nmea_baud))
     print("输出文件：{}".format(state.output_path))
-    with serial.Serial(args.serial_device, args.baud, timeout=2) as port:
+    try:
+        at_port = serial.Serial(
+            args.at_device,
+            args.at_baud,
+            timeout=0.2,
+            write_timeout=2,
+        )
+        nmea_port = serial.Serial(args.nmea_device, args.nmea_baud, timeout=2)
+        started_now = start_gnss_session(at_port, args.at_timeout)
+        session_active = True
+        print("EC20 GNSS会话{}，开始接收NMEA".format(
+            "已启动" if started_now else "已经运行"
+        ))
         while True:
-            line = port.readline().decode("ascii", "replace")
-            if handle_text(state, line):
+            sentence = nmea_port.readline().decode("ascii", "replace").strip()
+            if not sentence:
+                continue
+            sample = parse_nmea(sentence)
+            message_type = nmea_message_type(sentence)
+            if sample is None:
+                print("NMEA {}：无有效GPS数据（{}）".format(
+                    message_type, nmea_rejection_reason(sentence)
+                ))
+                continue
+            if state.update(sample):
+                if "latitude" not in sample or "longitude" not in sample:
+                    print("NMEA {}：辅助数据已合并，等待/沿用最近有效位置".format(
+                        message_type
+                    ))
+                    continue
                 print(
-                    "GNSS更新 经度={:.6f} 纬度={:.6f} 速度={} km/h".format(
+                    "NMEA {}：有效GPS定位 经度={:.6f} 纬度={:.6f} "
+                    "速度={} km/h，已写入 {}".format(
+                        message_type,
                         state.values["longitude"], state.values["latitude"],
-                        state.values.get("speed_kph", "—")
+                        state.values.get("speed_kph", "—"), state.output_path
                     )
                 )
+            else:
+                print("NMEA {}：已接收辅助数据，等待有效经纬度".format(message_type))
+    except getattr(serial, "SerialException", OSError) as exc:
+        raise GnssAtError("EC20串口访问失败: {}".format(exc))
+    finally:
+        if session_active and at_port is not None:
+            try:
+                stop_gnss_session(at_port, args.at_timeout)
+                print("EC20 GNSS会话已结束")
+            except GnssAtError as exc:
+                print("警告：无法结束EC20 GNSS会话：{}".format(exc), file=sys.stderr)
+        for port in (nmea_port, at_port):
+            if port is not None:
+                try:
+                    port.close()
+                except OSError:
+                    pass
 
 
 def run_test_route(args, state):
@@ -299,8 +476,19 @@ def parse_args():
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--udp-host", default="0.0.0.0")
     parser.add_argument("--udp-port", type=int, default=7000)
-    parser.add_argument("--serial-device", default="/dev/ttyUSB0")
-    parser.add_argument("--baud", type=int, default=9600)
+    parser.add_argument("--at-device", default=DEFAULT_AT_DEVICE)
+    parser.add_argument("--at-baud", type=int, default=DEFAULT_SERIAL_BAUD)
+    parser.add_argument(
+        "--nmea-device", "--serial-device", dest="nmea_device",
+        default=DEFAULT_NMEA_DEVICE,
+        help="EC20 USB NMEA port; --serial-device is a compatibility alias",
+    )
+    parser.add_argument(
+        "--nmea-baud", "--baud", dest="nmea_baud", type=int,
+        default=DEFAULT_SERIAL_BAUD,
+        help="EC20 USB NMEA baud rate; --baud is a compatibility alias",
+    )
+    parser.add_argument("--at-timeout", type=float, default=AT_COMMAND_TIMEOUT_SECONDS)
     parser.add_argument("--test-latitude", type=float, default=23.1291)
     parser.add_argument("--test-longitude", type=float, default=113.2644)
     return parser.parse_args()
@@ -318,6 +506,9 @@ def main():
             run_udp(args, state)
     except KeyboardInterrupt:
         print("边缘导航采集已停止")
+    except GnssAtError as exc:
+        print("边缘GNSS启动或采集失败：{}".format(exc), file=sys.stderr)
+        return 1
     return 0
 
 
