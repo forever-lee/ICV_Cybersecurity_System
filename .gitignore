@@ -8,6 +8,7 @@ navigation_live.json
 navigation_live.json.tmp
 *_udp_log.txt
 *.log
+data/*.db
 
 # Local environments
 .env
