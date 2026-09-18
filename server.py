@@ -8,6 +8,7 @@ import math
 import os
 import random
 import secrets
+import sqlite3
 import time
 from collections import deque
 from pathlib import Path
@@ -44,12 +45,73 @@ AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
 FMP4_BUFFER_SEGMENTS = max(30, int(os.getenv("FMP4_BUFFER_SEGMENTS", "300")))
+BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
+BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("vehicle-cloud")
+
+
+def init_body_database():
+    BODY_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS body_frames (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vehicle_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                can_id TEXT NOT NULL,
+                dlc INTEGER NOT NULL,
+                data_hex TEXT NOT NULL,
+                signals_json TEXT NOT NULL,
+                captured_at_ms INTEGER NOT NULL,
+                received_at_ms INTEGER NOT NULL,
+                valid INTEGER NOT NULL,
+                invalid_reason TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                interface_path TEXT NOT NULL,
+                source TEXT NOT NULL,
+                is_test INTEGER NOT NULL
+            )"""
+        )
+        connection.execute(
+            """CREATE TABLE IF NOT EXISTS body_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vehicle_id TEXT NOT NULL,
+                event_key TEXT NOT NULL,
+                level TEXT NOT NULL,
+                title TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL
+            )"""
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_body_frames_vehicle_time ON body_frames(vehicle_id, received_at_ms DESC)"
+        )
+
+
+def persist_body_frame(vehicle_id, frame):
+    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
+        connection.execute(
+            """INSERT INTO body_frames (
+                vehicle_id, sequence, can_id, dlc, data_hex, signals_json,
+                captured_at_ms, received_at_ms, valid, invalid_reason,
+                device_id, interface_path, source, is_test
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                vehicle_id, frame["sequence"], frame["can_id"], frame["dlc"], frame["data_hex"],
+                json.dumps(frame.get("signal_changes", {}), ensure_ascii=False, separators=(",", ":")),
+                frame["vehicle_time_ms"], frame["cloud_receive_time_ms"], int(frame.get("valid", True)),
+                frame.get("invalid_reason", ""), frame.get("device_id", ""),
+                frame.get("interface_path", ""), frame.get("source", ""), int(frame.get("test", False)),
+            ),
+        )
+
+
+init_body_database()
 
 
 class VehicleState:
@@ -100,6 +162,10 @@ class VehicleState:
         self.wifi_last_seen_ms = 0
         self.wifi_latest = None
         self.wifi_history = deque(maxlen=60)
+        self.body_sequence = 0
+        self.body_frame_history = deque(maxlen=80)
+        self.body_alerts = deque(maxlen=40)
+        self.body_last_seen_ms = 0
         self.navigation = None
 
     def online(self):
@@ -107,6 +173,8 @@ class VehicleState:
 
     def snapshot(self):
         data = dict(self.metrics)
+        domains = dict(self.domains)
+        domains["body"] = self.body_snapshot()
         data.update(
             {
                 "vehicle_id": self.vehicle_id,
@@ -116,7 +184,7 @@ class VehicleState:
                 "received_frames": self.received_frames,
                 "cloud_dropped_frames": self.cloud_dropped_frames,
                 "invalid_frames": self.invalid_frames,
-                "domains": self.domains,
+                "domains": domains,
                 "bluetooth": self.bluetooth_snapshot(),
                 "wifi": self.wifi_snapshot(),
                 "navigation": self.navigation_snapshot(),
@@ -161,6 +229,34 @@ class VehicleState:
             "latest": self.wifi_latest,
             "history": list(self.wifi_history)[:12],
         }
+
+    def body_snapshot(self):
+        body = dict(self.domains.get("body") or {})
+        age_ms = now_ms() - self.body_last_seen_ms if self.body_last_seen_ms else None
+        online = age_ms is not None and age_ms <= BODY_DATA_TIMEOUT_SECONDS * 1000
+        link = dict(body.get("link") or {})
+        if not online:
+            link.update({"mcu_status": "timeout", "edge_status": "timeout", "upload_status": "timeout"})
+        link.update({
+            "cloud_status": "online" if online else "timeout",
+            "last_upload_at_ms": self.body_last_seen_ms or None,
+            "age_ms": age_ms,
+        })
+        body["status"] = "online" if online else "offline"
+        body["connected"] = online
+        body["link"] = link
+        alerts = list(self.body_alerts)
+        if self.body_last_seen_ms and not online:
+            alerts.insert(0, {
+                "key": "link:timeout", "level": "critical", "title": "车身数据超时",
+                "detail": "S32K344或Jetson上传链路已超过{}秒无数据".format(BODY_DATA_TIMEOUT_SECONDS),
+                "created_at_ms": self.body_last_seen_ms + int(BODY_DATA_TIMEOUT_SECONDS * 1000),
+            })
+        body["alerts"] = alerts[:12]
+        body["frame_count"] = self.body_sequence
+        body["latest_frame"] = self.body_frame_history[0] if self.body_frame_history else None
+        body["frame_history"] = list(self.body_frame_history)[:8]
+        return body
 
 
 class Registry:
@@ -239,6 +335,237 @@ def normalize_navigation(payload):
         "captured_at_ms": captured_at_ms,
         "received_at_ms": now_ms(),
     }
+
+
+BODY_SIGNAL_GROUPS = {
+    "door": {
+        "fields": ("Door_FL", "Door_FR", "Door_RL", "Door_RR"),
+        "can_id": "0x351", "frame_name": "BodyDoorStatus",
+        "pdu_name": "BodyDoorStatusPdu", "cycle_ms": 100,
+    },
+    "lock": {
+        "fields": ("CentralLockState",),
+        "can_id": "0x352", "frame_name": "CentralLockStatus",
+        "pdu_name": "CentralLockStatusPdu", "cycle_ms": 500,
+    },
+    "light": {
+        "fields": ("LowBeam", "HighBeam", "TurnLeft", "TurnRight", "Hazard"),
+        "can_id": "0x353", "frame_name": "BodyLightStatus",
+        "pdu_name": "BodyLightStatusPdu", "cycle_ms": 50,
+    },
+}
+
+BODY_TEST_ACTIONS = {
+    "door_fl": ("Door_FL", "左前门"),
+    "door_fr": ("Door_FR", "右前门"),
+    "door_rl": ("Door_RL", "左后门"),
+    "door_rr": ("Door_RR", "右后门"),
+    "central_lock": ("CentralLockState", "中央门锁"),
+    "low_beam": ("LowBeam", "近光灯"),
+    "high_beam": ("HighBeam", "远光灯"),
+    "turn_left": ("TurnLeft", "左转向灯"),
+    "turn_right": ("TurnRight", "右转向灯"),
+    "hazard": ("Hazard", "双闪"),
+}
+
+
+def body_switch(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return str(value).strip().lower() in {"1", "true", "on", "open", "opened", "active"}
+
+
+def body_payload_bytes(body, sequence, group_name):
+    doors = sum(
+        (1 << index) if body_switch(body.get(field, False)) else 0
+        for index, field in enumerate(BODY_SIGNAL_GROUPS["door"]["fields"])
+    ) if group_name == "door" else 0
+    lock = 1 if str(body.get("CentralLockState", "unlocked")).lower() == "locked" else 0
+    if group_name != "lock":
+        lock = 0
+    lights = sum(
+        (1 << index) if body_switch(body.get(field, False)) else 0
+        for index, field in enumerate(BODY_SIGNAL_GROUPS["light"]["fields"])
+    ) if group_name == "light" else 0
+    values = [doors, lock, lights, 0, 0, 0, sequence & 0x0F]
+    values.append(sum(values) & 0xFF)
+    return " ".join("{:02X}".format(value) for value in values)
+
+
+def extract_body_signals(payload):
+    signal_payload = payload.get("signals") if isinstance(payload.get("signals"), dict) else {}
+    values, validity, reasons = {}, {}, {}
+    for group in BODY_SIGNAL_GROUPS.values():
+        for field in group["fields"]:
+            if field in signal_payload:
+                raw = signal_payload[field]
+            elif field in payload:
+                raw = payload[field]
+            else:
+                continue
+            if isinstance(raw, dict):
+                values[field] = raw.get("value")
+                validity[field] = bool(raw.get("valid", True))
+                reasons[field] = str(raw.get("reason", ""))[:120]
+            else:
+                values[field] = raw
+                validity[field] = bool(payload.get("valid", True))
+                reasons[field] = str(payload.get("invalid_reason", ""))[:120]
+    return values, validity, reasons
+
+
+def normalize_raw_can_frame(payload, fallback_can_id, fallback_data_hex):
+    raw = payload.get("raw_frame") if isinstance(payload.get("raw_frame"), dict) else payload
+    value = raw.get("can_id", fallback_can_id)
+    try:
+        can_id_number = int(str(value), 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="can_id must be a decimal or hexadecimal integer")
+    if not 0 <= can_id_number <= 0x1FFFFFFF:
+        raise HTTPException(status_code=400, detail="can_id is outside the CAN/CAN-FD range")
+    data_hex = str(raw.get("data_hex", fallback_data_hex)).replace("0x", "").replace(",", " ").strip()
+    try:
+        data = bytes.fromhex(data_hex)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="data_hex must contain hexadecimal bytes")
+    try:
+        dlc = int(raw.get("dlc", len(data)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="dlc must be an integer")
+    if not 0 <= dlc <= 64 or len(data) != dlc:
+        raise HTTPException(status_code=400, detail="dlc must match the number of data_hex bytes")
+    return "0x{:X}".format(can_id_number), dlc, " ".join("{:02X}".format(item) for item in data)
+
+
+def body_alerts(body, validity, reasons, timestamp):
+    alerts = []
+    for field, valid in validity.items():
+        if not valid:
+            alerts.append({
+                "key": "invalid:{}".format(field), "level": "warning", "title": "信号无效",
+                "detail": "{} {}".format(field, reasons.get(field) or "未通过有效性校验"),
+                "created_at_ms": timestamp,
+            })
+    if str(body.get("can_status", "normal")).lower() not in {"normal", "ok", "online", "active"}:
+        alerts.append({
+            "key": "can:abnormal", "level": "critical", "title": "CAN通信异常",
+            "detail": "当前CAN状态：{}".format(body.get("can_status")), "created_at_ms": timestamp,
+        })
+    door_open = any(body_switch(body.get(field, False)) for field in BODY_SIGNAL_GROUPS["door"]["fields"])
+    if str(body.get("CentralLockState", "")).lower() == "locked" and door_open:
+        alerts.append({
+            "key": "conflict:locked-door-open", "level": "warning", "title": "车门状态冲突",
+            "detail": "中央门锁已锁止，但仍检测到开启车门", "created_at_ms": timestamp,
+        })
+    if body_switch(body.get("Hazard", False)) and not (
+        body_switch(body.get("TurnLeft", False)) and body_switch(body.get("TurnRight", False))
+    ):
+        alerts.append({
+            "key": "conflict:hazard", "level": "warning", "title": "灯光状态冲突",
+            "detail": "双闪开启时左右转向灯状态不一致", "created_at_ms": timestamp,
+        })
+    return alerts
+
+
+def record_body_update(state, payload, is_test=False):
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body payload must be an object")
+    previous = dict(state.domains.get("body") or {})
+    received_at_ms = now_ms()
+    try:
+        captured_at_ms = int(payload.get("captured_at_ms") or received_at_ms)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="captured_at_ms must be an integer")
+    if captured_at_ms <= 0 or captured_at_ms > received_at_ms + 60000:
+        raise HTTPException(status_code=400, detail="captured_at_ms is outside the accepted range")
+
+    reported_fields, validity, invalid_reasons = extract_body_signals(payload)
+    body = dict(previous)
+    changed_at = dict(previous.get("signal_changed_at_ms") or {})
+    for field, value in reported_fields.items():
+        if previous.get(field) != value:
+            changed_at[field] = captured_at_ms
+        body[field] = value
+    link_input = payload.get("link") if isinstance(payload.get("link"), dict) else {}
+    source = str(payload.get("source", previous.get("source", "S32K344-CAN")))[:80]
+    interface_path = str(payload.get("interface_path", link_input.get(
+        "interface_path", "S32K344/CAN → Ethernet → Jetson → HTTPS"
+    )))[:160]
+    body.update({
+        "status": "online",
+        "can_status": payload.get("can_status", previous.get("can_status", "normal")),
+        "captured_at_ms": captured_at_ms,
+        "updated_at_ms": received_at_ms,
+        "source": source,
+        "device_id": str(payload.get("device_id", previous.get("device_id", "S32K344-001")))[:64],
+        "signal_validity": dict(previous.get("signal_validity") or {}, **validity),
+        "signal_invalid_reasons": dict(previous.get("signal_invalid_reasons") or {}, **invalid_reasons),
+        "signal_changed_at_ms": changed_at,
+        "latest_change_at_ms": max(changed_at.values()) if changed_at else captured_at_ms,
+        "link": {
+            "mcu_status": str(link_input.get("mcu_status", "online"))[:24],
+            "edge_status": str(link_input.get("edge_status", "online"))[:24],
+            "upload_status": str(link_input.get("upload_status", "online"))[:24],
+            "edge_received_at_ms": int(link_input.get("edge_received_at_ms", received_at_ms)),
+            "interface_path": interface_path,
+        },
+        "data_mode": "test" if is_test else "real",
+    })
+    for transient in ("frame_history", "latest_frame", "frame_count", "alerts"):
+        body.pop(transient, None)
+    state.domains["body"] = body
+    state.body_last_seen_ms = received_at_ms
+
+    alerts = body_alerts(body, body["signal_validity"], body["signal_invalid_reasons"], received_at_ms)
+    state.body_alerts.clear()
+    state.body_alerts.extend(alerts)
+    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
+        for alert in alerts:
+            connection.execute(
+                "INSERT INTO body_events (vehicle_id,event_key,level,title,detail,created_at_ms) VALUES (?,?,?,?,?,?)",
+                (state.vehicle_id, alert["key"], alert["level"], alert["title"], alert["detail"], alert["created_at_ms"]),
+            )
+
+    created_frames = []
+    raw_supplied = isinstance(payload.get("raw_frame"), dict) or "can_id" in payload or "data_hex" in payload
+    groups = []
+    if raw_supplied:
+        profile = next((item for item in BODY_SIGNAL_GROUPS.values() if item["can_id"].lower() == str(
+            (payload.get("raw_frame") or payload).get("can_id", "")
+        ).lower()), None)
+        groups = [("raw", profile or {"can_id": "0x0", "frame_name": "UnknownBodyFrame", "cycle_ms": 0}, reported_fields)]
+    else:
+        for group_name, profile in BODY_SIGNAL_GROUPS.items():
+            values = {key: value for key, value in reported_fields.items() if key in profile["fields"]}
+            if values:
+                groups.append((group_name, profile, values))
+
+    for group_name, profile, group_values in groups:
+        state.body_sequence += 1
+        fallback_hex = body_payload_bytes(body, state.body_sequence, group_name) if group_name != "raw" else ""
+        can_id, dlc, data_hex = normalize_raw_can_frame(payload, profile["can_id"], fallback_hex)
+        frame_valid = bool(payload.get("valid", True)) and all(validity.get(key, True) for key in group_values)
+        frame = {
+            "sequence": state.body_sequence,
+            "event": " / ".join(group_values.keys()) or "RAW_FRAME",
+            "can_id": can_id,
+            "frame_name": str((payload.get("raw_frame") or payload).get("frame_name", profile["frame_name"]))[:64],
+            "cycle_ms": int((payload.get("raw_frame") or payload).get("cycle_ms", profile.get("cycle_ms", 0)) or 0),
+            "send_type": str((payload.get("raw_frame") or payload).get("send_type", "周期+事件触发"))[:32],
+            "dlc": dlc, "data_hex": data_hex, "signal_changes": group_values,
+            "vehicle_time_ms": captured_at_ms, "cloud_receive_time_ms": received_at_ms,
+            "latency_ms": max(0, received_at_ms - captured_at_ms),
+            "valid": frame_valid,
+            "invalid_reason": "" if frame_valid else str(payload.get("invalid_reason", "信号或报文有效性校验失败"))[:160],
+            "device_id": body["device_id"], "interface_path": interface_path,
+            "source": source, "test": bool(is_test),
+        }
+        state.body_frame_history.appendleft(frame)
+        persist_body_frame(state.vehicle_id, frame)
+        created_frames.append(frame)
+    return state.body_snapshot(), created_frames
 
 
 def login_page():
@@ -341,6 +668,28 @@ async def vehicle_history(vehicle_id: str):
     return {"vehicle_id": vehicle_id, "samples": list(registry.get(vehicle_id).history)}
 
 
+@app.get("/api/vehicles/{vehicle_id}/body/history")
+async def body_history(vehicle_id: str, limit: int = 100):
+    vehicle_id = normalize_vehicle_id(vehicle_id)
+    limit = max(1, min(1000, int(limit)))
+    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(
+            """SELECT sequence,can_id,dlc,data_hex,signals_json,captured_at_ms,
+                      received_at_ms,valid,invalid_reason,device_id,interface_path,source,is_test
+               FROM body_frames WHERE vehicle_id=? ORDER BY received_at_ms DESC LIMIT ?""",
+            (vehicle_id, limit),
+        ).fetchall()
+    records = []
+    for row in rows:
+        record = dict(row)
+        record["signals"] = json.loads(record.pop("signals_json") or "{}")
+        record["valid"] = bool(record["valid"])
+        record["is_test"] = bool(record["is_test"])
+        records.append(record)
+    return {"vehicle_id": vehicle_id, "count": len(records), "frames": records}
+
+
 @app.post("/api/vehicles/{vehicle_id}/navigation")
 async def update_navigation(vehicle_id: str, request: Request):
     if bearer_token(request.headers) != INGEST_TOKEN:
@@ -366,8 +715,54 @@ async def update_domain(vehicle_id: str, domain: str, request: Request):
         raise HTTPException(status_code=400, detail="invalid JSON payload")
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="domain payload must be an object")
+    if domain == "body":
+        body, frames = record_body_update(state, payload)
+        return {
+            "accepted": True, "vehicle_id": state.vehicle_id, "domain": domain,
+            "body": body, "frames": frames,
+        }
     state.domains[domain] = dict(payload, updated_at_ms=now_ms(), status=payload.get("status", "active"))
     return {"accepted": True, "vehicle_id": state.vehicle_id, "domain": domain}
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/test")
+async def test_body_event(vehicle_id: str, request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    action = str(payload.get("action", "door_fl"))
+    if action not in BODY_TEST_ACTIONS:
+        raise HTTPException(status_code=400, detail="unsupported body test action")
+    state = registry.get(vehicle_id)
+    if (
+        (state.domains.get("body") or {}).get("data_mode") == "real"
+        and state.body_last_seen_ms
+        and now_ms() - state.body_last_seen_ms <= BODY_DATA_TIMEOUT_SECONDS * 1000
+    ):
+        raise HTTPException(status_code=409, detail="real body data is active; test controls are locked")
+    current = state.domains.get("body") or {}
+    field, label = BODY_TEST_ACTIONS[action]
+    if field == "CentralLockState":
+        value = "unlocked" if str(current.get(field, "unlocked")).lower() == "locked" else "locked"
+    else:
+        value = not body_switch(current.get(field, False))
+    update = {
+        field: value,
+        "status": "online",
+        "can_status": "normal",
+        "source": "页面联调模拟器",
+        "captured_at_ms": now_ms() - random.randint(12, 32),
+        "transport": {"protocol": "HTTP/JSON", "fragment_count": random.choice([1, 1, 1, 2])},
+    }
+    if action == "hazard":
+        update["TurnLeft"] = value
+        update["TurnRight"] = value
+    body, frames = record_body_update(state, update, is_test=True)
+    return {
+        "accepted": True, "vehicle_id": state.vehicle_id, "action": action,
+        "label": label, "value": value, "body": body, "frames": frames,
+    }
 
 
 def record_bluetooth_packet(state, payload, is_test=False):
