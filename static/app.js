@@ -131,6 +131,8 @@
           <div class="body-action-grid">
             <button data-body-action="door_fl"><i>门</i><span>左前门</span><small>开 / 关</small></button>
             <button data-body-action="door_fr"><i>门</i><span>右前门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rl"><i>门</i><span>左后门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rr"><i>门</i><span>右后门</span><small>开 / 关</small></button>
             <button data-body-action="central_lock"><i>锁</i><span>中央门锁</span><small>锁止 / 解锁</small></button>
             <button data-body-action="low_beam"><i>近</i><span>近光灯</span><small>ON / OFF</small></button>
             <button data-body-action="high_beam"><i>远</i><span>远光灯</span><small>ON / OFF</small></button>
@@ -184,8 +186,29 @@
               <span><b>右后门</b><small>Door_RR</small></span><em>未接入</em>
             </div>
             <div class="body-car-visual" aria-hidden="true">
-              <div class="body-car-shell"><i></i><i></i><span>BDC</span><small>BODY</small></div>
-              <b>车辆俯视状态</b>
+              <div class="body-car-model" data-body-car-model>
+                <span class="body-car-direction">车头</span>
+                <i class="body-beam body-beam-low left"></i>
+                <i class="body-beam body-beam-low right"></i>
+                <i class="body-beam body-beam-high left"></i>
+                <i class="body-beam body-beam-high right"></i>
+                <div class="body-car-shell">
+                  <span class="body-windshield front"></span>
+                  <span class="body-windshield rear"></span>
+                  <span class="body-car-cabin"><b>BDC</b><small>BODY</small></span>
+                  <i class="body-model-door fl" data-body-model-door="Door_FL"></i>
+                  <i class="body-model-door fr" data-body-model-door="Door_FR"></i>
+                  <i class="body-model-door rl" data-body-model-door="Door_RL"></i>
+                  <i class="body-model-door rr" data-body-model-door="Door_RR"></i>
+                  <i class="body-model-lamp headlamp left"></i>
+                  <i class="body-model-lamp headlamp right"></i>
+                  <i class="body-model-lamp turn front-left"></i>
+                  <i class="body-model-lamp turn front-right"></i>
+                  <i class="body-model-lamp turn rear-left"></i>
+                  <i class="body-model-lamp turn rear-right"></i>
+                </div>
+              </div>
+              <b>车辆模型实时状态</b>
             </div>
           </div>
         </article>
@@ -978,10 +1001,16 @@
     ];
     doors.forEach(([name, doorState]) => {
       const element = root.querySelector(`[data-body-door="${name}"]`);
-      if (!element) return;
-      element.classList.toggle("is-open", doorState === "OPEN");
-      element.classList.toggle("is-closed", doorState === "CLOSED");
-      element.querySelector("em").textContent = doorState === "OPEN" ? "开启" : doorState === "CLOSED" ? "关闭" : "未接入";
+      if (element) {
+        element.classList.toggle("is-open", doorState === "OPEN");
+        element.classList.toggle("is-closed", doorState === "CLOSED");
+        element.querySelector("em").textContent = doorState === "OPEN" ? "开启" : doorState === "CLOSED" ? "关闭" : "未接入";
+      }
+      const modelDoor = root.querySelector(`[data-body-model-door="${name}"]`);
+      if (modelDoor) {
+        modelDoor.classList.toggle("is-open", doorState === "OPEN");
+        modelDoor.classList.toggle("is-closed", doorState === "CLOSED");
+      }
     });
 
     const lockElement = root.querySelector('[data-body-lock="CentralLockState"]');
@@ -1007,6 +1036,16 @@
       element.classList.toggle("is-on", isOn === true);
       element.querySelector("em").textContent = isOn == null ? "未接入" : isOn ? "ON" : "OFF";
     });
+
+    const carModel = root.querySelector("[data-body-car-model]");
+    if (carModel) {
+      carModel.classList.toggle("is-low-beam", bodyStatus.lights.lowBeam === true);
+      carModel.classList.toggle("is-high-beam", bodyStatus.lights.highBeam === true);
+      carModel.classList.toggle("is-turn-left", bodyStatus.lights.turnLeft === true);
+      carModel.classList.toggle("is-turn-right", bodyStatus.lights.turnRight === true);
+      carModel.classList.toggle("is-hazard", bodyStatus.lights.hazard === true);
+      carModel.classList.toggle("is-disconnected", !connected);
+    }
 
   }
 
