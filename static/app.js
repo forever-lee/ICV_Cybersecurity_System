@@ -30,7 +30,7 @@
       title: "车身域安全", en: "BODY DOMAIN", icon: "身",
       subtitle: "门锁、灯光、无钥匙进入与车身舒适控制系统安全监测",
       assets: "BCM / PEPS / TPMS", surface: "无线重放、非法解锁、车身控制报文伪造",
-      fields: [["车门状态", "door_status", "—"], ["锁车状态", "lock_status", "—"], ["胎压状态", "tpms_status", "—"], ["灯光状态", "light_status", "—"]],
+      fields: [["车门状态", "door_status", "—"], ["锁车状态", "lock_status", "—"], ["灯光状态", "light_status", "—"]],
       capabilities: [["PEPS", "无钥匙进入防护", "监测中继与重放攻击特征"], ["CAN", "车身控制白名单", "限制异常控制报文与频率"], ["AUD", "敏感操作审计", "记录解锁与远程控制行为"]],
     },
     cockpit: {
@@ -60,6 +60,11 @@
     h264Rebuffering: false,
   };
 
+  if (!window.VShieldBody?.BodyStatusDataSource) {
+    throw new Error("V-SHIELD BodyStatus module is not available");
+  }
+  const bodyStatusDataSource = new window.VShieldBody.BodyStatusDataSource();
+
   const $ = (id) => document.getElementById(id);
   const canvas = $("videoCanvas");
   const video = document.createElement("video");
@@ -79,10 +84,185 @@
     })[char]);
   }
 
+  function renderBodyPage(root) {
+    root.classList.add("body-monitor-page");
+    root.innerHTML = `
+      <div class="page-heading body-monitor-heading">
+        <div>
+          <p class="eyebrow">BODY DOMAIN CONTROLLER</p>
+          <h1>车身域控制器实时状态</h1>
+          <p>集中监测 BDC、车门、中央门锁与车灯的实时运行状态</p>
+        </div>
+        <div class="domain-summary">
+          <span class="status-chip" data-domain-chip="body">数据接口待接入</span>
+          <span class="status-chip" data-body-edge-chip>等待 Jetson 上传</span>
+        </div>
+      </div>
+
+      <article class="panel body-controller-panel">
+        <div class="panel-title">
+          <div><p class="eyebrow">CONTROLLER STATUS</p><h2>车身域控制器状态</h2></div>
+          <span class="body-controller-state" data-domain-state="body">设备未接入</span>
+        </div>
+        <div class="body-controller-overview">
+          <div class="body-controller-identity">
+            <i>BDC</i>
+            <span><b>Body Domain Controller</b><small>车身域主控制器 · CAN 数据节点</small></span>
+          </div>
+          <div class="body-controller-metrics">
+            <div class="body-metric-card can">
+              <span>CAN 通信状态</span><strong data-body-field="can_status">未连接</strong>
+              <em class="body-can-indicator"><i></i>CAN BUS</em>
+            </div>
+            <div class="body-metric-card updated">
+              <span>最后数据更新</span><strong data-body-field="updated_at_ms">--</strong>
+              <em>REAL-TIME DATA</em>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="body-demo-grid">
+        <article class="panel body-demo-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">LIVE EVENT DEMO</p><h2>车身操作联调</h2></div>
+            <span class="tag live">可点击演示</span>
+          </div>
+          <div class="body-action-grid">
+            <button data-body-action="door_fl"><i>门</i><span>左前门</span><small>开 / 关</small></button>
+            <button data-body-action="door_fr"><i>门</i><span>右前门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rl"><i>门</i><span>左后门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rr"><i>门</i><span>右后门</span><small>开 / 关</small></button>
+            <button data-body-action="central_lock"><i>锁</i><span>中央门锁</span><small>锁止 / 解锁</small></button>
+            <button data-body-action="low_beam"><i>近</i><span>近光灯</span><small>ON / OFF</small></button>
+            <button data-body-action="high_beam"><i>远</i><span>远光灯</span><small>ON / OFF</small></button>
+            <button data-body-action="turn_left"><i>←</i><span>左转灯</span><small>ON / OFF</small></button>
+            <button data-body-action="turn_right"><i>→</i><span>右转灯</span><small>ON / OFF</small></button>
+            <button data-body-action="hazard"><i>△</i><span>双闪</span><small>ON / OFF</small></button>
+          </div>
+        </article>
+        <article class="panel body-protocol-summary">
+          <div class="panel-title">
+            <div><p class="eyebrow">MESSAGE OVERVIEW</p><h2>最新报文概览</h2></div>
+            <span class="body-live-badge"><i></i> LIVE</span>
+          </div>
+          <div class="body-protocol-kpis">
+            <div><span>CAN ID</span><strong data-body-protocol="can_id">—</strong><small data-body-protocol="frame_name">等待报文</small></div>
+            <div><span>发送策略</span><strong data-body-protocol="cycle">—</strong><small data-body-protocol="send_type">周期 / 事件触发</small></div>
+            <div><span>累计报文</span><strong data-body-protocol="frame_count">0</strong><small>云端已接收</small></div>
+            <div><span>端到端耗时</span><strong data-body-protocol="latency">—</strong><small>车端采集 → 云端重组</small></div>
+          </div>
+        </article>
+      </div>
+
+      <div class="body-cloud-grid">
+        <article class="panel body-diagnostic-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">STATUS DIAGNOSTICS</p><h2>状态诊断</h2></div>
+            <span class="tag" data-body-alert-count>0 条异常</span>
+          </div>
+          <div class="body-change-time"><span>最近状态变化</span><strong data-body-change-time>—</strong></div>
+          <div class="body-alert-list" data-body-alert-list><div class="body-alert-empty">暂无异常或状态冲突</div></div>
+        </article>
+      </div>
+
+      <div class="body-monitor-layout">
+        <article class="panel body-door-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">DOOR MONITOR</p><h2>车门状态</h2></div>
+            <span class="tag">4 DOORS</span>
+          </div>
+          <div class="body-door-stage">
+            <div class="body-door-card door-fl" data-body-door="Door_FL">
+              <span><b>左前门</b><small>Door_FL</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-fr" data-body-door="Door_FR">
+              <span><b>右前门</b><small>Door_FR</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-rl" data-body-door="Door_RL">
+              <span><b>左后门</b><small>Door_RL</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-rr" data-body-door="Door_RR">
+              <span><b>右后门</b><small>Door_RR</small></span><em>未接入</em>
+            </div>
+            <div class="body-car-visual" aria-hidden="true">
+              <div class="body-car-model" data-body-car-model>
+                <span class="body-car-direction">车头</span>
+                <i class="body-beam body-beam-low left"></i>
+                <i class="body-beam body-beam-low right"></i>
+                <i class="body-beam body-beam-high left"></i>
+                <i class="body-beam body-beam-high right"></i>
+                <div class="body-car-shell">
+                  <span class="body-windshield front"></span>
+                  <span class="body-windshield rear"></span>
+                  <span class="body-car-cabin"><b>BDC</b><small>BODY</small></span>
+                  <i class="body-model-door fl" data-body-model-door="Door_FL"></i>
+                  <i class="body-model-door fr" data-body-model-door="Door_FR"></i>
+                  <i class="body-model-door rl" data-body-model-door="Door_RL"></i>
+                  <i class="body-model-door rr" data-body-model-door="Door_RR"></i>
+                  <i class="body-model-lamp headlamp left"></i>
+                  <i class="body-model-lamp headlamp right"></i>
+                  <i class="body-model-lamp turn front-left"></i>
+                  <i class="body-model-lamp turn front-right"></i>
+                  <i class="body-model-lamp turn rear-left"></i>
+                  <i class="body-model-lamp turn rear-right"></i>
+                </div>
+              </div>
+              <b>车辆模型实时状态</b>
+            </div>
+          </div>
+        </article>
+
+        <div class="body-side-stack">
+          <article class="panel body-lock-panel">
+            <div class="panel-title">
+              <div><p class="eyebrow">CENTRAL LOCK</p><h2>中央门锁</h2></div>
+              <span class="tag">CentralLockState</span>
+            </div>
+            <div class="body-lock-state" data-body-lock="CentralLockState">
+              <i class="body-lock-icon"><span></span></i>
+              <div><span>当前门锁状态</span><strong>未接入</strong><small>等待真实车身域数据</small></div>
+            </div>
+          </article>
+
+          <article class="panel body-light-panel">
+            <div class="panel-title">
+              <div><p class="eyebrow">LIGHT SIGNALS</p><h2>车灯状态</h2></div>
+              <span class="tag">5 SIGNALS</span>
+            </div>
+            <div class="body-light-grid">
+              <div class="body-light-item" data-body-light="LowBeam"><i>近</i><span><b>近光灯</b><small>LowBeam</small></span><em>未接入</em></div>
+              <div class="body-light-item" data-body-light="HighBeam"><i>远</i><span><b>远光灯</b><small>HighBeam</small></span><em>未接入</em></div>
+              <div class="body-light-item turn" data-body-light="TurnLeft"><i>←</i><span><b>左转向灯</b><small>TurnLeft</small></span><em>未接入</em></div>
+              <div class="body-light-item turn" data-body-light="TurnRight"><i>→</i><span><b>右转向灯</b><small>TurnRight</small></span><em>未接入</em></div>
+              <div class="body-light-item hazard" data-body-light="Hazard"><i>△</i><span><b>双闪</b><small>Hazard</small></span><em>未接入</em></div>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <article class="panel body-frame-panel">
+        <div class="panel-title">
+          <div><p class="eyebrow">CAN MESSAGE STREAM</p><h2>实时车身报文</h2></div>
+          <span class="tag">最近 8 条</span>
+        </div>
+        <div class="body-frame-table">
+          <div class="body-frame-row head"><span>车端时间</span><span>CAN ID / 帧名</span><span>原始数据 HEX</span><span>信号变化</span><span>耗时</span></div>
+          <div class="body-frame-empty" data-body-frame-list>操作车门或灯光后，报文将实时出现在这里</div>
+        </div>
+      </article>
+
+      `;
+  }
+
   function renderDomainPages() {
     document.querySelectorAll("[data-domain-page]").forEach((root) => {
       const key = root.dataset.domainPage;
       const config = DOMAIN_CONFIG[key];
+      if (key === "body") {
+        renderBodyPage(root);
+        return;
+      }
       root.innerHTML = `
         <div class="page-heading">
           <div><p class="eyebrow">${config.en}</p><h1>${config.title}</h1><p>${config.subtitle}</p></div>
@@ -793,19 +973,224 @@
     drawChart();
   }
 
+  function setBodyField(root, name, value) {
+    const element = root.querySelector(`[data-body-field="${name}"]`);
+    if (element) element.textContent = value;
+  }
+
+  function renderBodyStatus(bodyStatus) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+
+    const connected = bodyStatus.connected;
+    root.classList.toggle("is-stale", !connected);
+
+    setBodyField(root, "can_status", bodyStatus.canConnected ? "已连接" : "未连接");
+    const canCard = root.querySelector(".body-metric-card.can");
+    if (canCard) {
+      canCard.classList.toggle("is-normal", bodyStatus.canConnected);
+    }
+
+    const updateTime = bodyStatus.timestamp == null ? "--" : formatFrameTime(bodyStatus.timestamp);
+    setBodyField(root, "updated_at_ms", updateTime);
+    const doors = [
+      ["Door_FL", bodyStatus.doors.fl],
+      ["Door_FR", bodyStatus.doors.fr],
+      ["Door_RL", bodyStatus.doors.rl],
+      ["Door_RR", bodyStatus.doors.rr],
+    ];
+    doors.forEach(([name, doorState]) => {
+      const element = root.querySelector(`[data-body-door="${name}"]`);
+      if (element) {
+        element.classList.toggle("is-open", doorState === "OPEN");
+        element.classList.toggle("is-closed", doorState === "CLOSED");
+        element.querySelector("em").textContent = doorState === "OPEN" ? "开启" : doorState === "CLOSED" ? "关闭" : "未接入";
+      }
+      const modelDoor = root.querySelector(`[data-body-model-door="${name}"]`);
+      if (modelDoor) {
+        modelDoor.classList.toggle("is-open", doorState === "OPEN");
+        modelDoor.classList.toggle("is-closed", doorState === "CLOSED");
+      }
+    });
+
+    const lockElement = root.querySelector('[data-body-lock="CentralLockState"]');
+    if (lockElement) {
+      const isLocked = bodyStatus.centralLock === "LOCKED";
+      const isUnlocked = bodyStatus.centralLock === "UNLOCKED";
+      lockElement.classList.toggle("is-locked", isLocked);
+      lockElement.classList.toggle("is-unlocked", isUnlocked);
+      lockElement.querySelector("strong").textContent = isLocked ? "已锁止" : isUnlocked ? "已解锁" : "未接入";
+      lockElement.querySelector("small").textContent = isLocked || isUnlocked ? "中央门锁实时状态" : "等待真实车身域数据";
+    }
+
+    const lights = [
+      ["LowBeam", bodyStatus.lights.lowBeam],
+      ["HighBeam", bodyStatus.lights.highBeam],
+      ["TurnLeft", bodyStatus.lights.turnLeft],
+      ["TurnRight", bodyStatus.lights.turnRight],
+      ["Hazard", bodyStatus.lights.hazard],
+    ];
+    lights.forEach(([name, isOn]) => {
+      const element = root.querySelector(`[data-body-light="${name}"]`);
+      if (!element) return;
+      element.classList.toggle("is-on", isOn === true);
+      element.querySelector("em").textContent = isOn == null ? "未接入" : isOn ? "ON" : "OFF";
+    });
+
+    const carModel = root.querySelector("[data-body-car-model]");
+    if (carModel) {
+      carModel.classList.toggle("is-low-beam", bodyStatus.lights.lowBeam === true);
+      carModel.classList.toggle("is-high-beam", bodyStatus.lights.highBeam === true);
+      carModel.classList.toggle("is-turn-left", bodyStatus.lights.turnLeft === true);
+      carModel.classList.toggle("is-turn-right", bodyStatus.lights.turnRight === true);
+      carModel.classList.toggle("is-hazard", bodyStatus.lights.hazard === true);
+      carModel.classList.toggle("is-disconnected", !connected);
+    }
+
+  }
+
+  function renderBodyCloudStatus(payload) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+    const validity = payload.signal_validity || {};
+    ["Door_FL", "Door_FR", "Door_RL", "Door_RR"].forEach((name) => {
+      const element = root.querySelector(`[data-body-door="${name}"]`);
+      const invalid = Object.prototype.hasOwnProperty.call(validity, name) && validity[name] === false;
+      if (!element) return;
+      element.classList.toggle("is-invalid", invalid);
+      if (invalid) element.querySelector("em").textContent = "无效";
+    });
+    const lockElement = root.querySelector('[data-body-lock="CentralLockState"]');
+    const lockInvalid = validity.CentralLockState === false;
+    if (lockElement) {
+      lockElement.classList.toggle("is-invalid", lockInvalid);
+      if (lockInvalid) {
+        lockElement.querySelector("strong").textContent = "无效";
+        lockElement.querySelector("small").textContent = payload.signal_invalid_reasons?.CentralLockState || "信号有效性校验失败";
+      }
+    }
+    ["LowBeam", "HighBeam", "TurnLeft", "TurnRight", "Hazard"].forEach((name) => {
+      const element = root.querySelector(`[data-body-light="${name}"]`);
+      const invalid = validity[name] === false;
+      if (!element) return;
+      element.classList.toggle("is-invalid", invalid);
+      if (invalid) element.querySelector("em").textContent = "无效";
+    });
+
+    const link = payload.link || {};
+    const onlineValues = ["online", "active", "ok", "connected"];
+    const updateLink = (name, value, onlineText = "在线") => {
+      const element = root.querySelector(`[data-body-link="${name}"]`);
+      if (!element) return;
+      const online = onlineValues.includes(String(value || "").toLowerCase());
+      element.classList.toggle("online", online);
+      element.classList.toggle("offline", !online);
+      element.querySelector("em").textContent = online ? onlineText : (value === "timeout" ? "超时" : "离线");
+    };
+    updateLink("mcu", link.mcu_status);
+    updateLink("edge", link.edge_status);
+    updateLink("upload", link.cloud_status || link.upload_status, "正常");
+    const ageElement = root.querySelector('[data-body-link="age"]');
+    if (ageElement) {
+      const ageMs = Number(link.age_ms);
+      const fresh = Number.isFinite(ageMs) && ageMs <= 10000;
+      ageElement.classList.toggle("online", fresh);
+      ageElement.classList.toggle("offline", !fresh);
+      ageElement.querySelector("em").textContent = Number.isFinite(ageMs) ? `${(ageMs / 1000).toFixed(1)} s` : "—";
+    }
+    const interfaceElement = root.querySelector("[data-body-interface]");
+    if (interfaceElement) interfaceElement.textContent = link.interface_path || "等待接口数据";
+    const modeElement = root.querySelector("[data-body-mode]");
+    if (modeElement) {
+      modeElement.textContent = payload.data_mode === "real" ? "真实数据" : payload.data_mode === "test" ? "测试数据" : "等待数据";
+      modeElement.classList.toggle("live", payload.data_mode === "real");
+    }
+    const edgeChip = root.querySelector("[data-body-edge-chip]");
+    if (edgeChip) {
+      const edgeOnline = onlineValues.includes(String(link.edge_status || "").toLowerCase()) && payload.connected;
+      edgeChip.textContent = edgeOnline ? "Jetson链路正常" : "等待 Jetson 上传";
+      edgeChip.classList.toggle("active", edgeOnline);
+    }
+    const changeTime = root.querySelector("[data-body-change-time]");
+    if (changeTime) changeTime.textContent = formatFrameTime(payload.latest_change_at_ms);
+    const alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+    const alertCount = root.querySelector("[data-body-alert-count]");
+    if (alertCount) {
+      alertCount.textContent = `${alerts.length} 条异常`;
+      alertCount.classList.toggle("warning", alerts.length > 0);
+    }
+    const alertList = root.querySelector("[data-body-alert-list]");
+    if (alertList) alertList.innerHTML = alerts.length ? alerts.slice(0, 4).map((alert) => `
+      <div class="body-alert-item ${escapeHtml(alert.level || "warning")}"><i>!</i><span><b>${escapeHtml(alert.title)}</b><small>${escapeHtml(alert.detail)}</small></span><time>${escapeHtml(formatFrameTime(alert.created_at_ms))}</time></div>
+    `).join("") : '<div class="body-alert-empty">暂无异常或状态冲突</div>';
+  }
+
+  function bodySignalText(changes) {
+    const labels = {
+      Door_FL: "左前门", Door_FR: "右前门", Door_RL: "左后门", Door_RR: "右后门",
+      CentralLockState: "中央门锁", LowBeam: "近光灯", HighBeam: "远光灯",
+      TurnLeft: "左转灯", TurnRight: "右转灯", Hazard: "双闪",
+    };
+    return Object.entries(changes || {}).map(([key, value]) => {
+      const active = value === true || ["open", "opened", "locked", "on"].includes(String(value).toLowerCase());
+      return `${labels[key] || key}=${active ? "ON" : "OFF"}`;
+    }).join(" · ") || "状态刷新";
+  }
+
+  function setBodyProtocol(root, name, value) {
+    const element = root.querySelector(`[data-body-protocol="${name}"]`);
+    if (element) element.textContent = value;
+  }
+
+  function renderBodyProtocol(payload) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+    const frames = Array.isArray(payload.frame_history) ? payload.frame_history.slice(0, 8) : [];
+    const latest = payload.latest_frame || frames[0];
+    setBodyProtocol(root, "frame_count", Number(payload.frame_count || 0).toLocaleString());
+    if (!latest) return;
+
+    setBodyProtocol(root, "can_id", latest.can_id || "—");
+    setBodyProtocol(root, "frame_name", latest.frame_name || "等待报文");
+    setBodyProtocol(root, "cycle", latest.cycle_ms ? `${latest.cycle_ms} ms` : "事件触发");
+    setBodyProtocol(root, "send_type", latest.send_type || "—");
+    setBodyProtocol(root, "latency", `${Number(latest.latency_ms || 0)} ms`);
+    const frameList = root.querySelector("[data-body-frame-list]");
+    if (!frameList) return;
+    frameList.classList.remove("body-frame-empty");
+    frameList.classList.add("body-frame-list");
+    frameList.innerHTML = frames.map((frame) => `
+      <div class="body-frame-row${frame.test ? " test" : ""}${frame.valid === false ? " invalid" : ""}">
+        <span><b>${escapeHtml(formatFrameTime(frame.vehicle_time_ms))}</b><small>SEQ ${Number(frame.sequence || 0)}</small></span>
+        <span><b>${escapeHtml(frame.can_id || "—")}</b><small>${escapeHtml(frame.frame_name || "—")}</small></span>
+        <code>${escapeHtml(frame.data_hex || "—")}</code>
+        <span><b>${escapeHtml(bodySignalText(frame.signal_changes))}</b></span>
+        <span><b class="body-latency">${Number(frame.latency_ms || 0)} ms</b><small>${frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
+      </div>`).join("");
+  }
+
   function updateDomains(domains) {
     let activeCount = 1;
     Object.keys(DOMAIN_CONFIG).forEach((key) => {
       const payload = domains[key] || {};
-      const active = payload.status === "active" || payload.status === "online";
+      const bodyStatus = key === "body" ? bodyStatusDataSource.ingest(payload) : null;
+      if (key === "body") { renderBodyProtocol(payload); renderBodyCloudStatus(payload); }
+      const active = bodyStatus
+        ? bodyStatus.connected
+        : payload.status === "active" || payload.status === "online";
       if (active) activeCount += 1;
       document.querySelectorAll(`[data-domain-indicator="${key}"]`).forEach((element) => element.classList.toggle("online", active));
       document.querySelectorAll(`[data-domain-label="${key}"]`).forEach((element) => { element.textContent = active ? "已接入" : "待接入"; });
-      document.querySelectorAll(`[data-domain-state="${key}"]`).forEach((element) => { element.textContent = active ? "ONLINE" : "OFFLINE"; element.classList.toggle("online", active); });
+      document.querySelectorAll(`[data-domain-state="${key}"]`).forEach((element) => {
+        element.textContent = key === "body" ? active ? "设备已接入" : "设备未接入" : active ? "ONLINE" : "OFFLINE";
+        element.classList.toggle("online", active);
+      });
       document.querySelectorAll(`[data-domain-chip="${key}"]`).forEach((element) => { element.textContent = active ? "实时数据已接入" : "数据接口待接入"; element.classList.toggle("active", active); });
-      for (const [, field, fallback] of DOMAIN_CONFIG[key].fields) {
-        const element = document.querySelector(`[data-domain-field="${key}.${field}"]`);
-        if (element) element.textContent = payload[field] ?? fallback;
+      if (key !== "body") {
+        for (const [, field, fallback] of DOMAIN_CONFIG[key].fields) {
+          const element = document.querySelector(`[data-domain-field="${key}.${field}"]`);
+          if (element) element.textContent = payload[field] ?? fallback;
+        }
       }
     });
     $("activeDomainCount").textContent = activeCount;
@@ -937,12 +1322,40 @@
   $("vehicleSelect").addEventListener("change", (event) => {
     state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
     resetNavigationView();
+    bodyStatusDataSource.reset();
     history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${state.currentView}`);
-    renderDomainPages(); setupDomainOpenButtons(); connect();
+    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); connect();
   });
 
   function setupDomainOpenButtons() {
     document.querySelectorAll(".domain-page [data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
+  }
+
+  function setupBodyDemo() {
+    document.querySelectorAll("[data-body-action]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const action = button.dataset.bodyAction;
+        button.disabled = true;
+        button.classList.add("loading");
+        try {
+          const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          state.latestMetrics.domains = { ...(state.latestMetrics.domains || {}), body: data.body };
+          updateDomains(state.latestMetrics.domains);
+          toast(`${data.label}状态已切换，CAN 报文已上传云端`);
+        } catch (_) {
+          toast("车身报文发送失败，请检查云端服务");
+        } finally {
+          button.disabled = false;
+          button.classList.remove("loading");
+        }
+      });
+    });
   }
 
   async function createTestData(kind) {
@@ -972,9 +1385,11 @@
   }
 
   renderDomainPages();
+  bodyStatusDataSource.subscribe(renderBodyStatus);
   initializeVehicleMap();
   setupNavigation();
   setupDomainOpenButtons();
+  setupBodyDemo();
   setTimeout(() => {
     if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
   }, 1500);
