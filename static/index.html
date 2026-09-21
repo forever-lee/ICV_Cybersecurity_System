@@ -121,18 +121,6 @@
               <article><span>接收报文</span><strong id="wifiPacketCount">0</strong><small>累计 UDP 数据包</small></article>
               <article class="latency-stat"><span>端到端延迟（估算）</span><strong id="chargeLatencyStat">--<small>ms</small></strong><small id="chargeLatencyHint">等待带 TS 的报文</small></article>
             </div>
-            <article class="wifi-ids-alert" id="wifiIdsAlert" role="alert" hidden>
-              <div class="wifi-ids-alert-icon">!</div>
-              <div class="wifi-ids-alert-copy"><p>WIFI CHARGING IDS</p><h2 id="wifiIdsAlertTitle">SOC 数据突变攻击</h2><span>检测到充电状态数据与可信变化趋势不一致，原始报文已保留。</span></div>
-              <div class="wifi-ids-alert-metrics">
-                <span>报文序号<strong id="wifiIdsSequence">----</strong></span>
-                <span>正常基线<strong id="wifiIdsBaseline">--%</strong></span>
-                <span>异常数值<strong id="wifiIdsObserved">--%</strong></span>
-                <span>变化幅度<strong id="wifiIdsDelta">--%</strong></span>
-                <span>检测时间<strong id="wifiIdsTime">--:--:--</strong></span>
-                <span>本轮告警<strong id="wifiIdsCount">0</strong></span>
-              </div>
-            </article>
             <article class="panel charge-monitor" aria-labelledby="wifiTitle">
               <div class="charge-monitor-head"><div class="module-ident wifi"><i>WF</i><span><p class="eyebrow">WIFI CHARGING TELEMETRY</p><h2 id="wifiTitle">充电过程</h2><small>SOC、状态与延迟均严格跟随最新报文</small></span></div><span class="module-status offline" id="wifiStatus"><i></i><span>等待数据</span></span></div>
               <div class="charge-monitor-body">
@@ -159,6 +147,18 @@
               <div class="telemetry-layout">
                 <div class="latest-packet"><span class="label">最新报文</span><strong id="wifiText">尚未收到 WiFi 数据</strong><div class="packet-stats"><span>序号 <b id="wifiSeq">—</b></span><span>状态 <b id="wifiState">—</b></span><span>时间 <b id="wifiTime">—</b></span><span>延迟 <b id="wifiLatency">—</b></span></div><div class="hex-view blue"><span>HEX</span><code id="wifiHex">—</code></div></div>
                 <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="wifiHistory" class="history-list"><div class="history-empty">等待 WiFi 充电报文…</div></div></div>
+              </div>
+            </article>
+            <article class="wifi-ids-alert idle" id="wifiIdsAlert" aria-live="polite">
+              <div class="wifi-ids-alert-icon" id="wifiIdsAlertIcon">✓</div>
+              <div class="wifi-ids-alert-copy"><p>WIFI CHARGING IDS</p><h2 id="wifiIdsAlertTitle">当前未发现 SOC 突变</h2><span id="wifiIdsAlertHint">持续对比每条充电报文与可信 SOC 变化趋势。</span></div>
+              <div class="wifi-ids-alert-metrics">
+                <span>报文序号<strong id="wifiIdsSequence">----</strong></span>
+                <span>正常基线<strong id="wifiIdsBaseline">--%</strong></span>
+                <span>异常数值<strong id="wifiIdsObserved">--%</strong></span>
+                <span>变化幅度<strong id="wifiIdsDelta">--%</strong></span>
+                <span>检测时间<strong id="wifiIdsTime">--:--:--</strong></span>
+                <span>本轮告警<strong id="wifiIdsCount">0</strong></span>
               </div>
             </article>
           </section>

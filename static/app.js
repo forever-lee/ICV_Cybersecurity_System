@@ -858,10 +858,24 @@
     const container = $("wifiIdsAlert");
     if (!container) return;
     const alert = ids && ids.latest_alert;
-    container.hidden = !alert;
-    if (!alert) return;
+    container.classList.toggle("idle", !alert);
+    const icon = $("wifiIdsAlertIcon");
+    if (!alert) {
+      icon.textContent = "✓";
+      $("wifiIdsAlertTitle").textContent = "当前未发现 SOC 突变";
+      $("wifiIdsAlertHint").textContent = "持续对比每条充电报文与可信 SOC 变化趋势。";
+      $("wifiIdsSequence").textContent = "----";
+      $("wifiIdsBaseline").textContent = "--%";
+      $("wifiIdsObserved").textContent = "--%";
+      $("wifiIdsDelta").textContent = "--%";
+      $("wifiIdsTime").textContent = "--:--:--";
+      $("wifiIdsCount").textContent = String(Number(ids.alert_count || 0));
+      return;
+    }
+    icon.textContent = "!";
     const delta = Number(alert.delta_soc);
     $("wifiIdsAlertTitle").textContent = alert.title || "SOC 数据突变攻击";
+    $("wifiIdsAlertHint").textContent = "检测到充电状态数据与可信变化趋势不一致，原始报文已保留。";
     $("wifiIdsSequence").textContent = String(Number(alert.sequence || 0)).padStart(4, "0");
     $("wifiIdsBaseline").textContent = `${Number(alert.baseline_soc).toFixed(1)}%`;
     $("wifiIdsObserved").textContent = `${Number(alert.observed_soc).toFixed(1)}%`;

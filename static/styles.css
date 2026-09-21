@@ -295,7 +295,6 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .charge-stat-grid .latency-stat strong { color: #91e8ff; }
 .charge-stat-grid .latency-stat.clock-skew strong, .charge-stat-grid .latency-stat.clock-skew small { color: #f4bd77; }
 .wifi-ids-alert { display: grid; grid-template-columns: 50px minmax(230px, .72fr) minmax(520px, 1.28fr); gap: 18px; align-items: center; margin: 0 0 14px; padding: 17px 20px; border: 1px solid rgba(255, 91, 108, .58); border-radius: 15px; background: radial-gradient(circle at 8% 50%, rgba(255, 65, 84, .15), transparent 29%), linear-gradient(135deg, rgba(54, 16, 28, .97), rgba(20, 13, 25, .97)); box-shadow: inset 0 1px 0 rgba(255,255,255,.045), 0 12px 32px rgba(46, 0, 10, .22); }
-.wifi-ids-alert[hidden] { display: none; }
 .wifi-ids-alert-icon { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid rgba(255, 107, 121, .7); border-radius: 14px; color: #fff; background: rgba(255, 75, 94, .18); box-shadow: 0 0 24px rgba(255, 64, 83, .2); font: 700 24px/1 Consolas, monospace; }
 .wifi-ids-alert-copy p { margin: 0 0 5px; color: #ff8290; font-size: 8px; letter-spacing: .18em; }
 .wifi-ids-alert-copy h2 { margin: 0; color: #fff0f2; font-size: 17px; }
@@ -303,6 +302,9 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .wifi-ids-alert-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
 .wifi-ids-alert-metrics span { min-width: 0; padding: 8px 10px; border-left: 1px solid rgba(255, 105, 121, .19); color: #9b6971; font-size: 8px; }
 .wifi-ids-alert-metrics strong { display: block; margin-top: 4px; color: #ffd8dd; font: 600 13px/1.1 Consolas, monospace; }
+.wifi-ids-alert.idle { border-color: rgba(67, 238, 177, .28); background: radial-gradient(circle at 8% 50%, rgba(39, 199, 151, .1), transparent 29%), linear-gradient(135deg, rgba(10, 46, 48, .97), rgba(7, 22, 38, .97)); box-shadow: inset 0 1px 0 rgba(255,255,255,.035), 0 12px 28px rgba(0, 0, 0, .12); }
+.wifi-ids-alert.idle .wifi-ids-alert-icon { border-color: rgba(67, 238, 177, .48); color: var(--green); background: rgba(53, 221, 162, .1); box-shadow: 0 0 24px rgba(53, 221, 162, .12); }
+.wifi-ids-alert.idle .wifi-ids-alert-copy p { color: #5dd9b6; }.wifi-ids-alert.idle .wifi-ids-alert-copy h2 { color: #d9fff5; }.wifi-ids-alert.idle .wifi-ids-alert-copy span, .wifi-ids-alert.idle .wifi-ids-alert-metrics span { color: #638f88; }.wifi-ids-alert.idle .wifi-ids-alert-metrics span { border-left-color: rgba(67, 238, 177, .14); }.wifi-ids-alert.idle .wifi-ids-alert-metrics strong { color: #a9e9d8; }
 .history-row.anomaly { color: #ff8793; background: rgba(255, 67, 86, .1); box-shadow: inset 2px 0 #ff5365; }
 .history-row.anomaly code { color: #ffd0d5; }
 .history-alert-badge { display: inline-block; margin-right: 6px; padding: 2px 4px; border-radius: 3px; color: #fff; background: #d94052; font: 700 7px/1 sans-serif; vertical-align: 1px; }
