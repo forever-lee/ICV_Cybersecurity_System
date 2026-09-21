@@ -787,7 +787,6 @@
     updateFpsBars(fps);
     updateDomains(metrics.domains || {});
     applyPreferredNavigation();
-    updateBluetooth(metrics.bluetooth || {});
     updateWifi(metrics.wifi || {});
     $("lastRefresh").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
     drawChart();
@@ -839,16 +838,67 @@
     status.classList.toggle("offline", !online);
     status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
     $("wifiPacketCount").textContent = Number(wifi.packet_count || 0).toLocaleString();
-    updateWirelessTotal(state.latestMetrics.bluetooth || {}, wifi);
+    updateChargingSimulation(wifi);
     if (!latest) {
-      $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiRssi").textContent = "—"; $("wifiTime").textContent = "—";
-      $("wifiHistory").innerHTML = '<div class="history-empty">等待 WiFi 模块发送数据…</div>'; return;
+      $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiSeq").textContent = "—"; $("wifiState").textContent = "—"; $("wifiTime").textContent = "—"; $("wifiLatency").textContent = "—";
+      $("wifiHistory").innerHTML = '<div class="history-empty">等待 WiFi 充电报文…</div>'; return;
     }
+    const charge = parseChargingPacket(latest.text || "");
     $("wifiText").textContent = latest.text || "（空报文）";
     $("wifiHex").textContent = latest.hex || "—";
-    $("wifiRssi").textContent = latest.rssi == null ? "—" : `${latest.rssi} dBm`;
+    $("wifiSeq").textContent = charge.sequence === null ? "—" : String(charge.sequence).padStart(4, "0");
+    $("wifiState").textContent = charge.state || "—";
     $("wifiTime").textContent = formatFrameTime(latest.received_at_ms);
-    $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 模块发送数据…");
+    $("wifiLatency").textContent = formatEstimatedLatency(latest.e2e_latency_ms);
+    $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 充电报文…");
+  }
+
+  function parseChargingPacket(text) {
+    const source = String(text || "");
+    const socMatch = source.match(/(?:^|,)SOC=([0-9]+(?:\.[0-9]+)?)(?:,|$)/i);
+    const sequenceMatch = source.match(/(?:^|,)SEQ=(\d+)(?:,|$)/i);
+    const stateMatch = source.match(/(?:^|,)STATE=([A-Z_]+)(?:,|$)/i);
+    return {
+      soc: socMatch ? Math.max(0, Math.min(100, Number(socMatch[1]))) : null,
+      sequence: sequenceMatch ? Number(sequenceMatch[1]) : null,
+      state: stateMatch ? stateMatch[1].toUpperCase() : "",
+    };
+  }
+
+  function updateChargingSimulation(wifi) {
+    const latest = wifi.latest;
+    const charge = latest ? parseChargingPacket(latest.text || "") : { soc: null, sequence: null, state: "" };
+    const hasSoc = Number.isFinite(charge.soc);
+    const stateText = charge.state === "FULL" ? "充电完成" : charge.state === "CHARGING" ? "充电中" : latest ? "报文待识别" : "等待启动";
+    const socText = hasSoc ? `${charge.soc.toFixed(1)}%` : "--%";
+    const progress = $("chargeProgress");
+    progress.style.width = hasSoc ? `${charge.soc}%` : "0%";
+    progress.parentElement.setAttribute("aria-valuenow", hasSoc ? String(charge.soc) : "0");
+    $("chargeSocValue").textContent = socText;
+    $("chargeSocStat").innerHTML = hasSoc ? `${charge.soc.toFixed(1)}<small>%</small>` : "--<small>%</small>";
+    $("chargeStateStat").textContent = stateText;
+    $("chargeSeqStat").textContent = charge.sequence === null ? "--" : String(charge.sequence).padStart(4, "0");
+    $("chargeStateLabel").textContent = charge.state ? `${stateText} · ${charge.state}` : "等待合法 START 报文";
+    $("chargeHeaderState").textContent = stateText;
+    $("chargeUpdateTime").textContent = latest ? formatFrameTime(latest.received_at_ms) : "--:--:--";
+    $("chargeRing").style.setProperty("--soc", hasSoc ? String(charge.soc) : "0");
+    $("chargeRingValue").textContent = hasSoc ? charge.soc.toFixed(1) + "%" : "--";
+    const chargePile = $("chargePile");
+    if (chargePile) {
+      chargePile.classList.toggle("charging", charge.state === "CHARGING");
+      chargePile.classList.toggle("full", charge.state === "FULL");
+    }
+    const latency = latest && latest.e2e_latency_ms !== null && latest.e2e_latency_ms !== undefined && Number.isFinite(Number(latest.e2e_latency_ms)) ? Number(latest.e2e_latency_ms) : null;
+    $("chargeLatencyStat").innerHTML = latency === null ? "--<small>ms</small>" : `${Math.abs(latency).toFixed(0)}<small>ms</small>`;
+    $("chargeLatencyHint").textContent = latency === null ? "等待带 TS 的报文" : latency < 0 ? "时钟偏差：A/B 未校时" : "含 A/B 系统时钟偏差";
+    $("chargeLatencyStat").closest("article").classList.toggle("clock-skew", latency !== null && latency < 0);
+  }
+
+  function formatEstimatedLatency(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    const latency = Number(value);
+    if (!Number.isFinite(latency)) return "—";
+    return latency < 0 ? `时钟偏差 ${latency.toFixed(0)} ms` : `${latency.toFixed(0)} ms（估算）`;
   }
 
   function updateWirelessTotal(bluetooth, wifi) {
@@ -960,8 +1010,10 @@
     finally { button.disabled = false; button.textContent = "生成测试数据"; }
   }
 
-  $("bluetoothTestButton").addEventListener("click", () => createTestData("bluetooth"));
-  $("wifiTestButton").addEventListener("click", () => createTestData("wifi"));
+  const bluetoothTestButton = $("bluetoothTestButton");
+  const wifiTestButton = $("wifiTestButton");
+  if (bluetoothTestButton) bluetoothTestButton.addEventListener("click", () => createTestData("bluetooth"));
+  if (wifiTestButton) wifiTestButton.addEventListener("click", () => createTestData("wifi"));
   async function loadVehicles() {
     try {
       const response = await fetch("/api/vehicles"); const data = await response.json(); const select = $("vehicleSelect");

@@ -23,7 +23,7 @@
           <button class="side-link active" data-view="overview"><i>态</i><span>全局安全态势</span></button>
 
           <p class="nav-section-title">车辆域控</p>
-          <button class="side-link" data-view="telematics"><i>联</i><span>车联网域</span><em class="nav-count">2</em></button>
+          <button class="side-link" data-view="telematics"><i>联</i><span>车联网域（WiFi）</span><em class="nav-count">1</em></button>
           <button class="side-link" data-view="adas"><i>智</i><span>智能驾驶域</span><em class="nav-state online">在线</em></button>
           <button class="side-link" data-view="chassis"><i>底</i><span>底盘域</span><em class="domain-dot" data-domain-indicator="chassis"></em></button>
           <button class="side-link" data-view="powertrain"><i>动</i><span>动力域</span><em class="domain-dot" data-domain-indicator="powertrain"></em></button>
@@ -73,7 +73,7 @@
                 <div class="topology-map">
                   <div class="topology-lines"></div>
                   <button class="domain-node node-adas active" data-open-view="adas"><i>智</i><span><b>智能驾驶域</b><small>视频流已接入</small></span><em>ONLINE</em></button>
-                  <button class="domain-node node-telematics active" data-open-view="telematics"><i>联</i><span><b>车联网域</b><small>WiFi / BLE</small></span><em>2 LINKS</em></button>
+                  <button class="domain-node node-telematics active" data-open-view="telematics"><i>联</i><span><b>车联网域（WiFi）</b><small>充电桩报文链路</small></span><em>1 LINK</em></button>
                   <button class="domain-node node-chassis" data-open-view="chassis"><i>底</i><span><b>底盘域</b><small>CAN / 制动 / 转向</small></span><em data-domain-label="chassis">待接入</em></button>
                   <button class="domain-node node-power" data-open-view="powertrain"><i>动</i><span><b>动力域</b><small>VCU / BMS / 电驱</small></span><em data-domain-label="powertrain">待接入</em></button>
                   <button class="domain-node node-body" data-open-view="body"><i>身</i><span><b>车身域</b><small>BCM / PEPS / TPMS</small></span><em data-domain-label="body">待接入</em></button>
@@ -112,26 +112,41 @@
             </div>
           </section>
 
-          <section class="content-view" data-view-panel="telematics">
-            <div class="page-heading"><div><p class="eyebrow">TELEMATICS DOMAIN</p><h1>车联网域安全</h1><p>T-Box、WiFi 与蓝牙无线链路资产监测</p></div><div class="domain-summary"><span class="status-chip active">2 条采集链路</span><span class="status-chip">攻击能力待接入</span></div></div>
-            <div class="domain-stat-grid">
-              <article><span>无线资产</span><strong>2</strong><small>WiFi / BLE</small></article>
-              <article><span>接收报文</span><strong id="wirelessPacketTotal">0</strong><small>累计数据包</small></article>
-              <article><span>开放攻击面</span><strong>5</strong><small>待验证项目</small></article>
-              <article><span>防御策略</span><strong>0</strong><small>尚未配置</small></article>
+          <section class="content-view charge-page" data-view-panel="telematics">
+            <div class="page-heading"><div><p class="eyebrow">WIFI CHARGING SIMULATION</p><h1>模拟充电协议</h1></div><div class="domain-summary"><span class="status-chip active">WiFi 链路</span><span class="status-chip" id="chargeHeaderState">等待充电报文</span></div></div>
+            <div class="charge-stat-grid">
+              <article><span>当前 SOC</span><strong id="chargeSocStat">--<small>%</small></strong><small>来自最新 WiFi 报文</small></article>
+              <article><span>充电状态</span><strong id="chargeStateStat">等待启动</strong><small>CHARGING / FULL</small></article>
+              <article><span>最新序号</span><strong id="chargeSeqStat">--</strong><small>严格递增校验</small></article>
+              <article><span>接收报文</span><strong id="wifiPacketCount">0</strong><small>累计 UDP 数据包</small></article>
+              <article class="latency-stat"><span>端到端延迟（估算）</span><strong id="chargeLatencyStat">--<small>ms</small></strong><small id="chargeLatencyHint">等待带 TS 的报文</small></article>
             </div>
-            <article class="panel data-module" aria-labelledby="bluetoothTitle">
-              <div class="module-head"><div class="module-ident ble"><i>BT</i><span><p class="eyebrow">BLUETOOTH TELEMETRY</p><h2 id="bluetoothTitle">蓝牙数据采集</h2><small>BLE 转 UDP · 文本与 HEX 实时解析</small></span></div><div class="module-actions"><span class="module-status offline" id="bluetoothStatus"><i></i><span>等待数据</span></span><button class="primary-button" id="bluetoothTestButton" type="button">生成测试数据</button></div></div>
-              <div class="telemetry-layout">
-                <div class="latest-packet"><span class="label">最新报文</span><strong id="bluetoothText">尚未收到蓝牙数据</strong><div class="packet-stats"><span>累计 <b id="bluetoothPacketCount">0</b></span><span>RSSI <b id="bluetoothRssi">—</b></span><span>时间 <b id="bluetoothTime">—</b></span></div><div class="hex-view"><span>HEX</span><code id="bluetoothHex">—</code></div></div>
-                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="bluetoothHistory" class="history-list"><div class="history-empty">等待蓝牙模块发送数据…</div></div></div>
+            <article class="panel charge-monitor" aria-labelledby="wifiTitle">
+              <div class="charge-monitor-head"><div class="module-ident wifi"><i>WF</i><span><p class="eyebrow">WIFI CHARGING TELEMETRY</p><h2 id="wifiTitle">充电过程</h2><small>SOC、状态与延迟均严格跟随最新报文</small></span></div><span class="module-status offline" id="wifiStatus"><i></i><span>等待数据</span></span></div>
+              <div class="charge-monitor-body">
+                <div class="charge-progress-card">
+                  <div class="charge-progress-label"><span>充电进度</span><strong id="chargeSocValue">--%</strong></div>
+                  <div class="charge-progress-track" role="progressbar" aria-label="充电进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><i id="chargeProgress"></i></div>
+                  <div class="charge-progress-foot"><span id="chargeStateLabel">等待合法 START 报文</span><time id="chargeUpdateTime">--:--:--</time></div>
+                </div>
+                <div class="charge-side-display">
+                  <div class="charge-visual" aria-label="充电桩状态示意">
+                    <div class="charge-ring" id="chargeRing" aria-hidden="true"><div><strong id="chargeRingValue">--</strong><small>SOC</small></div></div>
+                    <div class="charge-pile" id="chargePile" aria-hidden="true">
+                      <span class="charge-pile-cap"></span>
+                      <div class="charge-pile-screen"><b>WIFI</b><small>CHARGING</small></div>
+                      <svg class="charge-pile-bolt" viewBox="0 0 24 32"><path d="M13.5 0 2 18h8l-1 14L22 12h-8.5z"/></svg>
+                      <span class="charge-pile-base"><i>ONLINE</i><i>01</i></span>
+                    </div>
+                  </div>
+                </div>
               </div>
             </article>
-            <article class="panel data-module wifi-module" aria-labelledby="wifiTitle">
-              <div class="module-head"><div class="module-ident wifi"><i>WF</i><span><p class="eyebrow">WIFI TELEMETRY</p><h2 id="wifiTitle">WiFi 数据采集</h2><small>WiFi 转 UDP · 信号与传输数据实时解析</small></span></div><div class="module-actions"><span class="module-status offline" id="wifiStatus"><i></i><span>等待数据</span></span><button class="primary-button blue" id="wifiTestButton" type="button">生成测试数据</button></div></div>
+            <article class="panel data-module wifi-module" aria-labelledby="wifiPacketTitle">
+              <div class="module-head"><div class="module-ident wifi"><i>UDP</i><span><p class="eyebrow">FORWARDED WIFI PACKETS</p><h2 id="wifiPacketTitle">WiFi 充电报文</h2><small>保留原始文本、HEX 和最近接收记录</small></span></div></div>
               <div class="telemetry-layout">
-                <div class="latest-packet"><span class="label">最新报文</span><strong id="wifiText">尚未收到 WiFi 数据</strong><div class="packet-stats"><span>累计 <b id="wifiPacketCount">0</b></span><span>RSSI <b id="wifiRssi">—</b></span><span>时间 <b id="wifiTime">—</b></span></div><div class="hex-view blue"><span>HEX</span><code id="wifiHex">—</code></div></div>
-                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="wifiHistory" class="history-list"><div class="history-empty">等待 WiFi 模块发送数据…</div></div></div>
+                <div class="latest-packet"><span class="label">最新报文</span><strong id="wifiText">尚未收到 WiFi 数据</strong><div class="packet-stats"><span>序号 <b id="wifiSeq">—</b></span><span>状态 <b id="wifiState">—</b></span><span>时间 <b id="wifiTime">—</b></span><span>延迟 <b id="wifiLatency">—</b></span></div><div class="hex-view blue"><span>HEX</span><code id="wifiHex">—</code></div></div>
+                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="wifiHistory" class="history-list"><div class="history-empty">等待 WiFi 充电报文…</div></div></div>
               </div>
             </article>
           </section>

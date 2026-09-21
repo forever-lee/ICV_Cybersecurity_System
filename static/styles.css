@@ -281,3 +281,51 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 /* H.264/fMP4 is decoded by the browser's native video pipeline. */
 .video-stage .video-element { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; display: block; object-fit: contain; background: #03070d; }
 .video-stage .video-element.hidden { display: none; }
+
+/* WiFi charging simulation page */
+.charge-page .page-heading { margin-bottom: 18px; }
+.charge-page { max-width: 1450px; margin: 0 auto; }
+.charge-page .page-heading { padding: 12px 4px 4px; }
+.charge-stat-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 14px; }
+.charge-stat-grid article { min-height: 108px; padding: 17px 18px; border: 1px solid rgba(104, 191, 218, .16); border-radius: 15px; background: linear-gradient(145deg, rgba(16, 43, 65, .98), rgba(7, 22, 38, .94)); box-shadow: inset 0 1px 0 rgba(221, 251, 255, .035), 0 12px 28px rgba(0, 0, 0, .12); }
+.charge-stat-grid span, .charge-stat-grid small { display: block; color: var(--muted-2); font-size: 9px; }
+.charge-stat-grid strong { display: block; margin: 9px 0 5px; color: #e8fbff; font: 600 24px/1.1 Consolas, monospace; letter-spacing: -.5px; }
+.charge-stat-grid strong small { display: inline; color: var(--cyan); font-size: 13px; }
+.charge-stat-grid article:nth-child(2) strong { color: var(--green); font-family: inherit; font-size: 19px; letter-spacing: 0; }
+.charge-stat-grid .latency-stat strong { color: #91e8ff; }
+.charge-stat-grid .latency-stat.clock-skew strong, .charge-stat-grid .latency-stat.clock-skew small { color: #f4bd77; }
+.charge-monitor { overflow: hidden; margin-bottom: 14px; }
+.charge-monitor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line); }
+.charge-monitor-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .65fr); align-items: center; gap: 30px; padding: 27px 25px; background: radial-gradient(circle at 80% 38%, rgba(34, 209, 226, .12), transparent 28%); }
+.charge-progress-card { min-width: 0; }
+.charge-progress-label { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; color: #9ab0be; font-size: 12px; }
+.charge-progress-label strong { color: #e7fdff; font: 600 32px/1 Consolas, monospace; letter-spacing: -1px; }
+.charge-progress-track { position: relative; height: 15px; overflow: hidden; margin: 15px 0 11px; border: 1px solid rgba(54, 216, 239, .3); border-radius: 999px; background: #061421; box-shadow: inset 0 1px 5px rgba(0,0,0,.4); }
+.charge-progress-track i { display: block; width: 0; height: 100%; background: linear-gradient(90deg, #147ec4, #25d8e2); transition: none; position: relative; }
+.charge-progress-track i::after { content: ""; position: absolute; top: -8px; right: -5px; width: 20px; height: 28px; border-radius: 50%; background: rgba(205, 255, 255, .7); filter: blur(8px); opacity: 0; }
+.charge-monitor:has(.charge-pile.charging) .charge-progress-track i::after { opacity: .6; animation: charge-progress-glow 2.8s ease-in-out infinite; }
+.charge-progress-foot { display: flex; justify-content: space-between; gap: 14px; color: var(--muted-2); font-size: 10px; }
+.charge-progress-foot time { color: #89a5b8; font-family: Consolas, monospace; }
+.charge-side-display { display: grid; justify-items: center; }
+.charge-visual { position: relative; width: 292px; height: 204px; display: flex; align-items: center; justify-content: space-between; padding: 0 25px 0 15px; }
+.charge-visual::before { content: ""; position: absolute; width: 240px; height: 190px; right: -10px; top: 5px; border: 1px solid rgba(65, 211, 233, .12); border-radius: 50%; }
+.charge-visual::after { content: ""; position: absolute; width: 7px; height: 7px; top: 42px; right: 42px; border-radius: 50%; background: var(--cyan); box-shadow: 0 0 14px var(--cyan); opacity: .75; }
+.charge-ring { --soc: 0; position: relative; z-index: 1; width: 123px; height: 123px; display: grid; place-items: center; border-radius: 50%; background: conic-gradient(#28d4df calc(var(--soc) * 1%), rgba(45, 104, 132, .18) 0); box-shadow: 0 0 30px rgba(31, 209, 224, .14); }
+.charge-ring::before { content: ""; position: absolute; inset: 9px; border-radius: inherit; background: #0a1d2e; border: 1px solid rgba(138, 235, 246, .13); }
+.charge-ring div { position: relative; text-align: center; }.charge-ring strong { display: block; color: #e8fdff; font: 600 23px/1 Consolas, monospace; letter-spacing: -1px; }.charge-ring small { display: block; margin-top: 7px; color: #71a8bb; font-size: 8px; letter-spacing: .16em; }
+.charge-pile { position: relative; z-index: 1; width: 113px; height: 181px; border: 2px solid rgba(125, 234, 247, .82); border-radius: 17px 17px 13px 13px; background: linear-gradient(145deg, rgba(21, 73, 97, .72), rgba(5, 25, 41, .98)); box-shadow: 0 0 0 7px rgba(40, 195, 220, .025), 0 16px 40px rgba(0, 0, 0, .3), inset 0 0 26px rgba(47, 218, 240, .11); }
+.charge-pile::after { content: ""; position: absolute; width: 2px; height: 61px; background: linear-gradient(var(--cyan), transparent); right: -17px; top: 55px; opacity: .35; }
+.charge-pile-cap { position: absolute; width: 42px; height: 8px; border-radius: 8px; background: var(--cyan); left: 34px; top: -5px; box-shadow: 0 0 18px rgba(53, 211, 232, .65); }
+.charge-pile-screen { position: absolute; left: 15px; right: 15px; top: 23px; height: 57px; display: grid; place-content: center; text-align: center; border: 1px solid rgba(95, 226, 243, .34); border-radius: 9px; background: #041925; box-shadow: inset 0 0 18px rgba(37, 210, 231, .08); }
+.charge-pile-screen b { color: #50eed0; font: 600 13px/1 Consolas, monospace; letter-spacing: .08em; }.charge-pile-screen small { margin-top: 5px; color: #7aa9bb; font-size: 7px; letter-spacing: .12em; }
+.charge-pile-bolt { position: absolute; width: 30px; height: 41px; left: 39px; top: 96px; fill: var(--cyan); filter: drop-shadow(0 0 7px rgba(53, 211, 232, .72)); opacity: .45; }
+.charge-pile-base { position: absolute; left: 15px; right: 15px; bottom: 10px; display: flex; justify-content: space-between; color: #528197; font: 7px/1 Consolas, monospace; letter-spacing: .09em; }
+.charge-pile.charging { border-color: rgba(125, 244, 239, .95); }.charge-pile.charging .charge-pile-bolt { opacity: 1; animation: charge-pile-breathe 2.5s ease-in-out infinite; }.charge-pile.charging::after { opacity: .85; animation: charge-cable-flow 2.8s ease-in-out infinite; }
+.charge-pile.full { border-color: rgba(67, 238, 177, .95); }.charge-pile.full .charge-pile-bolt { fill: var(--green); opacity: 1; }.charge-pile.full .charge-pile-cap { background: var(--green); box-shadow: 0 0 18px rgba(67, 238, 177, .65); }
+@keyframes charge-pile-breathe { 50% { opacity: .48; transform: translateY(3px); } }
+@keyframes charge-cable-flow { 50% { opacity: .18; transform: translateY(8px); } }
+@keyframes charge-progress-glow { 50% { opacity: .2; transform: translateX(-92px); } }
+@media (prefers-reduced-motion: reduce) { .charge-pile.charging .charge-pile-bolt, .charge-pile.charging::after, .charge-monitor:has(.charge-pile.charging) .charge-progress-track i::after { animation: none; } }
+@media (max-width: 1180px) { .charge-stat-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 980px) { .charge-stat-grid { grid-template-columns: 1fr 1fr; }.charge-monitor-body { grid-template-columns: 1fr; gap: 22px; } }
+@media (max-width: 560px) { .charge-stat-grid { grid-template-columns: 1fr; }.charge-progress-label strong { font-size: 26px; }.charge-visual { transform: scale(.9); margin: -8px 0; } }

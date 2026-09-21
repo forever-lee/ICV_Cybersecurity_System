@@ -472,10 +472,20 @@ def record_wifi_packet(state, payload, is_test=False):
 
     state.wifi_sequence += 1
     state.wifi_last_seen_ms = now_ms()
+    sender_time_ms = payload.get("sender_time_ms")
+    try:
+        sender_time_ms = int(sender_time_ms) if sender_time_ms is not None else None
+    except (TypeError, ValueError):
+        sender_time_ms = None
     record = {
         "sequence": state.wifi_sequence,
         "received_at_ms": state.wifi_last_seen_ms,
         "source_time_ms": payload.get("source_time_ms"),
+        "udp_received_at_ms": payload.get("udp_received_at_ms"),
+        "sender_time_ms": sender_time_ms,
+        "e2e_latency_ms": (state.wifi_last_seen_ms - sender_time_ms)
+        if sender_time_ms is not None else None,
+        "latency_estimated": sender_time_ms is not None,
         "source": str(payload.get("source", "WIFI-UDP"))[:80],
         "text": text,
         "hex": hex_text,
