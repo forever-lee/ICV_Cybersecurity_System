@@ -26,6 +26,7 @@ from stream_protocol import (
     unpack_fmp4,
     unpack_frame,
 )
+from wifi_ids import detect_wifi_intrusion, parse_charging_packet
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -100,6 +101,10 @@ class VehicleState:
         self.wifi_last_seen_ms = 0
         self.wifi_latest = None
         self.wifi_history = deque(maxlen=60)
+        self.wifi_ids_last_good_soc = None
+        self.wifi_ids_last_good_sequence = None
+        self.wifi_ids_alert_count = 0
+        self.wifi_ids_latest_alert = None
         self.navigation = None
 
     def online(self):
@@ -160,6 +165,11 @@ class VehicleState:
             "packet_count": self.wifi_sequence,
             "latest": self.wifi_latest,
             "history": list(self.wifi_history)[:12],
+            "ids": {
+                "status": "alert" if self.wifi_ids_latest_alert else "normal",
+                "alert_count": self.wifi_ids_alert_count,
+                "latest_alert": self.wifi_ids_latest_alert,
+            },
         }
 
 
@@ -472,6 +482,8 @@ def record_wifi_packet(state, payload, is_test=False):
 
     state.wifi_sequence += 1
     state.wifi_last_seen_ms = now_ms()
+    charge = parse_charging_packet(text)
+    ids_result = detect_wifi_intrusion(state, charge, state.wifi_last_seen_ms)
     sender_time_ms = payload.get("sender_time_ms")
     try:
         sender_time_ms = int(sender_time_ms) if sender_time_ms is not None else None
@@ -492,6 +504,10 @@ def record_wifi_packet(state, payload, is_test=False):
         "byte_count": int(payload.get("byte_count", len(encoded))),
         "rssi": payload.get("rssi"),
         "parsed": parsed,
+        "parsed_charge": charge,
+        "ids_verdict": ids_result["verdict"],
+        "ids_rule": ids_result["rule"],
+        "ids_alert": ids_result["alert"],
         "test": bool(is_test or payload.get("test")),
     }
     state.wifi_latest = record

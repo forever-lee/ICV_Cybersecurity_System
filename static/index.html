@@ -121,6 +121,18 @@
               <article><span>接收报文</span><strong id="wifiPacketCount">0</strong><small>累计 UDP 数据包</small></article>
               <article class="latency-stat"><span>端到端延迟（估算）</span><strong id="chargeLatencyStat">--<small>ms</small></strong><small id="chargeLatencyHint">等待带 TS 的报文</small></article>
             </div>
+            <article class="wifi-ids-alert" id="wifiIdsAlert" role="alert" hidden>
+              <div class="wifi-ids-alert-icon">!</div>
+              <div class="wifi-ids-alert-copy"><p>WIFI CHARGING IDS</p><h2 id="wifiIdsAlertTitle">SOC 数据突变攻击</h2><span>检测到充电状态数据与可信变化趋势不一致，原始报文已保留。</span></div>
+              <div class="wifi-ids-alert-metrics">
+                <span>报文序号<strong id="wifiIdsSequence">----</strong></span>
+                <span>正常基线<strong id="wifiIdsBaseline">--%</strong></span>
+                <span>异常数值<strong id="wifiIdsObserved">--%</strong></span>
+                <span>变化幅度<strong id="wifiIdsDelta">--%</strong></span>
+                <span>检测时间<strong id="wifiIdsTime">--:--:--</strong></span>
+                <span>本轮告警<strong id="wifiIdsCount">0</strong></span>
+              </div>
+            </article>
             <article class="panel charge-monitor" aria-labelledby="wifiTitle">
               <div class="charge-monitor-head"><div class="module-ident wifi"><i>WF</i><span><p class="eyebrow">WIFI CHARGING TELEMETRY</p><h2 id="wifiTitle">充电过程</h2><small>SOC、状态与延迟均严格跟随最新报文</small></span></div><span class="module-status offline" id="wifiStatus"><i></i><span>等待数据</span></span></div>
               <div class="charge-monitor-body">

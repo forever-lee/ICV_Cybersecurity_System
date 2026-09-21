@@ -838,6 +838,7 @@
     status.classList.toggle("offline", !online);
     status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
     $("wifiPacketCount").textContent = Number(wifi.packet_count || 0).toLocaleString();
+    updateWifiIds(wifi.ids || {});
     updateChargingSimulation(wifi);
     if (!latest) {
       $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiSeq").textContent = "—"; $("wifiState").textContent = "—"; $("wifiTime").textContent = "—"; $("wifiLatency").textContent = "—";
@@ -851,6 +852,22 @@
     $("wifiTime").textContent = formatFrameTime(latest.received_at_ms);
     $("wifiLatency").textContent = formatEstimatedLatency(latest.e2e_latency_ms);
     $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 充电报文…");
+  }
+
+  function updateWifiIds(ids) {
+    const container = $("wifiIdsAlert");
+    if (!container) return;
+    const alert = ids && ids.latest_alert;
+    container.hidden = !alert;
+    if (!alert) return;
+    const delta = Number(alert.delta_soc);
+    $("wifiIdsAlertTitle").textContent = alert.title || "SOC 数据突变攻击";
+    $("wifiIdsSequence").textContent = String(Number(alert.sequence || 0)).padStart(4, "0");
+    $("wifiIdsBaseline").textContent = `${Number(alert.baseline_soc).toFixed(1)}%`;
+    $("wifiIdsObserved").textContent = `${Number(alert.observed_soc).toFixed(1)}%`;
+    $("wifiIdsDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
+    $("wifiIdsTime").textContent = formatFrameTime(alert.detected_at_ms);
+    $("wifiIdsCount").textContent = String(Number(ids.alert_count || 0));
   }
 
   function parseChargingPacket(text) {
@@ -907,13 +924,16 @@
 
   function renderHistory(history, source, emptyText) {
     const records = Array.isArray(history) ? history.slice(0, 8) : [];
-    return records.map((record) => `
-      <div class="history-row ${record.test ? "test" : ""}">
+    return records.map((record) => {
+      const anomaly = record.ids_verdict === "anomaly";
+      return `
+      <div class="history-row ${record.test ? "test" : ""} ${anomaly ? "anomaly" : ""}">
         <span>#${escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
         <span class="history-source">${escapeHtml(record.source || source)}</span>
-        <code title="${escapeHtml(record.hex || "")}">${escapeHtml(record.text || "（空报文）")}</code>
+        <code title="${escapeHtml(record.hex || "")}">${anomaly ? '<b class="history-alert-badge">异常</b>' : ""}${escapeHtml(record.text || "（空报文）")}</code>
         <span class="history-size">${escapeHtml(record.byte_count || 0)} B</span>
-      </div>`).join("") || `<div class="history-empty">${emptyText}</div>`;
+      </div>`;
+    }).join("") || `<div class="history-empty">${emptyText}</div>`;
   }
 
   function updateLatencyState(latency) {
