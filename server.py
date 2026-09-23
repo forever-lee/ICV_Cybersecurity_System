@@ -2,16 +2,22 @@
 
 import argparse
 import asyncio
+import base64
+import binascii
+import importlib.util
 import json
 import logging
 import math
 import os
 import random
 import secrets
+import sys
 import time
 from collections import deque
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +36,7 @@ from stream_protocol import (
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+REFERENCE_LIBRARY_DIR = (STATIC_DIR / "reference-library").resolve()
 INGEST_TOKEN = os.getenv("VEHICLE_INGEST_TOKEN", "change-me-in-production")
 DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 OFFLINE_AFTER_SECONDS = float(os.getenv("OFFLINE_AFTER_SECONDS", "4"))
@@ -44,6 +51,11 @@ AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
 FMP4_BUFFER_SEGMENTS = max(30, int(os.getenv("FMP4_BUFFER_SEGMENTS", "300")))
+MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
+HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
+
+_HMI_COMPARE_FUNCTION = None
+_HMI_COMPARE_SOURCE = None
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -190,6 +202,101 @@ def bearer_token(headers):
 
 def token_matches(actual, expected):
     return bool(actual and expected and secrets.compare_digest(str(actual), str(expected)))
+
+
+def comparison_algorithm_candidates():
+    candidates = []
+    if HMI_COMPARISON_PATH:
+        configured = Path(HMI_COMPARISON_PATH).expanduser()
+        candidates.append(configured if configured.is_absolute() else BASE_DIR / configured)
+    candidates.extend(
+        (
+            BASE_DIR / "hmi_comparison.py",
+            BASE_DIR.parent / "expected和actual算法" / "AI_Apple_Bad" / "hmi_comparison.py",
+        )
+    )
+    return candidates
+
+
+def get_hmi_compare_function():
+    """Load the existing Expected/Actual algorithm without duplicating it."""
+
+    global _HMI_COMPARE_FUNCTION, _HMI_COMPARE_SOURCE
+    if _HMI_COMPARE_FUNCTION is not None:
+        return _HMI_COMPARE_FUNCTION
+
+    source_path = next((path.resolve() for path in comparison_algorithm_candidates() if path.is_file()), None)
+    if source_path is None:
+        searched = ", ".join(str(path) for path in comparison_algorithm_candidates())
+        raise RuntimeError("未找到 hmi_comparison.py；已检查：{}".format(searched))
+
+    module_name = "_vshield_hmi_comparison"
+    specification = importlib.util.spec_from_file_location(module_name, str(source_path))
+    if specification is None or specification.loader is None:
+        raise RuntimeError("无法加载图像对比算法：{}".format(source_path))
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    try:
+        specification.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    compare_function = getattr(module, "compare_frames", None)
+    if not callable(compare_function):
+        raise RuntimeError("图像对比算法未提供 compare_frames：{}".format(source_path))
+    _HMI_COMPARE_FUNCTION = compare_function
+    _HMI_COMPARE_SOURCE = source_path
+    LOGGER.info("hmi_comparison_loaded source=%s", source_path)
+    return _HMI_COMPARE_FUNCTION
+
+
+def decode_comparison_image(data_url):
+    if not isinstance(data_url, str):
+        raise HTTPException(status_code=400, detail="actual_image must be a base64 image data URL")
+    header, separator, encoded = data_url.partition(",")
+    if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
+        raise HTTPException(status_code=400, detail="actual_image must be a base64 image data URL")
+    if len(encoded) > ((MAX_COMPARISON_IMAGE_BYTES + 2) // 3) * 4 + 16:
+        raise HTTPException(status_code=413, detail="actual image is too large")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="actual_image contains invalid base64 data")
+    if not image_bytes or len(image_bytes) > MAX_COMPARISON_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="actual image is empty or too large")
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="actual_image is not a supported image")
+    return image
+
+
+def resolve_reference_image(reference_url):
+    if not isinstance(reference_url, str):
+        raise HTTPException(status_code=400, detail="expected_image must be a reference-library URL")
+    clean_path = reference_url.split("?", 1)[0].replace("\\", "/")
+    prefix = "/static/reference-library/"
+    if not clean_path.startswith(prefix):
+        raise HTTPException(status_code=400, detail="expected_image must come from /static/reference-library/")
+    relative_path = clean_path[len(prefix) :]
+    candidate = (REFERENCE_LIBRARY_DIR / relative_path).resolve()
+    try:
+        candidate.relative_to(REFERENCE_LIBRARY_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid expected_image path")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="expected image was not found")
+    encoded = np.fromfile(str(candidate), dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="expected image is not readable")
+    return candidate, image
+
+
+def encode_comparison_preview(image):
+    ok, encoded = cv2.imencode(".jpg", image, (cv2.IMWRITE_JPEG_QUALITY, 88))
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
 def finite_number(payload, keys, minimum, maximum, required=False):
@@ -339,6 +446,74 @@ async def vehicle_metrics(vehicle_id: str):
 @app.get("/api/vehicles/{vehicle_id}/history")
 async def vehicle_history(vehicle_id: str):
     return {"vehicle_id": vehicle_id, "samples": list(registry.get(vehicle_id).history)}
+
+
+@app.post("/api/vehicles/{vehicle_id}/cockpit/compare")
+async def compare_cockpit_images(vehicle_id: str, request: Request):
+    """Compare one local Expected image with a captured Actual HMI frame."""
+
+    state = registry.get(vehicle_id)
+    maximum_json_bytes = ((MAX_COMPARISON_IMAGE_BYTES + 2) // 3) * 4 + 65536
+    try:
+        content_length = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        content_length = 0
+    if content_length > maximum_json_bytes:
+        raise HTTPException(status_code=413, detail="comparison payload is too large")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="comparison payload must be an object")
+
+    expected_path, expected_image = resolve_reference_image(payload.get("expected_image"))
+    actual_image = decode_comparison_image(payload.get("actual_image"))
+    try:
+        compare_function = get_hmi_compare_function()
+        result = await asyncio.to_thread(compare_function, expected_image, actual_image)
+    except HTTPException:
+        raise
+    except (RuntimeError, ImportError) as error:
+        LOGGER.error("hmi_comparison_unavailable error=%s", error)
+        raise HTTPException(status_code=503, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        LOGGER.exception("hmi_comparison_failure vehicle_id=%s", state.vehicle_id)
+        raise HTTPException(status_code=500, detail="图像对比失败：{}".format(error))
+
+    alignment = result.alignment
+    return {
+        "vehicle_id": state.vehicle_id,
+        "case_id": str(payload.get("case_id", ""))[:80],
+        "step_index": payload.get("step_index"),
+        "algorithm": "hmi_comparison.compare_frames",
+        "status": result.status,
+        "passed": bool(result.passed),
+        "similarity": round(float(result.similarity), 4),
+        "ms_ssim": round(float(result.structural_similarity), 4),
+        "color_similarity": round(float(result.color_similarity), 4),
+        "difference_ratio": round(float(result.difference_ratio), 4),
+        "valid_ratio": round(float(result.valid_ratio), 4),
+        "mean_delta_e": round(float(result.mean_delta_e), 4),
+        "p95_delta_e": round(float(result.p95_delta_e), 4),
+        "alignment": {
+            "success": bool(alignment.success),
+            "status": alignment.status,
+            "method": alignment.method,
+            "confidence": round(float(alignment.confidence), 4),
+        },
+        "difference_boxes": [list(map(int, box)) for box in result.boxes],
+        "critical_failures": list(result.critical_failures),
+        "annotated_actual": encode_comparison_preview(result.annotated),
+        "expected": {
+            "src": "/static/reference-library/" + expected_path.relative_to(REFERENCE_LIBRARY_DIR).as_posix(),
+            "width": int(expected_image.shape[1]),
+            "height": int(expected_image.shape[0]),
+        },
+        "actual": {"width": int(actual_image.shape[1]), "height": int(actual_image.shape[0])},
+    }
 
 
 @app.post("/api/vehicles/{vehicle_id}/navigation")
