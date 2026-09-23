@@ -605,6 +605,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .cockpit-shot-frame.actual { border-color: rgba(32, 214, 231, .27); }
 .cockpit-shot-frame.actual::after { content: ""; position: absolute; left: 0; right: 0; top: 52%; height: 1px; background: linear-gradient(90deg, transparent, rgba(32, 214, 231, .46), transparent); box-shadow: 0 0 9px rgba(32, 214, 231, .22); }
 .cockpit-reference-frame > img { width: 100%; height: 100%; display: block; object-fit: contain; background: #02060b; }
+.cockpit-reference-frame > img.hidden, .cockpit-actual-placeholder.hidden { display: none; }
 .cockpit-reference-frame > span { position: absolute; z-index: 3; top: 8px; left: 8px; padding: 3px 6px; border: 1px solid rgba(32, 214, 231, .22); border-radius: 3px; background: rgba(1, 8, 14, .72); color: #77dfe8; font: 600 6px Consolas, monospace; letter-spacing: .08em; }
 .cockpit-actual-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; flex-direction: column; background: radial-gradient(circle at 50% 45%, #10283a, #050a12 68%); text-align: center; }
 .cockpit-actual-placeholder i { width: 34px; height: 25px; display: grid; place-items: center; border: 1px solid #31556d; border-radius: 4px; color: #5f859c; font: 600 8px Consolas, monospace; font-style: normal; }
@@ -620,6 +621,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .cockpit-image-compare figcaption span { color: var(--cyan); font: 500 8px Consolas, monospace; letter-spacing: .08em; }
 .cockpit-image-compare figcaption b { overflow: hidden; color: #9cafbb; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .cockpit-image-actions { display: flex; flex: 0 0 auto; gap: 5px; }
+.cockpit-image-actions > input[type="file"] { display: none; }
 .cockpit-image-compare figcaption button { height: 24px; flex: 0 0 auto; padding: 0 7px; border: 1px solid rgba(32, 214, 231, .24); border-radius: 4px; background: rgba(32, 214, 231, .06); color: #74bfc9; font-size: 7px; cursor: pointer; }
 .cockpit-image-compare figcaption button:hover { border-color: var(--cyan); color: #c4faff; }
 .cockpit-image-compare figcaption button:disabled { cursor: wait; opacity: .62; }

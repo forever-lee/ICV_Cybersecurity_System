@@ -603,18 +603,19 @@
       referenceCaption.title = `${stepReference.source} · ${action}`;
       compareStep.textContent = `步骤 ${stepNumber} · ${phase}`;
       const capturedImage = currentTestCase.captures[currentStepIndex];
+      const captureSource = currentTestCase.captureSources[currentStepIndex] || "已采集";
       const comparison = currentTestCase.comparisons[currentStepIndex];
       if (capturedImage) {
         actualImage.src = comparison?.result?.annotated_actual || capturedImage;
         actualImage.classList.remove("hidden");
         actualPlaceholder.classList.add("hidden");
         actualCaption.textContent = comparison?.state === "running"
-          ? `步骤 ${stepNumber} · 对比中`
+          ? `步骤 ${stepNumber} · ${captureSource} · 对比中`
           : comparison?.result
-            ? `步骤 ${stepNumber} · ${comparison.result.status} 差异标注`
+            ? `步骤 ${stepNumber} · ${captureSource} · ${comparison.result.status} 差异标注`
             : comparison?.state === "error"
-              ? `步骤 ${stepNumber} · 对比失败`
-              : `步骤 ${stepNumber} · 已采集`;
+              ? `步骤 ${stepNumber} · ${captureSource} · 对比失败，保留原图`
+              : `步骤 ${stepNumber} · ${captureSource}`;
       } else {
         actualImage.removeAttribute("src");
         actualImage.classList.add("hidden");
@@ -772,14 +773,15 @@
     uploadButton?.addEventListener("click", () => uploadInput?.click());
     uploadInput?.addEventListener("change", async () => {
       const file = uploadInput.files?.[0];
-      uploadInput.value = "";
       if (!file) return;
       if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) {
         toast("仅支持 JPEG、PNG 或 WebP 图像");
+        uploadInput.value = "";
         return;
       }
       if (file.size > 4 * 1024 * 1024) {
         toast("Actual 图像不能超过 4 MB");
+        uploadInput.value = "";
         return;
       }
       try {
@@ -792,6 +794,9 @@
         await runImageComparison(actualImage, `已上传 ${file.name}`);
       } catch (error) {
         toast(error.message || "Actual 图像上传失败");
+      } finally {
+        // 处理结束后再清空，使同一张图片也可以再次选择上传。
+        uploadInput.value = "";
       }
     });
 
