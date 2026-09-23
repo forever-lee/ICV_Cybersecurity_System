@@ -309,7 +309,14 @@
                   <div class="cockpit-actual-placeholder" data-cockpit-actual-placeholder><i>CAM</i><strong>等待摄像头采集</strong><small>选择步骤后采集对应的中控画面</small></div>
                   <span>CAMERA CAPTURE</span>
                 </div>
-                <figcaption><span>ACTUAL</span><b data-cockpit-actual-caption>步骤 01 · 等待采集</b><button type="button" data-cockpit-capture>采集当前画面</button></figcaption>
+                <figcaption>
+                  <span>ACTUAL</span><b data-cockpit-actual-caption>步骤 01 · 等待上传或采集</b>
+                  <div class="cockpit-image-actions">
+                    <input class="hidden" type="file" accept="image/png,image/jpeg,image/webp" data-cockpit-upload-input />
+                    <button type="button" data-cockpit-upload>上传 Actual</button>
+                    <button type="button" data-cockpit-capture>采集当前画面</button>
+                  </div>
+                </figcaption>
               </figure>
             </div>
           </section>
@@ -319,7 +326,7 @@
             <div class="cockpit-verdict waiting" data-cockpit-verdict>
               <i data-cockpit-verdict-icon>…</i>
               <strong data-cockpit-verdict-status>WAITING</strong>
-              <span><span data-cockpit-verdict-label>采集 Actual 后自动对比</span><b data-cockpit-verdict-score>—</b></span>
+              <span><span data-cockpit-verdict-label>对比算法启动中</span><b data-cockpit-verdict-score>—</b></span>
               <p data-cockpit-verdict-details>MS-SSIM — · 差异 — · 对齐 —</p>
             </div>
           </section>
@@ -443,6 +450,7 @@
       }),
       stepStates: testCase.steps.map((_, index) => index === 0 ? "running" : "waiting"),
       captures: {},
+      captureSources: {},
       comparisons: {},
     }));
   }
@@ -511,6 +519,8 @@
     const actualPlaceholder = root.querySelector("[data-cockpit-actual-placeholder]");
     const actualCaption = root.querySelector("[data-cockpit-actual-caption]");
     const captureButton = root.querySelector("[data-cockpit-capture]");
+    const uploadButton = root.querySelector("[data-cockpit-upload]");
+    const uploadInput = root.querySelector("[data-cockpit-upload-input]");
     const verdictPanel = root.querySelector("[data-cockpit-verdict-panel]");
     const verdict = root.querySelector("[data-cockpit-verdict]");
     const verdictIcon = root.querySelector("[data-cockpit-verdict-icon]");
@@ -522,6 +532,7 @@
     let currentTestCase = currentCases[0];
     let currentStepIndex = 0;
     let comparisonRequestId = 0;
+    let comparisonService = { status: "starting", error: null };
 
     const metric = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : "—";
 
@@ -534,7 +545,22 @@
       let score = "—";
       let details = "MS-SSIM — · 差异 — · 对齐 —";
 
-      if (comparison?.state === "running") {
+      if (!comparison && comparisonService.status === "starting") {
+        tone = "running";
+        icon = "↻";
+        status = "STARTING";
+        label = "正在预加载图像对比算法";
+        details = "服务启动后将常驻等待 Expected / Actual 图像";
+      } else if (!comparison && comparisonService.status === "error") {
+        tone = "invalid";
+        icon = "!";
+        status = "OFFLINE";
+        label = "图像对比算法启动失败";
+        details = comparisonService.error || "请检查 hmi_comparison.py 和 OpenCV 环境";
+      } else if (!comparison && comparisonService.status === "ready") {
+        label = "算法已就绪，等待上传或采集 Actual 图像";
+        details = `${comparisonService.source || "hmi_comparison.py"} · READY · 等待图像`;
+      } else if (comparison?.state === "running") {
         tone = "running";
         icon = "↻";
         status = "ANALYZING";
@@ -594,10 +620,12 @@
         actualImage.classList.add("hidden");
         actualPlaceholder.classList.remove("hidden");
         actualPlaceholder.querySelector("small").textContent = `步骤 ${stepNumber} · ${phase}`;
-        actualCaption.textContent = `步骤 ${stepNumber} · 等待采集`;
+        actualCaption.textContent = `步骤 ${stepNumber} · 等待上传或采集`;
       }
       captureButton.disabled = comparison?.state === "running";
       captureButton.textContent = comparison?.state === "running" ? "算法对比中…" : capturedImage ? "重新采集并对比" : "采集当前画面";
+      uploadButton.disabled = comparison?.state === "running";
+      uploadButton.textContent = comparison?.state === "running" ? "请稍候…" : capturedImage ? "重新上传" : "上传 Actual";
       updateVerdict();
     };
 
@@ -689,26 +717,17 @@
         setCurrentStepStatus(statusButton.dataset.cockpitStepStatus);
       }
     });
-    captureButton?.addEventListener("click", async () => {
-      const cockpitCanvas = root.querySelector("#cockpitIviCanvas");
-      if (!cockpitCanvas?.width || !cockpitCanvas.height || !root.querySelector("#cockpitIviStage")?.classList.contains("has-video")) {
-        toast("当前还没有可采集的中控摄像头画面");
-        return;
-      }
-      const captureCanvas = document.createElement("canvas");
-      captureCanvas.width = cockpitCanvas.width;
-      captureCanvas.height = cockpitCanvas.height;
-      captureCanvas.getContext("2d").drawImage(cockpitCanvas, 0, 0);
+    const runImageComparison = async (actualCapture, sourceLabel) => {
       const targetCase = currentTestCase;
       const targetStepIndex = currentStepIndex;
       const targetReference = targetCase.stepReferences[targetStepIndex];
       const requestId = ++comparisonRequestId;
-      const actualCapture = captureCanvas.toDataURL("image/jpeg", .92);
       targetCase.captures[targetStepIndex] = actualCapture;
+      targetCase.captureSources[targetStepIndex] = sourceLabel;
       targetCase.comparisons[targetStepIndex] = { state: "running", requestId };
       targetCase.stepStates[targetStepIndex] = "running";
       renderCurrentStep();
-      toast(`步骤 ${String(targetStepIndex + 1).padStart(2, "0")} 已采集，正在执行 Expected / Actual 对比`);
+      toast(`步骤 ${String(targetStepIndex + 1).padStart(2, "0")} ${sourceLabel}，正在执行 Expected / Actual 对比`);
 
       try {
         const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/cockpit/compare`, {
@@ -735,7 +754,58 @@
         if (currentTestCase === targetCase) renderCurrentStep();
         toast(error.message || "图像对比失败");
       }
+    };
+
+    captureButton?.addEventListener("click", async () => {
+      const cockpitCanvas = root.querySelector("#cockpitIviCanvas");
+      if (!cockpitCanvas?.width || !cockpitCanvas.height || !root.querySelector("#cockpitIviStage")?.classList.contains("has-video")) {
+        toast("当前还没有可采集的中控摄像头画面");
+        return;
+      }
+      const captureCanvas = document.createElement("canvas");
+      captureCanvas.width = cockpitCanvas.width;
+      captureCanvas.height = cockpitCanvas.height;
+      captureCanvas.getContext("2d").drawImage(cockpitCanvas, 0, 0);
+      const actualCapture = captureCanvas.toDataURL("image/jpeg", .92);
+      await runImageComparison(actualCapture, "已采集");
     });
+    uploadButton?.addEventListener("click", () => uploadInput?.click());
+    uploadInput?.addEventListener("change", async () => {
+      const file = uploadInput.files?.[0];
+      uploadInput.value = "";
+      if (!file) return;
+      if (!/^image\/(jpeg|png|webp)$/i.test(file.type)) {
+        toast("仅支持 JPEG、PNG 或 WebP 图像");
+        return;
+      }
+      if (file.size > 4 * 1024 * 1024) {
+        toast("Actual 图像不能超过 4 MB");
+        return;
+      }
+      try {
+        const actualImage = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(reader.result);
+          reader.onerror = () => reject(new Error("无法读取上传图像"));
+          reader.readAsDataURL(file);
+        });
+        await runImageComparison(actualImage, `已上传 ${file.name}`);
+      } catch (error) {
+        toast(error.message || "Actual 图像上传失败");
+      }
+    });
+
+    const refreshComparisonService = async () => {
+      try {
+        const response = await fetch("/api/cockpit/comparison/status", { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        comparisonService = response.ok ? payload : { status: "error", error: payload.detail || "无法读取算法状态" };
+      } catch (error) {
+        comparisonService = { status: "error", error: error.message || "无法连接图像对比服务" };
+      }
+      renderCurrentStep();
+    };
+    void refreshComparisonService();
     root.querySelectorAll("[data-cockpit-fullscreen]").forEach((button) => button.addEventListener("click", () => {
       const target = document.getElementById(button.dataset.cockpitFullscreen);
       if (!target) return;

@@ -619,6 +619,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .cockpit-image-compare figcaption { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin-top: 7px; color: #738b9e; font-size: 9px; }
 .cockpit-image-compare figcaption span { color: var(--cyan); font: 500 8px Consolas, monospace; letter-spacing: .08em; }
 .cockpit-image-compare figcaption b { overflow: hidden; color: #9cafbb; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.cockpit-image-actions { display: flex; flex: 0 0 auto; gap: 5px; }
 .cockpit-image-compare figcaption button { height: 24px; flex: 0 0 auto; padding: 0 7px; border: 1px solid rgba(32, 214, 231, .24); border-radius: 4px; background: rgba(32, 214, 231, .06); color: #74bfc9; font-size: 7px; cursor: pointer; }
 .cockpit-image-compare figcaption button:hover { border-color: var(--cyan); color: #c4faff; }
 .cockpit-image-compare figcaption button:disabled { cursor: wait; opacity: .62; }

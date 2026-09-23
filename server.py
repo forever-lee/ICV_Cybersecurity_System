@@ -56,6 +56,12 @@ HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
 
 _HMI_COMPARE_FUNCTION = None
 _HMI_COMPARE_SOURCE = None
+HMI_COMPARISON_RUNTIME = {
+    "status": "starting",
+    "source": None,
+    "error": None,
+    "loaded_at_ms": 0,
+}
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -250,6 +256,33 @@ def get_hmi_compare_function():
     return _HMI_COMPARE_FUNCTION
 
 
+def comparison_runtime_snapshot():
+    return {
+        "status": HMI_COMPARISON_RUNTIME["status"],
+        "source": HMI_COMPARISON_RUNTIME["source"],
+        "error": HMI_COMPARISON_RUNTIME["error"],
+        "loaded_at_ms": HMI_COMPARISON_RUNTIME["loaded_at_ms"],
+    }
+
+
+def initialize_hmi_comparison():
+    HMI_COMPARISON_RUNTIME.update(status="starting", source=None, error=None, loaded_at_ms=0)
+    try:
+        compare_function = get_hmi_compare_function()
+    except Exception as error:
+        HMI_COMPARISON_RUNTIME.update(status="error", error=str(error))
+        LOGGER.exception("hmi_comparison_startup_failure")
+        return None
+    HMI_COMPARISON_RUNTIME.update(
+        status="ready",
+        source=_HMI_COMPARE_SOURCE.name if _HMI_COMPARE_SOURCE else "hmi_comparison.py",
+        error=None,
+        loaded_at_ms=now_ms(),
+    )
+    LOGGER.info("hmi_comparison_ready waiting_for_images=true")
+    return compare_function
+
+
 def decode_comparison_image(data_url):
     if not isinstance(data_url, str):
         raise HTTPException(status_code=400, detail="actual_image must be a base64 image data URL")
@@ -360,6 +393,13 @@ app = FastAPI(title="V-SHIELD Vehicle Cybersecurity Platform", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.on_event("startup")
+async def start_hmi_comparison_runtime():
+    """Warm the comparison engine once, then keep it ready for image uploads."""
+
+    await asyncio.to_thread(initialize_hmi_comparison)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     public_path = request.url.path in {"/healthz", "/readyz"}
@@ -409,14 +449,28 @@ async def dashboard():
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "time_ms": now_ms(), "vehicles": len(registry.vehicles)}
+    return {
+        "status": "ok",
+        "time_ms": now_ms(),
+        "vehicles": len(registry.vehicles),
+        "hmi_comparison": comparison_runtime_snapshot(),
+    }
 
 
 @app.get("/readyz")
 async def readyz():
-    if not STATIC_DIR.exists():
-        return JSONResponse({"status": "not_ready"}, status_code=503)
-    return {"status": "ready"}
+    comparison = comparison_runtime_snapshot()
+    if not STATIC_DIR.exists() or comparison["status"] != "ready":
+        return JSONResponse(
+            {"status": "not_ready", "hmi_comparison": comparison},
+            status_code=503,
+        )
+    return {"status": "ready", "hmi_comparison": comparison}
+
+
+@app.get("/api/cockpit/comparison/status")
+async def cockpit_comparison_status():
+    return comparison_runtime_snapshot()
 
 
 @app.get("/api/config/map")
@@ -470,7 +524,9 @@ async def compare_cockpit_images(vehicle_id: str, request: Request):
     expected_path, expected_image = resolve_reference_image(payload.get("expected_image"))
     actual_image = decode_comparison_image(payload.get("actual_image"))
     try:
-        compare_function = get_hmi_compare_function()
+        compare_function = _HMI_COMPARE_FUNCTION or initialize_hmi_comparison()
+        if compare_function is None:
+            raise RuntimeError(HMI_COMPARISON_RUNTIME["error"] or "图像对比算法未就绪")
         result = await asyncio.to_thread(compare_function, expected_image, actual_image)
     except HTTPException:
         raise
