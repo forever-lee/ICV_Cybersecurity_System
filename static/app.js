@@ -58,6 +58,7 @@
     mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
     h264Rebuffering: false,
+    wifiClearBeforeMs: 0, wifiClearBaseCount: 0, wifiClearBaseAlertCount: 0,
   };
 
   const $ = (id) => document.getElementById(id);
@@ -831,6 +832,7 @@
   }
 
   function updateWifi(wifi) {
+    wifi = wifiDisplaySnapshot(wifi || {});
     const latest = wifi.latest;
     const online = wifi.status === "online" && latest;
     const status = $("wifiStatus");
@@ -852,6 +854,29 @@
     $("wifiTime").textContent = formatFrameTime(latest.received_at_ms);
     $("wifiLatency").textContent = formatEstimatedLatency(latest.e2e_latency_ms);
     $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 充电报文…");
+  }
+
+  function wifiDisplaySnapshot(wifi) {
+    if (!state.wifiClearBeforeMs) return wifi;
+    const isNew = (record) => Number(record && record.received_at_ms || 0) > state.wifiClearBeforeMs;
+    const history = (wifi.history || []).filter(isNew);
+    const latest = isNew(wifi.latest) ? wifi.latest : null;
+    const rawIds = wifi.ids || {};
+    const latestAlert = rawIds.latest_alert && Number(rawIds.latest_alert.detected_at_ms || 0) > state.wifiClearBeforeMs
+      ? rawIds.latest_alert : null;
+    return {
+      ...wifi,
+      status: latest ? wifi.status : "offline",
+      packet_count: Math.max(0, Number(wifi.packet_count || 0) - state.wifiClearBaseCount),
+      latest,
+      history,
+      ids: {
+        ...rawIds,
+        status: latestAlert ? "alert" : "normal",
+        alert_count: Math.max(0, Number(rawIds.alert_count || 0) - state.wifiClearBaseAlertCount),
+        latest_alert: latestAlert,
+      },
+    };
   }
 
   function updateWifiIds(ids) {
@@ -1020,6 +1045,7 @@
   $("fullscreenButton").addEventListener("click", () => { const target = $("videoStage"); if (document.fullscreenElement) document.exitFullscreen(); else target.requestFullscreen().catch(() => toast("浏览器未允许全屏显示")); });
   $("vehicleSelect").addEventListener("change", (event) => {
     state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
+    state.wifiClearBeforeMs = 0; state.wifiClearBaseCount = 0; state.wifiClearBaseAlertCount = 0;
     resetNavigationView();
     history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${state.currentView}`);
     renderDomainPages(); setupDomainOpenButtons(); connect();
@@ -1051,22 +1077,12 @@
 
   const wifiClearButton = $("wifiClearButton");
   if (wifiClearButton) wifiClearButton.addEventListener("click", async () => {
-    if (!window.confirm("清空当前车辆的 WiFi 报文、充电状态和 IDS 告警？")) return;
-    wifiClearButton.disabled = true;
-    wifiClearButton.textContent = "清空中…";
-    try {
-      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/wifi/clear`, { method: "POST" });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const data = await response.json();
-      state.latestMetrics.wifi = data.wifi;
-      updateWifi(data.wifi);
-      toast("本轮 WiFi 数据已清空");
-    } catch (_) {
-      toast("清空失败，请检查后端服务");
-    } finally {
-      wifiClearButton.disabled = false;
-      wifiClearButton.textContent = "清空本轮数据";
-    }
+    const wifi = state.latestMetrics.wifi || {};
+    state.wifiClearBeforeMs = Date.now();
+    state.wifiClearBaseCount = Number(wifi.packet_count || 0);
+    state.wifiClearBaseAlertCount = Number((wifi.ids || {}).alert_count || 0);
+    updateWifi(wifi);
+    toast("页面 WiFi 数据已清零，设备与后端记录未改动");
   });
 
   async function loadVehicles() {

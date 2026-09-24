@@ -172,18 +172,6 @@ class VehicleState:
             },
         }
 
-    def clear_wifi_data(self):
-        """Reset only WiFi telemetry for a fresh on-site demonstration round."""
-        self.wifi_sequence = 0
-        self.wifi_last_seen_ms = 0
-        self.wifi_latest = None
-        self.wifi_history.clear()
-        self.wifi_ids_last_good_soc = None
-        self.wifi_ids_last_good_sequence = None
-        self.wifi_ids_alert_count = 0
-        self.wifi_ids_latest_alert = None
-
-
 class Registry:
     def __init__(self):
         self.vehicles = {}
@@ -537,13 +525,6 @@ async def ingest_wifi(vehicle_id: str, request: Request):
     state = registry.get(vehicle_id)
     record = record_wifi_packet(state, payload)
     return {"accepted": True, "vehicle_id": state.vehicle_id, "wifi": record}
-
-
-@app.post("/api/vehicles/{vehicle_id}/wifi/clear")
-async def clear_wifi(vehicle_id: str):
-    state = registry.get(vehicle_id)
-    state.clear_wifi_data()
-    return {"accepted": True, "vehicle_id": state.vehicle_id, "wifi": state.wifi_snapshot()}
 
 
 @app.post("/api/vehicles/{vehicle_id}/wifi/test")
