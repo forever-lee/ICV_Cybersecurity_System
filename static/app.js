@@ -1048,6 +1048,27 @@
   const wifiTestButton = $("wifiTestButton");
   if (bluetoothTestButton) bluetoothTestButton.addEventListener("click", () => createTestData("bluetooth"));
   if (wifiTestButton) wifiTestButton.addEventListener("click", () => createTestData("wifi"));
+
+  const wifiClearButton = $("wifiClearButton");
+  if (wifiClearButton) wifiClearButton.addEventListener("click", async () => {
+    if (!window.confirm("清空当前车辆的 WiFi 报文、充电状态和 IDS 告警？")) return;
+    wifiClearButton.disabled = true;
+    wifiClearButton.textContent = "清空中…";
+    try {
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/wifi/clear`, { method: "POST" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      state.latestMetrics.wifi = data.wifi;
+      updateWifi(data.wifi);
+      toast("本轮 WiFi 数据已清空");
+    } catch (_) {
+      toast("清空失败，请检查后端服务");
+    } finally {
+      wifiClearButton.disabled = false;
+      wifiClearButton.textContent = "清空本轮数据";
+    }
+  });
+
   async function loadVehicles() {
     try {
       const response = await fetch("/api/vehicles"); const data = await response.json(); const select = $("vehicleSelect");

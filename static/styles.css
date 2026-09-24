@@ -308,6 +308,8 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .history-row.anomaly { color: #ff8793; background: rgba(255, 67, 86, .1); box-shadow: inset 2px 0 #ff5365; }
 .history-row.anomaly code { color: #ffd0d5; }
 .history-alert-badge { display: inline-block; margin-right: 6px; padding: 2px 4px; border-radius: 3px; color: #fff; background: #d94052; font: 700 7px/1 sans-serif; vertical-align: 1px; }
+.clear-wifi-button { color: #ffb9c0; border-color: rgba(255, 101, 117, .34); background: rgba(255, 74, 93, .08); }
+.clear-wifi-button:hover { color: #fff0f2; border-color: rgba(255, 101, 117, .68); background: rgba(255, 74, 93, .16); }
 .charge-monitor { overflow: hidden; margin-bottom: 14px; }
 .charge-monitor-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 20px; border-bottom: 1px solid var(--line); }
 .charge-monitor-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, .65fr); align-items: center; gap: 30px; padding: 27px 25px; background: radial-gradient(circle at 80% 38%, rgba(34, 209, 226, .12), transparent 28%); }
