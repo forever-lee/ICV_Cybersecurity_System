@@ -4,8 +4,16 @@
   const HEADER_SIZE = 29;
   const FMP4_HEADER_SIZE = 17;
   const H264_MIME = 'video/mp4; codecs="avc1.640029"';
-  const H264_TARGET_BUFFER_SECONDS = 10;
-  const H264_RESUME_BUFFER_SECONDS = 6;
+  const HEVC_MIMES = [
+    'video/mp4; codecs="hvc1"',
+    'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'video/mp4; codecs="hvc1.1.6.L120.B0"',
+    'video/mp4; codecs="hvc1.1.6.L123.B0"',
+    'video/mp4; codecs="hev1"',
+  ];
+  const H264_TARGET_BUFFER_SECONDS = 1;
+  const H264_RESUME_BUFFER_SECONDS = 0.5;
+  const H264_MAX_LIVE_LATENCY_MS = 5000;
   const VIEW_NAMES = {
     overview: "全局安全态势", telematics: "车联网域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
@@ -52,10 +60,9 @@
     playbackStarted: false, bufferingStartedAt: 0,
     amap: null, vehicleMap: null, vehicleMarker: null, routeLine: null,
     routePoints: [], pendingNavigation: null, navigationUpdateId: 0,
-    browserNavigation: null, browserLocationStarted: false,
-    browserLocationWatchId: null, lastBrowserPosition: null,
     navigationSourceKind: null,
     mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
+    mediaMime: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
     h264Rebuffering: false,
   };
@@ -266,104 +273,6 @@
       && Date.now() - capturedAt < 15000;
   }
 
-  function distanceMeters(from, to) {
-    const radius = 6371000;
-    const toRadians = (value) => value * Math.PI / 180;
-    const latitude1 = toRadians(from.latitude);
-    const latitude2 = toRadians(to.latitude);
-    const deltaLatitude = latitude2 - latitude1;
-    const deltaLongitude = toRadians(to.longitude - from.longitude);
-    const value = Math.sin(deltaLatitude / 2) ** 2
-      + Math.cos(latitude1) * Math.cos(latitude2) * Math.sin(deltaLongitude / 2) ** 2;
-    return radius * 2 * Math.atan2(Math.sqrt(value), Math.sqrt(1 - value));
-  }
-
-  function bearingDegrees(from, to) {
-    const toRadians = (value) => value * Math.PI / 180;
-    const latitude1 = toRadians(from.latitude);
-    const latitude2 = toRadians(to.latitude);
-    const deltaLongitude = toRadians(to.longitude - from.longitude);
-    const y = Math.sin(deltaLongitude) * Math.cos(latitude2);
-    const x = Math.cos(latitude1) * Math.sin(latitude2)
-      - Math.sin(latitude1) * Math.cos(latitude2) * Math.cos(deltaLongitude);
-    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-  }
-
-  function browserNavigationFromPosition(position) {
-    const coords = position.coords;
-    const current = {
-      latitude: Number(coords.latitude),
-      longitude: Number(coords.longitude),
-      accuracy: Number(coords.accuracy || 0),
-      timestamp: Number(position.timestamp || Date.now()),
-    };
-    let speed = coords.speed != null && Number.isFinite(Number(coords.speed)) && Number(coords.speed) >= 0
-      ? Number(coords.speed) * 3.6 : NaN;
-    let heading = coords.heading != null && Number.isFinite(Number(coords.heading)) && Number(coords.heading) >= 0
-      ? Number(coords.heading) : NaN;
-    const previous = state.lastBrowserPosition;
-    if (previous && current.timestamp > previous.timestamp) {
-      const distance = distanceMeters(previous, current);
-      const elapsedSeconds = (current.timestamp - previous.timestamp) / 1000;
-      const jitterFloor = Math.max(
-        2,
-        Math.min(20, Math.max(previous.accuracy, current.accuracy) * 0.35),
-      );
-      if (!Number.isFinite(speed)) {
-        speed = distance <= jitterFloor ? 0 : Math.min(300, distance / elapsedSeconds * 3.6);
-      }
-      if (!Number.isFinite(heading) && distance > jitterFloor) {
-        heading = bearingDegrees(previous, current);
-      }
-    }
-    state.lastBrowserPosition = current;
-    return {
-      latitude: current.latitude,
-      longitude: current.longitude,
-      speed_kph: Number.isFinite(speed) ? speed : null,
-      heading_deg: Number.isFinite(heading) ? heading : null,
-      accuracy_m: current.accuracy,
-      coordinate_system: "WGS84",
-      source: "PHONE-GEOLOCATION",
-      captured_at_ms: current.timestamp,
-      status: "online",
-    };
-  }
-
-  function startBrowserLocationFallback() {
-    if (state.browserLocationStarted) return;
-    state.browserLocationStarted = true;
-    if (!window.isSecureContext) {
-      $("navigationStatus").className = "tag stale";
-      $("navigationStatus").textContent = "手机定位需要 HTTPS";
-      return;
-    }
-    if (!("geolocation" in navigator)) {
-      $("navigationStatus").className = "tag stale";
-      $("navigationStatus").textContent = "当前浏览器不支持定位";
-      return;
-    }
-    $("navigationDataSourceTag").textContent = "临时来源：访问设备定位";
-    $("navigationStatus").textContent = "等待手机定位授权";
-    state.browserLocationWatchId = navigator.geolocation.watchPosition(
-      (position) => {
-        state.browserNavigation = browserNavigationFromPosition(position);
-        if (!navigationIsFresh(state.latestMetrics.navigation)) applyPreferredNavigation();
-      },
-      (error) => {
-        if (navigationIsFresh(state.latestMetrics.navigation)) return;
-        const labels = {
-          1: "手机定位未授权",
-          2: "手机定位暂不可用",
-          3: "手机定位超时",
-        };
-        $("navigationStatus").className = "tag stale";
-        $("navigationStatus").textContent = labels[error.code] || "手机定位失败";
-      },
-      { enableHighAccuracy: true, maximumAge: 1000, timeout: 15000 },
-    );
-  }
-
   function updateNavigation(navigation, domains) {
     const chassisSpeed = domains && domains.chassis && domains.chassis.speed_kph != null
       ? Number(domains.chassis.speed_kph) : NaN;
@@ -373,14 +282,13 @@
     const navigationSpeed = hasPosition && navigation.speed_kph != null
       ? Number(navigation.speed_kph) : NaN;
     const speed = Number.isFinite(navigationSpeed) ? navigationSpeed : chassisSpeed;
-    const phoneFallback = hasPosition && navigation.source === "PHONE-GEOLOCATION";
     $("vehicleSpeed").textContent = Number.isFinite(speed) ? Math.max(0, speed).toFixed(1) : "—";
     $("speedSource").textContent = Number.isFinite(navigationSpeed)
-      ? (phoneFallback ? "访问设备定位" : "边缘端 GNSS / CAN")
+      ? "边缘端 GNSS / CAN"
       : Number.isFinite(chassisSpeed) ? "底盘域 CAN" : "等待边缘端";
     if (!hasPosition) return;
 
-    const sourceKind = phoneFallback ? "phone" : "edge";
+    const sourceKind = "edge";
     if (state.navigationSourceKind && state.navigationSourceKind !== sourceKind) {
       state.routePoints = [];
       if (state.vehicleMap) {
@@ -393,9 +301,7 @@
     state.navigationSourceKind = sourceKind;
 
     const online = navigationIsFresh(navigation);
-    $("navigationDataSourceTag").textContent = phoneFallback
-      ? "临时来源：访问设备定位"
-      : "数据源：边缘端 GNSS / CAN";
+    $("navigationDataSourceTag").textContent = "数据源：边缘端 GNSS / CAN";
     $("vehicleLongitude").textContent = Number(navigation.longitude).toFixed(6);
     $("vehicleLatitude").textContent = Number(navigation.latitude).toFixed(6);
     $("vehicleHeading").textContent = navigation.heading_deg == null ? "—" : `${Number(navigation.heading_deg).toFixed(1)}°`;
@@ -406,22 +312,17 @@
     $("navigationAge").textContent = formatNavigationAge(navigation.captured_at_ms);
     $("navigationPulse").classList.toggle("online", online);
     $("navigationStatus").className = `tag ${online ? "online" : "stale"}`;
-    $("navigationStatus").textContent = online
-      ? (phoneFallback ? "手机定位在线" : "边缘端定位在线")
-      : "定位数据已过期";
+    $("navigationStatus").textContent = online ? "边缘端定位在线" : "定位数据已过期";
     $("navigationHeadingStatus").classList.toggle("active", online);
     $("navigationHeadingStatus").textContent = online ? "实时定位" : "定位已过期";
     renderNavigationOnMap(navigation);
   }
 
   function preferredNavigation() {
-    const edgeNavigation = state.latestMetrics.navigation || null;
-    if (navigationIsFresh(edgeNavigation)) return edgeNavigation;
-    return state.browserNavigation || edgeNavigation;
+    return state.latestMetrics.navigation || null;
   }
 
   function applyPreferredNavigation() {
-    if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
     updateNavigation(preferredNavigation(), state.latestMetrics.domains || {});
   }
 
@@ -459,6 +360,7 @@
     state.mediaQueue = [];
     state.sourceBuffer = null;
     state.mediaSource = null;
+    state.mediaMime = null;
     state.h264Active = false;
     state.h264Started = false;
     state.latestMediaCreatedAt = 0;
@@ -472,21 +374,49 @@
     state.mediaUrl = null;
   }
 
-  function prepareMediaSource() {
+  function initContainsFourCc(buffer, fourCc) {
+    const bytes = new Uint8Array(buffer);
+    const target = [...fourCc].map((character) => character.charCodeAt(0));
+    for (let index = 0; index <= bytes.length - target.length; index += 1) {
+      if (target.every((value, offset) => bytes[index + offset] === value)) return true;
+    }
+    return false;
+  }
+
+  function mediaMimeFromInit(buffer) {
+    if (initContainsFourCc(buffer, "hvcC") || initContainsFourCc(buffer, "hvc1") || initContainsFourCc(buffer, "hev1")) {
+      return HEVC_MIMES.find((mime) => MediaSource.isTypeSupported(mime)) || null;
+    }
+    return MediaSource.isTypeSupported(H264_MIME) ? H264_MIME : null;
+  }
+
+  function ensureMediaSourceBuffer() {
+    if (
+      state.sourceBuffer
+      || !state.mediaMime
+      || !state.mediaSource
+      || state.mediaSource.readyState !== "open"
+    ) return;
+    try {
+      state.sourceBuffer = state.mediaSource.addSourceBuffer(state.mediaMime);
+      state.sourceBuffer.mode = "segments";
+      state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
+      appendNextMediaSegment();
+    } catch (_) {
+      setConnection(false, state.mediaMime.includes("hvc1") || state.mediaMime.includes("hev1")
+        ? "浏览器不支持 H.265/HEVC 播放"
+        : "浏览器不支持 H.264 播放");
+    }
+  }
+
+  function prepareMediaSource(mime = null) {
     destroyMediaSource();
+    state.mediaMime = mime;
     state.mediaSource = new MediaSource();
     state.mediaUrl = URL.createObjectURL(state.mediaSource);
     video.src = state.mediaUrl;
     state.mediaSource.addEventListener("sourceopen", () => {
-      if (!state.mediaSource || state.mediaSource.readyState !== "open") return;
-      try {
-        state.sourceBuffer = state.mediaSource.addSourceBuffer(H264_MIME);
-        state.sourceBuffer.mode = "segments";
-        state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
-        appendNextMediaSegment();
-      } catch (_) {
-        setConnection(false, "H.264 decoder unavailable");
-      }
+      ensureMediaSourceBuffer();
     }, { once: true });
   }
 
@@ -503,9 +433,20 @@
       payload: buffer.slice(FMP4_HEADER_SIZE),
     };
     if (item.kind === 0) {
+      const mime = mediaMimeFromInit(item.payload);
+      if (!mime) {
+        state.mediaQueue = [];
+        setConnection(false, "当前浏览器不支持摄像头的 H.265/HEVC 格式");
+        return;
+      }
       // FFmpeg or the edge uplink restarted. Rebuild MSE so an old timestamp
       // range cannot leave playback stalled in a discontinuity.
-      if (state.h264Started || state.h264Active) prepareMediaSource();
+      if (state.h264Started || state.h264Active || (state.mediaMime && state.mediaMime !== mime)) {
+        prepareMediaSource(mime);
+      } else {
+        state.mediaMime = mime;
+        ensureMediaSourceBuffer();
+      }
       state.mediaQueue = [];
     }
     state.mediaQueue.push(item);
@@ -551,6 +492,16 @@
         state.h264Rebuffering = false;
         video.play().catch(() => {});
       }
+      if (
+        state.h264Started
+        && state.latestMediaCreatedAt > 0
+        && Date.now() - state.latestMediaCreatedAt > H264_MAX_LIVE_LATENCY_MS
+        && end - start > 0.5
+      ) {
+        // Stay within the user's five-second live-latency ceiling. Seeking
+        // inside the existing continuous MSE range avoids decoder resets.
+        video.currentTime = Math.max(start, end - 0.35);
+      }
       if (state.h264Started && start < video.currentTime - 10 && !state.sourceBuffer.updating) {
         state.sourceBuffer.remove(start, video.currentTime - 8);
         return;
@@ -566,7 +517,7 @@
     canvas.style.display = "none";
     $("videoPlaceholder").classList.add("hidden");
     $("videoStage").classList.add("has-video");
-    setConnection(true, "H.264 连续播放");
+    setConnection(true, "压缩码流连续播放");
   });
 
   video.addEventListener("waiting", () => {
@@ -577,6 +528,17 @@
 
   video.addEventListener("stalled", () => {
     if (state.h264Started) state.h264Rebuffering = true;
+  });
+
+  video.addEventListener("error", () => {
+    const code = video.error ? video.error.code : 0;
+    const labels = {
+      1: "视频加载被中止",
+      2: "视频网络读取失败",
+      3: "浏览器无法解码 H.265/HEVC",
+      4: "浏览器不支持该视频格式",
+    };
+    setConnection(false, labels[code] || "视频播放失败");
   });
 
   video.addEventListener("timeupdate", () => {
@@ -594,12 +556,12 @@
     closeSockets();
     resetPlayback();
     setConnection(false, "正在连接");
-    const h264Supported = "MediaSource" in window && MediaSource.isTypeSupported(H264_MIME);
-    if (h264Supported) prepareMediaSource();
-    const livePath = h264Supported ? "/ws/live-fmp4/" : "/ws/live/";
+    const fmp4Supported = "MediaSource" in window;
+    if (fmp4Supported) prepareMediaSource();
+    const livePath = fmp4Supported ? "/ws/live-fmp4/" : "/ws/live/";
     state.liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
     state.liveSocket.binaryType = "arraybuffer";
-    state.liveSocket.onmessage = h264Supported ? enqueueFmp4 : enqueueFrame;
+    state.liveSocket.onmessage = fmp4Supported ? enqueueFmp4 : enqueueFrame;
     state.liveSocket.onopen = () => setConnection(false, "等待车端");
     state.liveSocket.onclose = scheduleReconnect;
     state.liveSocket.onerror = () => state.liveSocket.close();
@@ -760,13 +722,15 @@
     const latency = Math.max(Number(metrics.ingest_latency_ms || 0), state.playbackLatency || 0);
     $("fpsValue").textContent = fps ? fps.toFixed(1) : "—";
     $("bitrateValue").textContent = kbps ? (kbps / 1000).toFixed(2) : "—";
-    const h264 = metrics.stream_mode === "h264-fmp4";
-    $("qualityLabel").textContent = h264 ? `H.264 ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
+    const h264 = String(metrics.stream_mode || "").includes("fmp4");
+    const passthrough = metrics.encoder === "copy";
+    const codecLabel = metrics.codec || "H.264/H.265";
+    $("qualityLabel").textContent = h264 ? `${codecLabel} ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
     $("frameSizeLabel").textContent = h264 && metrics.segment_bytes
       ? `${(metrics.segment_bytes / 1024).toFixed(0)} KB/片段`
       : metrics.frame_bytes ? `${(metrics.frame_bytes / 1024).toFixed(0)} KB/帧` : "— KB/帧";
     if (h264) {
-      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · H.264 High · ${metrics.encoded_fps || 30} FPS · ${H264_TARGET_BUFFER_SECONDS}s 连续缓冲 · 流畅优先`;
+      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · ${codecLabel} · ${metrics.encoded_fps || 20} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
     }
     const droppedFrames = Number(metrics.cloud_dropped_frames || 0)
       + Number(metrics.queue_dropped_frames || 0)
@@ -975,15 +939,9 @@
   initializeVehicleMap();
   setupNavigation();
   setupDomainOpenButtons();
-  setTimeout(() => {
-    if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
-  }, 1500);
   window.addEventListener("resize", () => { if (state.currentView === "adas") resizeChart(); });
   window.addEventListener("beforeunload", () => {
     closeSockets();
-    if (state.browserLocationWatchId !== null && "geolocation" in navigator) {
-      navigator.geolocation.clearWatch(state.browserLocationWatchId);
-    }
   });
   setInterval(updateClock, 1000);
   setInterval(() => { if (state.lastFrameAt && Date.now() - state.lastFrameAt > 4000) setConnection(false, "画面中断"); }, 1000);

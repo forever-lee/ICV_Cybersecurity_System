@@ -43,7 +43,7 @@ AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "").strip()
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
-FMP4_BUFFER_SEGMENTS = max(30, int(os.getenv("FMP4_BUFFER_SEGMENTS", "300")))
+FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -255,7 +255,9 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
-    public_path = request.url.path in {"/healthz", "/readyz"}
+    public_path = request.url.path in {
+        "/healthz", "/readyz", "/public/live/VHC-001",
+    }
     domain_ingest = request.method == "POST" and "/domains/" in request.url.path
     bluetooth_ingest = request.method == "POST" and request.url.path.endswith("/bluetooth")
     wifi_ingest = request.method == "POST" and request.url.path.endswith("/wifi")
@@ -288,9 +290,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     # 高德 JS API 的域名白名单校验需要跨域请求携带当前站点来源。
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    # Camera and microphone remain disabled. Geolocation is allowed only for
-    # this origin as an explicitly-labelled fallback when edge GNSS is absent.
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(self)"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -298,6 +298,12 @@ async def security_headers(request: Request, call_next):
 @app.get("/")
 async def dashboard():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+@app.get("/public/live/VHC-001")
+async def public_vhc001_live():
+    """Token-free, video-only viewer for the explicitly published vehicle."""
+    return FileResponse(str(STATIC_DIR / "public_vhc001.html"))
 
 
 @app.get("/healthz")
@@ -531,7 +537,7 @@ async def test_wifi(vehicle_id: str):
 
 @app.websocket("/ws/ingest-fmp4/{vehicle_id}")
 async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
-    """Receive already-compressed H.264 fragmented MP4 from the vehicle."""
+    """Receive already-compressed H.264/H.265 fragmented MP4 from a vehicle."""
     token = (
         websocket.headers.get("x-vehicle-token", "")
         or bearer_token(websocket.headers)
@@ -546,13 +552,13 @@ async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
     previous = state.fmp4_ingest_websocket
     if previous is not None and previous.client_state == WebSocketState.CONNECTED:
         try:
-            await previous.close(code=4001, reason="superseded by a newer H.264 connection")
+            await previous.close(code=4001, reason="superseded by a newer fMP4 connection")
         except RuntimeError:
             pass
     try:
         await asyncio.wait_for(state.fmp4_ingest_lock.acquire(), timeout=8.0)
     except asyncio.TimeoutError:
-        await websocket.close(code=4409, reason="previous H.264 connection did not close")
+        await websocket.close(code=4409, reason="previous fMP4 connection did not close")
         return
 
     state.fmp4_ingest_websocket = websocket
@@ -563,8 +569,8 @@ async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
     state.cloud_dropped_frames = 0
     state.last_sequence = None
     state.metrics.update({
-        "status": "online", "transport": "WebSocket / H.264 fMP4",
-        "codec": "H.264", "stream_mode": "h264-fmp4",
+        "status": "online", "transport": "WebSocket / fMP4",
+        "codec": "H.264/H.265", "stream_mode": "fmp4",
     })
     LOGGER.info("h264_vehicle_connected vehicle_id=%s", state.vehicle_id)
     try:
@@ -630,7 +636,7 @@ async def handle_fmp4(state, packet):
         "segment_bytes": len(metadata["payload"]),
         "frame_bytes": round(len(metadata["payload"]) / frames_per_segment),
         "ingest_latency_ms": max(0, state.last_seen_ms - metadata["created_at_ms"]),
-        "transport": "WebSocket / H.264 fMP4", "codec": "H.264",
+        "transport": state.metrics.get("transport") or "WebSocket / fMP4",
     })
     async with state.fmp4_condition:
         state.fmp4_condition.notify_all()
@@ -657,7 +663,7 @@ def handle_fmp4_telemetry(state, text):
         * float(state.metrics.get("segment_seconds") or 0.5)
     )))
     state.metrics["queue_dropped_frames"] = dropped_fragments * frames_per_segment
-    state.metrics["stream_mode"] = "h264-fmp4"
+    state.metrics["stream_mode"] = "fmp4"
     navigation = payload.get("navigation")
     if isinstance(navigation, dict):
         try:
@@ -817,14 +823,8 @@ def handle_telemetry(state, text):
     state.history.append(sample)
 
 
-@app.websocket("/ws/live-fmp4/{vehicle_id}")
-async def live_fmp4(websocket: WebSocket, vehicle_id: str):
+async def relay_fmp4(websocket: WebSocket, vehicle_id: str):
     """Relay compressed fMP4 without decoding or re-encoding it in the cloud."""
-    if DASHBOARD_ACCESS_TOKEN and not token_matches(
-        websocket.cookies.get("vcl_access", ""), DASHBOARD_ACCESS_TOKEN
-    ):
-        await websocket.close(code=4401, reason="dashboard authentication required")
-        return
     state = registry.get(vehicle_id)
     await websocket.accept()
     state.viewer_count += 1
@@ -846,16 +846,17 @@ async def live_fmp4(websocket: WebSocket, vehicle_id: str):
                 last_init = init_packet
                 last_sequence = None
             if last_sequence is None:
-                # Do not replay video captured before this viewer connected.
-                # Starting from the newest independently-decodable fragment
-                # still lets the browser build its deep playback buffer.
-                sequence, packet = fragments[-1]
+                # A passthrough fragment isn't guaranteed to begin with an IDR
+                # unless the camera GOP exactly matches the mux fragment size.
+                # Replay only the short cloud window so MSE sees the preceding
+                # keyframe; the browser then seeks near the buffered live edge.
+                sequence, packet = fragments[0]
             else:
                 cursor = next((index for index, item in enumerate(fragments) if item[0] == last_sequence), None)
                 if cursor is None:
                     # The viewer fell farther behind than the bounded cloud FIFO.
-                    # Resume at the oldest still-retained independently decodable
-                    # fragment rather than jumping all the way to live.
+                    # Restart from the short window's oldest fragment so the
+                    # decoder receives a keyframe before seeking to the live edge.
                     sequence, packet = fragments[0]
                 elif cursor + 1 < len(fragments):
                     sequence, packet = fragments[cursor + 1]
@@ -872,6 +873,22 @@ async def live_fmp4(websocket: WebSocket, vehicle_id: str):
         pass
     finally:
         state.viewer_count = max(0, state.viewer_count - 1)
+
+
+@app.websocket("/ws/live-fmp4/{vehicle_id}")
+async def live_fmp4(websocket: WebSocket, vehicle_id: str):
+    if DASHBOARD_ACCESS_TOKEN and not token_matches(
+        websocket.cookies.get("vcl_access", ""), DASHBOARD_ACCESS_TOKEN
+    ):
+        await websocket.close(code=4401, reason="dashboard authentication required")
+        return
+    await relay_fmp4(websocket, vehicle_id)
+
+
+@app.websocket("/ws/public/live-fmp4/VHC-001")
+async def public_vhc001_fmp4(websocket: WebSocket):
+    """Unauthenticated video-only relay; does not expose metrics or controls."""
+    await relay_fmp4(websocket, "VHC-001")
 
 
 @app.websocket("/ws/live/{vehicle_id}")

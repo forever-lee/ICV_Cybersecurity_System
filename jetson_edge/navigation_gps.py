@@ -6,9 +6,9 @@ JSON/NMEA packets over UDP, or a deterministic test route.  It atomically
 writes the latest vehicle navigation sample for ``h264_vehicle_agent.py``.
 
 Examples:
-    python3 Navigation_Module_Board.py --mode udp
-    python3 Navigation_Module_Board.py --mode serial
-    python3 Navigation_Module_Board.py --mode test
+    python3 navigation_gps.py --mode udp
+    python3 navigation_gps.py --mode serial
+    python3 navigation_gps.py --mode test
 """
 
 import argparse
@@ -314,6 +314,7 @@ def run_udp(args, state):
 
 def run_serial(args, state):
     """Directly read GNSS NMEA sentences from the configured UART."""
+    last_position_log_at = 0.0
     try:
         import serial
     except ImportError:
@@ -355,33 +356,35 @@ def run_serial(args, state):
             message_type = nmea_message_type(sentence)
 
             if sample is None:
-                print(
-                    "NMEA {}：无有效GPS数据（{}）".format(
-                        message_type,
-                        nmea_rejection_reason(sentence),
+                # GSA/GSV/GLL are expected satellite-status packets and can
+                # arrive dozens of times per second. Only log invalid packets
+                # that should have contained a usable position.
+                if message_type in ("RMC", "GGA", "GNS"):
+                    print(
+                        "NMEA {}：无有效GPS数据（{}）".format(
+                            message_type,
+                            nmea_rejection_reason(sentence),
+                        )
                     )
-                )
                 continue
 
             if state.update(sample):
                 if "latitude" not in sample or "longitude" not in sample:
-                    print(
-                        "NMEA {}：辅助数据已合并，等待/沿用最近有效位置".format(
-                            message_type
-                        )
-                    )
                     continue
 
-                print(
-                    "NMEA {}：有效GPS定位 经度={:.6f} 纬度={:.6f} "
-                    "速度={} km/h，已写入 {}".format(
-                        message_type,
-                        state.values["longitude"],
-                        state.values["latitude"],
-                        state.values.get("speed_kph", "—"),
-                        state.output_path,
+                now = time.monotonic()
+                if now - last_position_log_at >= 5:
+                    print(
+                        "NMEA {}：有效GPS定位 经度={:.6f} 纬度={:.6f} "
+                        "速度={} km/h，已写入 {}".format(
+                            message_type,
+                            state.values["longitude"],
+                            state.values["latitude"],
+                            state.values.get("speed_kph", "—"),
+                            state.output_path,
+                        )
                     )
-                )
+                    last_position_log_at = now
             else:
                 print(
                     "NMEA {}：已接收辅助数据，等待有效经纬度".format(
