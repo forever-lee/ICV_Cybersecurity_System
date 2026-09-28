@@ -4,3 +4,23 @@ __pycache__/
 *.log
 *.pid
 *.tmp
+
+# Local environments
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+conda enviroments/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+#Runtime outputs
+*_udp_log.txt
+*.log
