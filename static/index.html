@@ -141,12 +141,12 @@
             <div class="adas-layout">
               <article class="panel video-panel">
                 <div class="video-head"><div class="camera-title"><span class="camera-indicator"></span><div><strong>前视主摄像头 · CAM-FRONT-01</strong><small id="streamProfile">等待视频参数</small></div></div><div class="video-actions"><button id="snapshotButton">保存画面</button><button id="fullscreenButton">全屏查看</button></div></div>
-                <div class="video-stage" id="videoStage"><canvas id="videoCanvas" aria-label="车辆实时视频"></canvas><div class="scan-line"></div><div class="video-placeholder" id="videoPlaceholder"><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待车端视频流</strong><p>启动 run_vehicle.py 后画面将在此自动出现</p></div><div class="video-overlay top-left"><span class="live-tag"><i></i> LIVE</span><span id="sequenceTag">SEQ —</span></div><div class="video-overlay bottom-left"><span id="overlayVehicle">VHC-001</span><span id="overlayTimestamp">--:--:--.---</span></div><div class="video-overlay bottom-right"><span id="overlayTransport">WS / JPEG</span></div></div>
+                <div class="video-stage" id="videoStage"><canvas id="videoCanvas" aria-label="车辆实时视频"></canvas><div class="scan-line"></div><div class="video-placeholder" id="videoPlaceholder"><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待 Jetson 视频流</strong><p>边缘端连接云端后，H.265/fMP4 画面将在此自动出现</p></div><div class="video-overlay top-left"><span class="live-tag"><i></i> LIVE</span><span id="sequenceTag">SEQ —</span></div><div class="video-overlay bottom-left"><span id="overlayVehicle">VHC-001</span><span id="overlayTimestamp">--:--:--.---</span></div><div class="video-overlay bottom-right"><span id="overlayTransport">WEBSOCKET / FMP4</span></div></div>
               </article>
               <aside class="metrics-column">
                 <article class="metric-card panel accent"><div class="metric-label"><span>端到端延迟</span><i>LATENCY</i></div><div class="metric-value"><strong id="latencyValue">—</strong><small>ms</small></div><div class="metric-foot"><span id="latencyState" class="good">等待测量</span><span>连续播放优先</span></div></article>
                 <article class="metric-card panel"><div class="metric-label"><span>云端接收帧率</span><i>FPS</i></div><div class="metric-value"><strong id="fpsValue">—</strong><small>FPS</small></div><div class="spark-bars" id="fpsBars"></div></article>
-                <article class="metric-card panel"><div class="metric-label"><span>上行传输速率</span><i>UPLINK</i></div><div class="metric-value"><strong id="bitrateValue">—</strong><small>Mbps</small></div><div class="metric-foot"><span id="qualityLabel">JPEG Q—</span><span id="frameSizeLabel">— KB/帧</span></div></article>
+                <article class="metric-card panel"><div class="metric-label"><span>上行传输速率</span><i>UPLINK</i></div><div class="metric-value"><strong id="bitrateValue">—</strong><small>Mbps</small></div><div class="metric-foot"><span id="qualityLabel">H.265 — Kbps</span><span id="frameSizeLabel">— KB/片段</span></div></article>
                 <article class="metric-card panel compact"><div class="health-row"><span>链路健康度</span><strong id="healthValue">—</strong></div><div class="health-track"><i id="healthBar"></i></div><div class="health-details"><span>丢帧 <b id="dropValue">—</b></span><span>观看端 <b id="viewerValue">0</b></span><span>重连 <b id="reconnectValue">0</b></span></div></article>
               </aside>
             </div>
@@ -158,7 +158,7 @@
               <div class="vehicle-location-layout">
                 <div class="map-shell">
                   <div id="vehicleMap" class="vehicle-map" aria-label="车辆实时位置地图"></div>
-                  <div id="mapPlaceholder" class="map-placeholder"><i></i><strong>正在准备高德地图</strong><p>优先显示边缘端定位；未接入GNSS时可临时使用访问手机定位</p></div>
+                  <div id="mapPlaceholder" class="map-placeholder"><i></i><strong>正在准备高德地图</strong><p>仅显示 Jetson 边缘端 GNSS / CAN 定位数据</p></div>
                   <div class="map-coordinate-chip"><span>坐标</span><b id="coordinateSystem">—</b></div>
                 </div>
                 <aside class="driving-telemetry" aria-label="车辆实时行驶数据">
