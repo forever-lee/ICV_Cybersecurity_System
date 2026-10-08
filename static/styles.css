@@ -270,6 +270,17 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-controller-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #516879; }
 .body-controller-state.online { color: var(--green); border-color: rgba(53,221,162,.26); background: rgba(53,221,162,.06); }
 .body-controller-state.online::before { background: var(--green); box-shadow: 0 0 9px var(--green); }
+.body-controller-toolbar { display: grid; grid-template-columns: auto auto; align-items: center; justify-items: end; gap: 6px 10px; }
+.body-controller-toolbar > small { grid-column: 1 / -1; color: #647f92; font-size: 8px; letter-spacing: .05em; }
+.body-controller-toolbar > small.running { color: var(--green); }
+.body-controller-toolbar > small.stopped { color: #ff8294; }
+.body-controller-toolbar > small.pending { color: var(--amber); }
+.body-transmission-controls { display: inline-flex; gap: 6px; }
+.body-transmission-controls button { min-width: 72px; height: 30px; padding: 0 11px; border: 1px solid var(--line); border-radius: 5px; background: rgba(7,20,34,.8); color: #8098aa; font-size: 10px; cursor: pointer; transition: border-color .18s, color .18s, background .18s; }
+.body-transmission-controls button:hover { color: #d9f4f6; border-color: rgba(32,214,231,.38); }
+.body-transmission-controls button.start.active { color: var(--green); border-color: rgba(53,221,162,.36); background: rgba(53,221,162,.08); }
+.body-transmission-controls button.stop.active { color: #ff8294; border-color: rgba(255,100,124,.36); background: rgba(255,100,124,.08); }
+.body-transmission-controls button:disabled { opacity: .5; cursor: wait; }
 .body-controller-overview { display: grid; grid-template-columns: minmax(230px, .55fr) minmax(0, 1.45fr); align-items: stretch; }
 .body-controller-identity { min-height: 154px; display: flex; align-items: center; gap: 14px; padding: 22px; border-right: 1px solid var(--line); background: radial-gradient(circle at 18% 50%, rgba(32,214,231,.09), transparent 52%); }
 .body-controller-identity > i { width: 70px; height: 70px; flex: 0 0 70px; display: grid; place-items: center; color: var(--cyan); border: 1px solid rgba(32,214,231,.3); border-radius: 14px; background: linear-gradient(145deg, rgba(32,214,231,.14), rgba(42,136,255,.05)); box-shadow: inset 0 0 24px rgba(32,214,231,.06), 0 0 25px rgba(32,214,231,.06); font-size: 16px; font-style: normal; font-weight: 700; letter-spacing: .08em; }
@@ -379,7 +390,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-car-model.is-low-beam .body-beam-low, .body-car-model.is-high-beam .body-beam-high { opacity: 1; }
 .body-car-model.is-low-beam .headlamp, .body-car-model.is-high-beam .headlamp { background: #d7fbff; box-shadow: 0 0 9px #a7edff, 0 -7px 20px rgba(128,220,255,.6); }
 .body-car-model.is-high-beam .headlamp { background: #fff; box-shadow: 0 0 12px #c6f4ff, 0 -10px 30px rgba(96,192,255,.8); }
-.body-car-model.is-turn-left .turn.front-left, .body-car-model.is-turn-left .turn.rear-left, .body-car-model.is-turn-right .turn.front-right, .body-car-model.is-turn-right .turn.rear-right, .body-car-model.is-hazard .body-model-lamp.turn { background: var(--amber); box-shadow: 0 0 10px var(--amber); animation: body-model-indicator .9s steps(2,end) infinite; }
+.body-car-model.is-turn-left .turn.front-left, .body-car-model.is-turn-left .turn.rear-left, .body-car-model.is-turn-right .turn.front-right, .body-car-model.is-turn-right .turn.rear-right, .body-car-model.is-hazard .body-model-lamp.turn { background: var(--amber); box-shadow: 0 0 10px var(--amber); animation: body-model-indicator 1s steps(2,end) infinite; }
 @keyframes body-model-indicator { 50% { opacity: .18; box-shadow: none; } }
 
 .body-side-stack { display: grid; grid-template-rows: auto 1fr; gap: 14px; }
@@ -409,6 +420,10 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-light-item.is-on { border-color: rgba(242,184,75,.3); background: rgba(242,184,75,.065); }
 .body-light-item.is-on > i, .body-light-item.is-on > em { color: var(--amber); }
 .body-light-item.turn.is-on, .body-light-item.hazard.is-on { animation: body-signal-blink 1s steps(2, end) infinite; }
+.body-car-model .body-model-lamp.turn.body-hazard-sync, .body-light-item.body-hazard-sync { animation: body-signal-blink 1s steps(2, end) infinite; }
+.body-monitor-page.is-transmission-stopped .body-model-lamp.turn,
+.body-monitor-page.is-transmission-stopped .body-light-item.turn,
+.body-monitor-page.is-transmission-stopped .body-light-item.hazard { animation: none !important; }
 .body-frame-panel { margin-top: 14px; overflow: hidden; }
 .body-frame-table { overflow-x: auto; }
 .body-frame-row { min-width: 720px; display: grid; grid-template-columns: 120px 150px 210px minmax(180px,1fr) 90px; align-items: center; gap: 14px; min-height: 64px; padding: 8px 16px; border-top: 1px solid rgba(111,171,219,.075); color: #a9bdca; font-size: 9px; }

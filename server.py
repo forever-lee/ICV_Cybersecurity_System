@@ -166,6 +166,15 @@ class VehicleState:
         self.body_frame_history = deque(maxlen=80)
         self.body_alerts = deque(maxlen=40)
         self.body_last_seen_ms = 0
+        self.body_control_sequence = 0
+        self.body_control = {
+            "sequence": 0,
+            "action": "start",
+            "desired_state": "running",
+            "status": "idle",
+            "requested_at_ms": None,
+            "delivered_at_ms": None,
+        }
         self.navigation = None
 
     def online(self):
@@ -256,6 +265,7 @@ class VehicleState:
         body["frame_count"] = self.body_sequence
         body["latest_frame"] = self.body_frame_history[0] if self.body_frame_history else None
         body["frame_history"] = list(self.body_frame_history)[:8]
+        body["transmission_control"] = dict(self.body_control)
         return body
 
 
@@ -489,6 +499,26 @@ def record_body_update(state, payload, is_test=False):
             changed_at[field] = captured_at_ms
         body[field] = value
     link_input = payload.get("link") if isinstance(payload.get("link"), dict) else {}
+    try:
+        udp_received_at_ms = int(
+            link_input.get("udp_received_at_ms", captured_at_ms)
+        )
+    except (TypeError, ValueError):
+        udp_received_at_ms = captured_at_ms
+    if udp_received_at_ms <= 0 or udp_received_at_ms > received_at_ms + 60000:
+        udp_received_at_ms = captured_at_ms
+    try:
+        board_sent_at_ms = int(link_input.get("board_sent_at_ms") or 0)
+    except (TypeError, ValueError):
+        board_sent_at_ms = 0
+    timestamp_synchronized = bool(
+        link_input.get("timestamp_synchronized")
+        and board_sent_at_ms > 0
+        and board_sent_at_ms <= received_at_ms + 1000
+    )
+    latency_origin_ms = (
+        board_sent_at_ms if timestamp_synchronized else udp_received_at_ms
+    )
     source = str(payload.get("source", previous.get("source", "S32K344-CAN")))[:80]
     interface_path = str(payload.get("interface_path", link_input.get(
         "interface_path", "S32K344/CAN → Ethernet → Jetson → HTTPS"
@@ -509,10 +539,18 @@ def record_body_update(state, payload, is_test=False):
             "edge_status": str(link_input.get("edge_status", "online"))[:24],
             "upload_status": str(link_input.get("upload_status", "online"))[:24],
             "edge_received_at_ms": int(link_input.get("edge_received_at_ms", received_at_ms)),
+            "udp_received_at_ms": udp_received_at_ms,
+            "board_sent_at_ms": board_sent_at_ms or None,
+            "timestamp_synchronized": timestamp_synchronized,
+            "latency_scope": str(link_input.get(
+                "latency_scope", "capture_to_cloud_ingest"
+            ))[:64],
             "interface_path": interface_path,
         },
         "data_mode": "test" if is_test else "real",
     })
+    if "transmission_enabled" in payload:
+        body["transmission_enabled"] = bool(payload["transmission_enabled"])
     for transient in ("frame_history", "latest_frame", "frame_count", "alerts"):
         body.pop(transient, None)
     state.domains["body"] = body
@@ -556,7 +594,7 @@ def record_body_update(state, payload, is_test=False):
             "send_type": str((payload.get("raw_frame") or payload).get("send_type", "周期+事件触发"))[:32],
             "dlc": dlc, "data_hex": data_hex, "signal_changes": group_values,
             "vehicle_time_ms": captured_at_ms, "cloud_receive_time_ms": received_at_ms,
-            "latency_ms": max(0, received_at_ms - captured_at_ms),
+            "latency_ms": int(max(0, received_at_ms - latency_origin_ms)),
             "valid": frame_valid,
             "invalid_reason": "" if frame_valid else str(payload.get("invalid_reason", "信号或报文有效性校验失败"))[:160],
             "device_id": body["device_id"], "interface_path": interface_path,
@@ -762,6 +800,59 @@ async def test_body_event(vehicle_id: str, request: Request):
     return {
         "accepted": True, "vehicle_id": state.vehicle_id, "action": action,
         "label": label, "value": value, "body": body, "frames": frames,
+    }
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/transmission")
+async def set_body_transmission(vehicle_id: str, request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    action = str(payload.get("action", "")).strip().lower()
+    if action not in {"start", "stop"}:
+        raise HTTPException(status_code=400, detail="action must be start or stop")
+    state = registry.get(vehicle_id)
+    state.body_control_sequence += 1
+    state.body_control = {
+        "sequence": state.body_control_sequence,
+        "action": action,
+        "desired_state": "running" if action == "start" else "stopped",
+        "status": "pending",
+        "requested_at_ms": now_ms(),
+        "delivered_at_ms": None,
+    }
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "control": dict(state.body_control),
+        "body": state.body_snapshot(),
+    }
+
+
+@app.post("/api/vehicles/{vehicle_id}/domains/body/control")
+async def poll_body_transmission(vehicle_id: str, request: Request):
+    if bearer_token(request.headers) != INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    state = registry.get(vehicle_id)
+    try:
+        last_sequence = max(0, int(payload.get("last_sequence", 0)))
+        acknowledged_sequence = max(0, int(payload.get("acknowledged_sequence", 0)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="command sequences must be integers")
+    if acknowledged_sequence == state.body_control["sequence"] and acknowledged_sequence > 0:
+        state.body_control["status"] = "delivered"
+        state.body_control["delivered_at_ms"] = now_ms()
+    command = dict(state.body_control)
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "pending": command["sequence"] > last_sequence,
+        "command": command,
     }
 
 

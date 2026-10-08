@@ -12,6 +12,10 @@ UDP 示例：
     {"status":"online","can_status":"normal"}
     {"Door_FL":false,"Door_FR":false,"Door_RL":true,"Door_RR":false}
     {"CentralLockState":"unlocked","TurnLeft":true}
+
+S32K344 以太网示例：
+    python Body_Module_Board.py --mode udp --host 0.0.0.0 --port 7100 \
+        --board-host 192.168.4.31 --control-port 7101
 """
 
 import argparse
@@ -30,12 +34,21 @@ INGEST_TOKEN = os.getenv(
 )
 BODY_UDP_HOST = os.getenv("BODY_UDP_HOST", "0.0.0.0")
 BODY_UDP_PORT = int(os.getenv("BODY_UDP_PORT", "7100"))
+BODY_BOARD_HOST = os.getenv("BODY_BOARD_HOST", "192.168.4.31")
+BODY_CONTROL_PORT = int(os.getenv("BODY_CONTROL_PORT", "7101"))
 BODY_INPUT_MODE = os.getenv("BODY_INPUT_MODE", "serial")
 BODY_SERIAL_PORT = os.getenv("BODY_SERIAL_PORT", "COM4")
 BODY_SERIAL_BAUDRATE = int(os.getenv("BODY_SERIAL_BAUDRATE", "115200"))
 
 PACKET_SIZE = 16
+TIMESTAMPED_PACKET_SIZE = 25
 PACKET_MAGIC = bytes((0xA5, 0x5A))
+COMMAND_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x02))
+TIME_SYNC_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x03))
+COMMAND_START = 0x01
+COMMAND_STOP = 0x00
+COMMAND_POLL_INTERVAL_SECONDS = 0.5
+TIME_SYNC_INTERVAL_SECONDS = 5.0
 
 DOOR_FIELDS = ("Door_FL", "Door_FR", "Door_RL", "Door_RR")
 LIGHT_FIELDS = ("LowBeam", "HighBeam", "TurnLeft", "TurnRight", "Hazard")
@@ -151,6 +164,57 @@ def forward_to_cloud(payload, cloud_url, vehicle_id, token):
         return json.loads(response.read().decode("utf-8"))
 
 
+def poll_transmission_command(
+    cloud_url, vehicle_id, token, last_sequence, acknowledged_sequence=0
+):
+    url = "{}/api/vehicles/{}/domains/body/control".format(
+        cloud_url.rstrip("/"), vehicle_id
+    )
+    body = json.dumps(
+        {
+            "last_sequence": int(last_sequence),
+            "acknowledged_sequence": int(acknowledged_sequence),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    http_request = request.Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": "Bearer {}".format(token),
+            "Content-Type": "application/json; charset=utf-8",
+            "User-Agent": "V-SHIELD-Body-Adapter/1.0",
+        },
+        method="POST",
+    )
+    with request.urlopen(http_request, timeout=3) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def build_serial_command(action):
+    command = COMMAND_START if action == "start" else COMMAND_STOP
+    packet = bytearray(COMMAND_PACKET_MAGIC)
+    packet.append(command)
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
+def build_time_sync_packet(epoch_ms=None):
+    """Build a board-clock synchronization packet using Jetson epoch ms."""
+    if epoch_ms is None:
+        epoch_ms = now_ms()
+    packet = bytearray(TIME_SYNC_PACKET_MAGIC)
+    packet.extend(int(epoch_ms).to_bytes(8, byteorder="little", signed=False))
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
 def initial_state():
     return {
         "source": "S32K344-CAN",
@@ -159,8 +223,12 @@ def initial_state():
 
 def decode_serial_packet(packet):
     """Decode one S32K344 body packet and verify its framing/checksum."""
-    if len(packet) != PACKET_SIZE:
-        raise ValueError("expected {} bytes, got {}".format(PACKET_SIZE, len(packet)))
+    if len(packet) not in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE):
+        raise ValueError(
+            "expected {} or {} bytes, got {}".format(
+                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, len(packet)
+            )
+        )
     if packet[:2] != PACKET_MAGIC:
         raise ValueError("invalid packet magic")
     if packet[2] != 0x01:
@@ -177,6 +245,21 @@ def decode_serial_packet(packet):
                 checksum, packet[15]
             )
         )
+
+    board_sent_at_ms = None
+    if len(packet) == TIMESTAMPED_PACKET_SIZE:
+        extended_checksum = 0
+        for value in packet[:24]:
+            extended_checksum ^= value
+        if extended_checksum != packet[24]:
+            raise ValueError(
+                "extended checksum mismatch: expected 0x{:02X}, got 0x{:02X}".format(
+                    extended_checksum, packet[24]
+                )
+            )
+        timestamp_value = int.from_bytes(packet[16:24], byteorder="little")
+        if timestamp_value > 0:
+            board_sent_at_ms = timestamp_value
 
     body_flags = packet[4]
     light_flags = packet[5]
@@ -202,15 +285,20 @@ def decode_serial_packet(packet):
         "canRxCount": int.from_bytes(packet[8:12], byteorder="little"),
         "canProtocolValid": bool(packet[12]),
         "packetSequence": packet[13],
+        "transmissionEnabled": bool(packet[14] & 0x01),
+        "boardSentAtMs": board_sent_at_ms,
     }
 
 
-def serial_payload(decoded, serial_port):
+def serial_payload(decoded, serial_port, captured_at_ms=None):
     """Map the board protocol names to the existing body-domain cloud schema."""
+    if captured_at_ms is None:
+        captured_at_ms = now_ms()
+    captured_at_ms = int(captured_at_ms)
     payload = {
         "status": "online",
         "can_status": "normal" if decoded["canProtocolValid"] else "error",
-        "captured_at_ms": now_ms(),
+        "captured_at_ms": captured_at_ms,
         "valid": decoded["canProtocolValid"],
         "invalid_reason": "" if decoded["canProtocolValid"] else "S32K344 CAN frame validation failed",
         "device_id": "S32K344-001",
@@ -220,11 +308,86 @@ def serial_payload(decoded, serial_port):
             "mcu_status": "online",
             "edge_status": "online",
             "upload_status": "online",
-            "edge_received_at_ms": now_ms(),
+            "edge_received_at_ms": captured_at_ms,
         },
+        "transmission_enabled": decoded["transmissionEnabled"],
     }
     for field in DOOR_FIELDS + LIGHT_FIELDS + ("CentralLockState",):
         payload[field] = decoded[field]
+    return payload
+
+
+def body_can_frame_metadata(decoded):
+    """Describe the active body-domain CAN/PDU group for the demo step."""
+    step = int(decoded.get("simulationStep") or 0)
+    sequence = int(decoded.get("packetSequence") or 0) & 0x0F
+    door_bits = sum(
+        (1 << index) if decoded.get(field) else 0
+        for index, field in enumerate(DOOR_FIELDS)
+    )
+    light_bits = sum(
+        (1 << index) if decoded.get(field) else 0
+        for index, field in enumerate(LIGHT_FIELDS)
+    )
+    lock_bit = 1 if decoded.get("CentralLockState") == "locked" else 0
+
+    if 1 <= step <= 4:
+        can_id = "0x351"
+        frame_name = "BodyDoorStatus"
+        cycle_ms = 100
+        send_type = "周期+事件触发"
+        values = [door_bits, 0, 0, 0, 0, 0, sequence]
+    elif 5 <= step <= 9:
+        can_id = "0x353"
+        frame_name = "BodyLightStatus"
+        cycle_ms = 50
+        send_type = "周期+事件触发"
+        values = [0, 0, light_bits, 0, 0, 0, sequence]
+    else:
+        can_id = "0x352"
+        frame_name = "CentralLockStatus"
+        cycle_ms = 500
+        send_type = "周期"
+        values = [0, lock_bit, 0, 0, 0, 0, sequence]
+
+    values.append(sum(values) & 0xFF)
+    return {
+        "can_id": can_id,
+        "frame_name": frame_name,
+        "cycle_ms": cycle_ms,
+        "send_type": send_type,
+        "dlc": len(values),
+        "data_hex": " ".join("{:02X}".format(value) for value in values),
+    }
+
+
+def ethernet_payload(decoded, board_address, udp_received_at_ms=None):
+    """Map the S32K344 UDP binary packet to the existing cloud schema."""
+    if udp_received_at_ms is None:
+        udp_received_at_ms = now_ms()
+    udp_received_at_ms = int(udp_received_at_ms)
+    board_sent_at_ms = decoded.get("boardSentAtMs")
+    timestamp_synchronized = isinstance(board_sent_at_ms, int) and board_sent_at_ms > 0
+    payload = serial_payload(
+        decoded,
+        "UDP",
+        board_sent_at_ms if timestamp_synchronized else udp_received_at_ms,
+    )
+    payload["source"] = "S32K344-100BASE-T1"
+    payload["interface_path"] = (
+        "S32K344/CAN0 -> GMAC/MII -> TJA1101B -> 100BASE-T1 -> "
+        "{0}:{1} -> HTTP".format(board_address[0], board_address[1])
+    )
+    payload["link"]["edge_received_at_ms"] = udp_received_at_ms
+    payload["link"]["udp_received_at_ms"] = udp_received_at_ms
+    payload["link"]["board_sent_at_ms"] = board_sent_at_ms
+    payload["link"]["timestamp_synchronized"] = timestamp_synchronized
+    payload["link"]["latency_scope"] = (
+        "board_udp_send_to_cloud_ingest"
+        if timestamp_synchronized
+        else "jetson_udp_receive_to_cloud_ingest"
+    )
+    payload["raw_frame"] = body_can_frame_metadata(decoded)
     return payload
 
 
@@ -237,6 +400,9 @@ def run_serial(args):
         ) from exc
 
     buffer = bytearray()
+    last_command_sequence = 0
+    acknowledged_sequence = 0
+    next_command_poll = 0.0
     while True:
         try:
             with serial.Serial(args.serial_port, baudrate=args.baudrate, timeout=1) as connection:
@@ -245,6 +411,37 @@ def run_serial(args):
                 print("按 Ctrl+C 停止")
                 buffer.clear()
                 while True:
+                    current_time = time.monotonic()
+                    if current_time >= next_command_poll:
+                        try:
+                            command_result = poll_transmission_command(
+                                args.cloud,
+                                args.vehicle_id,
+                                args.token,
+                                last_command_sequence,
+                                acknowledged_sequence,
+                            )
+                            acknowledged_sequence = 0
+                            if command_result.get("pending"):
+                                command = command_result.get("command") or {}
+                                sequence = int(command.get("sequence") or 0)
+                                action = str(command.get("action") or "")
+                                if sequence > last_command_sequence and action in {"start", "stop"}:
+                                    connection.write(build_serial_command(action))
+                                    connection.flush()
+                                    last_command_sequence = sequence
+                                    acknowledged_sequence = sequence
+                                    print(
+                                        "[{}] 已向开发板下发{}命令 SEQ={}".format(
+                                            time.strftime("%H:%M:%S"),
+                                            "启动发送" if action == "start" else "停止发送",
+                                            sequence,
+                                        )
+                                    )
+                        except (error.URLError, OSError, ValueError) as exc:
+                            print("[{}] 控制命令轮询失败：{}".format(time.strftime("%H:%M:%S"), exc))
+                        next_command_poll = current_time + COMMAND_POLL_INTERVAL_SECONDS
+
                     chunk = connection.read(64)
                     if not chunk:
                         continue
@@ -296,25 +493,98 @@ def run_udp(args):
     state = initial_state()
     udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp_socket.bind((args.host, args.port))
+    udp_socket.settimeout(0.2)
+    last_command_sequence = 0
+    acknowledged_sequence = 0
+    next_command_poll = 0.0
+    next_time_sync = 0.0
     print("车身域 UDP 数据适配器已启动：{}:{}".format(args.host, args.port))
+    print("开发板控制接口：{}:{}".format(args.board_host, args.control_port))
     print("云端接口：{}/api/vehicles/{}/domains/body".format(args.cloud, args.vehicle_id))
     print("按 Ctrl+C 停止")
     while True:
-        data, address = udp_socket.recvfrom(8192)
-        try:
-            incoming = json.loads(data.decode("utf-8"))
-            update = normalize_update(incoming)
-            if not update:
-                raise ValueError("payload does not contain supported body signals")
-            state.update(update)
-            state.setdefault("status", "online")
-            state["captured_at_ms"] = now_ms()
-            result = forward_to_cloud(state, args.cloud, args.vehicle_id, args.token)
-            print(
-                "[{}] {}:{} 已转发 {} 个信号 accepted={}".format(
-                    time.strftime("%H:%M:%S"), address[0], address[1], len(update), result.get("accepted")
+        current_time = time.monotonic()
+        if current_time >= next_time_sync:
+            try:
+                udp_socket.sendto(
+                    build_time_sync_packet(),
+                    (args.board_host, args.control_port),
                 )
-            )
+            except OSError as exc:
+                print("[{}] 板端时钟校准失败：{}".format(time.strftime("%H:%M:%S"), exc))
+            next_time_sync = current_time + TIME_SYNC_INTERVAL_SECONDS
+
+        if current_time >= next_command_poll:
+            try:
+                command_result = poll_transmission_command(
+                    args.cloud,
+                    args.vehicle_id,
+                    args.token,
+                    last_command_sequence,
+                    acknowledged_sequence,
+                )
+                acknowledged_sequence = 0
+                if command_result.get("pending"):
+                    command = command_result.get("command") or {}
+                    sequence = int(command.get("sequence") or 0)
+                    action = str(command.get("action") or "")
+                    if sequence > last_command_sequence and action in {"start", "stop"}:
+                        udp_socket.sendto(
+                            build_serial_command(action),
+                            (args.board_host, args.control_port),
+                        )
+                        last_command_sequence = sequence
+                        acknowledged_sequence = sequence
+                        print(
+                            "[{}] 已通过 UDP 向开发板下发{}命令 SEQ={}".format(
+                                time.strftime("%H:%M:%S"),
+                                "启动发送" if action == "start" else "停止发送",
+                                sequence,
+                            )
+                        )
+            except (error.URLError, OSError, ValueError) as exc:
+                print("[{}] 控制命令轮询失败：{}".format(time.strftime("%H:%M:%S"), exc))
+            next_command_poll = current_time + COMMAND_POLL_INTERVAL_SECONDS
+
+        try:
+            data, address = udp_socket.recvfrom(8192)
+            udp_received_at_ms = now_ms()
+        except socket.timeout:
+            continue
+
+        try:
+            if len(data) in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE) and data[:2] == PACKET_MAGIC:
+                decoded = decode_serial_packet(data)
+                payload = ethernet_payload(decoded, address, udp_received_at_ms)
+                result = forward_to_cloud(
+                    payload, args.cloud, args.vehicle_id, args.token
+                )
+                print(
+                    "[{}] UDP SEQ={} CAN_RX={} 已上传 accepted={}".format(
+                        time.strftime("%H:%M:%S"),
+                        decoded["packetSequence"],
+                        decoded["canRxCount"],
+                        result.get("accepted"),
+                    )
+                )
+            else:
+                incoming = json.loads(data.decode("utf-8"))
+                update = normalize_update(incoming)
+                if not update:
+                    raise ValueError("payload does not contain supported body signals")
+                state.update(update)
+                state.setdefault("status", "online")
+                state["captured_at_ms"] = udp_received_at_ms
+                result = forward_to_cloud(state, args.cloud, args.vehicle_id, args.token)
+                print(
+                    "[{}] {}:{} 已转发 {} 个信号 accepted={}".format(
+                        time.strftime("%H:%M:%S"),
+                        address[0],
+                        address[1],
+                        len(update),
+                        result.get("accepted"),
+                    )
+                )
         except (UnicodeDecodeError, ValueError, error.URLError, OSError) as exc:
             print("[{}] 数据处理失败：{}".format(time.strftime("%H:%M:%S"), exc))
 
@@ -324,6 +594,8 @@ def parse_args():
     parser.add_argument("--mode", choices=("serial", "udp"), default=BODY_INPUT_MODE)
     parser.add_argument("--host", default=BODY_UDP_HOST)
     parser.add_argument("--port", type=int, default=BODY_UDP_PORT)
+    parser.add_argument("--board-host", default=BODY_BOARD_HOST)
+    parser.add_argument("--control-port", type=int, default=BODY_CONTROL_PORT)
     parser.add_argument("--serial-port", default=BODY_SERIAL_PORT)
     parser.add_argument("--baudrate", type=int, default=BODY_SERIAL_BAUDRATE)
     parser.add_argument("--reconnect-delay", type=float, default=2.0)

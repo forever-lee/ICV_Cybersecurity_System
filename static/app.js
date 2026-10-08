@@ -102,7 +102,14 @@
       <article class="panel body-controller-panel">
         <div class="panel-title">
           <div><p class="eyebrow">CONTROLLER STATUS</p><h2>车身域控制器状态</h2></div>
-          <span class="body-controller-state" data-domain-state="body">设备未接入</span>
+          <div class="body-controller-toolbar">
+            <span class="body-controller-state" data-domain-state="body">设备未接入</span>
+            <div class="body-transmission-controls">
+              <button class="start" data-body-transmission="start">启动发送</button>
+              <button class="stop" data-body-transmission="stop">停止发送</button>
+            </div>
+            <small data-body-transmission-state>等待控制</small>
+          </div>
         </div>
         <div class="body-controller-overview">
           <div class="body-controller-identity">
@@ -150,7 +157,7 @@
             <div><span>CAN ID</span><strong data-body-protocol="can_id">—</strong><small data-body-protocol="frame_name">等待报文</small></div>
             <div><span>发送策略</span><strong data-body-protocol="cycle">—</strong><small data-body-protocol="send_type">周期 / 事件触发</small></div>
             <div><span>累计报文</span><strong data-body-protocol="frame_count">0</strong><small>云端已接收</small></div>
-            <div><span>端到端耗时</span><strong data-body-protocol="latency">—</strong><small>车端采集 → 云端重组</small></div>
+            <div><span>报文接收耗时</span><strong data-body-protocol="latency">—</strong></div>
           </div>
         </article>
       </div>
@@ -978,6 +985,30 @@
     if (element) element.textContent = value;
   }
 
+  function synchronizeBodyHazardBlink(root, hazardOn) {
+    const targets = root.querySelectorAll([
+      ".body-car-model .body-model-lamp.turn",
+      '[data-body-light="TurnLeft"]',
+      '[data-body-light="TurnRight"]',
+      '[data-body-light="Hazard"]',
+    ].join(","));
+    const wasOn = root.dataset.bodyHazardActive === "true";
+
+    if (!hazardOn) {
+      targets.forEach((element) => element.classList.remove("body-hazard-sync"));
+      root.dataset.bodyHazardActive = "false";
+      return;
+    }
+
+    if (!wasOn) {
+      targets.forEach((element) => element.classList.remove("body-hazard-sync"));
+      // Force one shared animation start so the left and right lamps keep the same phase.
+      void root.offsetWidth;
+      targets.forEach((element) => element.classList.add("body-hazard-sync"));
+    }
+    root.dataset.bodyHazardActive = "true";
+  }
+
   function renderBodyStatus(bodyStatus) {
     const root = document.querySelector('[data-domain-page="body"]');
     if (!root) return;
@@ -1037,15 +1068,17 @@
       element.querySelector("em").textContent = isOn == null ? "未接入" : isOn ? "ON" : "OFF";
     });
 
+    const hazardOn = bodyStatus.lights.hazard === true;
     const carModel = root.querySelector("[data-body-car-model]");
     if (carModel) {
       carModel.classList.toggle("is-low-beam", bodyStatus.lights.lowBeam === true);
       carModel.classList.toggle("is-high-beam", bodyStatus.lights.highBeam === true);
       carModel.classList.toggle("is-turn-left", bodyStatus.lights.turnLeft === true);
       carModel.classList.toggle("is-turn-right", bodyStatus.lights.turnRight === true);
-      carModel.classList.toggle("is-hazard", bodyStatus.lights.hazard === true);
+      carModel.classList.toggle("is-hazard", hazardOn);
       carModel.classList.toggle("is-disconnected", !connected);
     }
+    synchronizeBodyHazardBlink(root, hazardOn);
 
   }
 
@@ -1154,7 +1187,7 @@
     setBodyProtocol(root, "frame_name", latest.frame_name || "等待报文");
     setBodyProtocol(root, "cycle", latest.cycle_ms ? `${latest.cycle_ms} ms` : "事件触发");
     setBodyProtocol(root, "send_type", latest.send_type || "—");
-    setBodyProtocol(root, "latency", `${Number(latest.latency_ms || 0)} ms`);
+    setBodyProtocol(root, "latency", `${Math.round(Number(latest.latency_ms || 0))} ms`);
     const frameList = root.querySelector("[data-body-frame-list]");
     if (!frameList) return;
     frameList.classList.remove("body-frame-empty");
@@ -1165,7 +1198,7 @@
         <span><b>${escapeHtml(frame.can_id || "—")}</b><small>${escapeHtml(frame.frame_name || "—")}</small></span>
         <code>${escapeHtml(frame.data_hex || "—")}</code>
         <span><b>${escapeHtml(bodySignalText(frame.signal_changes))}</b></span>
-        <span><b class="body-latency">${Number(frame.latency_ms || 0)} ms</b><small>${frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
+        <span><b class="body-latency">${Math.round(Number(frame.latency_ms || 0))} ms</b><small>${frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
       </div>`).join("");
   }
 
@@ -1174,7 +1207,11 @@
     Object.keys(DOMAIN_CONFIG).forEach((key) => {
       const payload = domains[key] || {};
       const bodyStatus = key === "body" ? bodyStatusDataSource.ingest(payload) : null;
-      if (key === "body") { renderBodyProtocol(payload); renderBodyCloudStatus(payload); }
+      if (key === "body") {
+        renderBodyProtocol(payload);
+        renderBodyCloudStatus(payload);
+        renderBodyTransmissionControl(payload);
+      }
       const active = bodyStatus
         ? bodyStatus.connected
         : payload.status === "active" || payload.status === "online";
@@ -1324,7 +1361,7 @@
     resetNavigationView();
     bodyStatusDataSource.reset();
     history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${state.currentView}`);
-    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); connect();
+    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); setupBodyTransmissionControls(); connect();
   });
 
   function setupDomainOpenButtons() {
@@ -1353,6 +1390,60 @@
         } finally {
           button.disabled = false;
           button.classList.remove("loading");
+        }
+      });
+    });
+  }
+
+  function renderBodyTransmissionControl(body) {
+    const control = body?.transmission_control || {};
+    const desiredState = control.desired_state
+      || (body?.transmission_enabled === false ? "stopped" : "running");
+    const pending = control.status === "pending";
+    const root = document.querySelector('[data-domain-page="body"]');
+    const status = document.querySelector("[data-body-transmission-state]");
+    const startButton = document.querySelector('[data-body-transmission="start"]');
+    const stopButton = document.querySelector('[data-body-transmission="stop"]');
+    if (status) {
+      status.textContent = pending
+        ? desiredState === "running" ? "启动命令待下发" : "停止命令待下发"
+        : desiredState === "running" ? "板端发送中" : "板端已停止";
+      status.classList.toggle("pending", pending);
+      status.classList.toggle("running", !pending && desiredState === "running");
+      status.classList.toggle("stopped", !pending && desiredState === "stopped");
+    }
+    if (startButton) startButton.classList.toggle("active", desiredState === "running");
+    if (stopButton) stopButton.classList.toggle("active", desiredState === "stopped");
+    if (root) root.classList.toggle("is-transmission-stopped", desiredState === "stopped");
+  }
+
+  function setupBodyTransmissionControls() {
+    document.querySelectorAll("[data-body-transmission]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const action = button.dataset.bodyTransmission;
+        const buttons = document.querySelectorAll("[data-body-transmission]");
+        buttons.forEach((item) => { item.disabled = true; });
+        try {
+          const response = await fetch(
+            `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/transmission`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action }),
+            },
+          );
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          state.latestMetrics.domains = {
+            ...(state.latestMetrics.domains || {}),
+            body: data.body,
+          };
+          updateDomains(state.latestMetrics.domains);
+          toast(action === "start" ? "启动命令已提交，等待板端执行" : "停止命令已提交，等待板端执行");
+        } catch (_) {
+          toast("板端发送控制失败，请检查云端与串口转发程序");
+        } finally {
+          buttons.forEach((item) => { item.disabled = false; });
         }
       });
     });
@@ -1390,6 +1481,7 @@
   setupNavigation();
   setupDomainOpenButtons();
   setupBodyDemo();
+  setupBodyTransmissionControls();
   setTimeout(() => {
     if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
   }, 1500);

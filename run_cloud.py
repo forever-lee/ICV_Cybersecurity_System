@@ -12,10 +12,10 @@ PUBLIC_DASHBOARD_URL = "http://7e1f03fc.r7.nas.cpolar.cn"
 
 # 必须与 run_vehicle.py 中的 INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
-INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
+INGEST_TOKEN = os.getenv("VEHICLE_INGEST_TOKEN", "change-me-in-production")
 
 # 公网页面的独立访问口令，不要与车端上传令牌混用。
-DASHBOARD_ACCESS_TOKEN = "view_GJEhQFY45cXFdZ2NA2MVex8m"
+DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 
 # 超过多少秒没有收到车端数据，判定车辆离线。
 OFFLINE_AFTER_SECONDS = 20
@@ -27,8 +27,8 @@ FMP4_BUFFER_SEGMENTS = int(os.getenv("FMP4_BUFFER_SEGMENTS", "300"))
 # 高德开放平台申请的“Web 端（JS API）”Key 与安全密钥。
 # 本机/PyCharm 调试可直接填在引号内；环境变量存在时会覆盖这里的值。
 # 生产环境建议把安全密钥放在反向代理中，并只设置 AMAP_SERVICE_HOST。
-AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "e42382dff12a247360729d11fdfc39c0")  # 例如："你的 Web 端 Key"
-AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "8cdd0c19bda74e5c369bfce4283fa11a")  # 例如："你的安全密钥"
+AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "")  # 例如："你的 Web 端 Key"
+AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "")  # 例如："你的安全密钥"
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "")
 # ===========================================================
 

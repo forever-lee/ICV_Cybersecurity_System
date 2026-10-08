@@ -1,27 +1,38 @@
-# Python
-__pycache__/
-*.py[cod]
-.pytest_cache/
-
-# Runtime output
-navigation_live.json
-navigation_live.json.tmp
-*_udp_log.txt
-*.log
-data/*.db
-
-# Local environments
+# Local secrets
 .env
 .env.*
 !.env.example
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
 .venv/
 venv/
-conda enviroments/
 
-# IDE
+# Runtime state
+.body_demo_runtime/
+data/
+*.db
+*.log
+*.pid
+
+# S32 Design Studio generated build outputs
+**/Debug_FLASH/
+**/Debug_RAM/
+*.o
+*.d
+*.a
+*.elf
+*.map
+*.hex
+*.srec
+
+# Local IDE/workspace state
+.metadata/
 .idea/
 .vscode/
 
-# OS
-.DS_Store
+# Operating-system files
 Thumbs.db
+.DS_Store
