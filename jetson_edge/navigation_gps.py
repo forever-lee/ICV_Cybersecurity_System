@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Jetson edge GNSS/CAN navigation collector.
 
-The collector accepts either standard GNSS NMEA sentences from a serial port,
+The collector accepts standard GNSS NMEA sentences directly from a serial port,
 JSON/NMEA packets over UDP, or a deterministic test route.  It atomically
 writes the latest vehicle navigation sample for ``h264_vehicle_agent.py``.
 
 Examples:
-    python3 Navigation_Module_Board.py --mode udp
-    python3 Navigation_Module_Board.py --mode serial --serial-device /dev/ttyUSB0
-    python3 Navigation_Module_Board.py --mode test
+    python3 navigation_gps.py --mode udp
+    python3 navigation_gps.py --mode serial
+    python3 navigation_gps.py --mode test
 """
 
 import argparse
@@ -22,6 +22,8 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_OUTPUT = os.path.join(BASE_DIR, "navigation_live.json")
+DEFAULT_NMEA_DEVICE = "/dev/ttyTHS1"
+DEFAULT_SERIAL_BAUD = 38400
 
 
 def now_ms():
@@ -120,6 +122,48 @@ def nmea_coordinate(value, hemisphere):
     return coordinate
 
 
+def nmea_message_type(sentence):
+    sentence = sentence.strip()
+    if not sentence.startswith("$"):
+        return "UNKNOWN"
+    body = sentence[1:].split("*", 1)[0]
+    first_field = body.split(",", 1)[0]
+    return first_field[-3:].upper() if first_field else "UNKNOWN"
+
+
+def nmea_rejection_reason(sentence):
+    """Explain why a received NMEA sentence does not contain a usable fix."""
+    sentence = sentence.strip()
+    if not sentence:
+        return "空报文"
+    if not sentence.startswith("$"):
+        return "不是NMEA报文"
+    if not nmea_checksum_valid(sentence):
+        return "校验和错误"
+
+    fields = sentence[1:].split("*", 1)[0].split(",")
+    message_type = fields[0][-3:].upper() if fields else ""
+    if message_type == "RMC":
+        if len(fields) < 9:
+            return "RMC字段不完整"
+        if fields[2].upper() != "A":
+            return "RMC状态为{}，尚未定位".format(fields[2] or "空")
+        return "RMC经纬度无效"
+    if message_type == "GGA":
+        if len(fields) < 7:
+            return "GGA字段不完整"
+        return "GGA定位质量为{}，尚未定位".format(fields[6] or "0")
+    if message_type == "GNS":
+        if len(fields) < 7:
+            return "GNS字段不完整"
+        return "GNS模式为{}，尚未定位".format(fields[6] or "N")
+    if message_type == "VTG":
+        return "速度/航向报文，等待GGA、RMC或GNS经纬度"
+    if message_type in ("GSA", "GSV"):
+        return "卫星状态报文，不包含完整经纬度"
+    return "暂不支持的NMEA类型 {}".format(message_type or "UNKNOWN")
+
+
 def parse_nmea(sentence):
     sentence = sentence.strip()
     if not sentence or not nmea_checksum_valid(sentence):
@@ -163,6 +207,22 @@ def parse_nmea(sentence):
             "longitude": longitude,
             "coordinate_system": "WGS84",
             "source": "EDGE-GNSS-GGA",
+            "captured_at_ms": now_ms(),
+        }
+
+    if message_type == "GNS" and len(fields) >= 7:
+        mode = fields[6].upper()
+        if not mode or all(character == "N" for character in mode):
+            return None
+        latitude = nmea_coordinate(fields[2], fields[3].upper())
+        longitude = nmea_coordinate(fields[4], fields[5].upper())
+        if latitude is None or longitude is None:
+            return None
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "coordinate_system": "WGS84",
+            "source": "EDGE-GNSS-GNS",
             "captured_at_ms": now_ms(),
         }
 
@@ -253,22 +313,100 @@ def run_udp(args, state):
 
 
 def run_serial(args, state):
+    """Directly read GNSS NMEA sentences from the configured UART."""
+    last_position_log_at = 0.0
     try:
         import serial
     except ImportError:
         raise SystemExit("串口模式需要安装 pyserial：python3 -m pip install pyserial")
-    print("边缘GNSS串口：{} @ {}".format(args.serial_device, args.baud))
+
+    nmea_port = None
+
+    print("GNSS NMEA串口：{} @ {} baud".format(args.nmea_device, args.nmea_baud))
     print("输出文件：{}".format(state.output_path))
-    with serial.Serial(args.serial_device, args.baud, timeout=2) as port:
+
+    try:
+        nmea_port = serial.Serial(
+            port=args.nmea_device,
+            baudrate=args.nmea_baud,
+            timeout=2,
+        )
+
+        # 清除打开串口前残留的数据，避免解析半包
+        try:
+            nmea_port.reset_input_buffer()
+        except (AttributeError, OSError):
+            pass
+
+        print("GNSS串口打开成功，开始持续接收NMEA数据")
+
         while True:
-            line = port.readline().decode("ascii", "replace")
-            if handle_text(state, line):
+            sentence = nmea_port.readline().decode("ascii", "replace").strip()
+
+            if not sentence:
+                print("NMEA：等待串口数据...")
+                continue
+
+            # 只处理标准 NMEA 行
+            if not sentence.startswith("$"):
+                print("串口收到非NMEA数据：{}".format(sentence))
+                continue
+
+            sample = parse_nmea(sentence)
+            message_type = nmea_message_type(sentence)
+
+            if sample is None:
+                # GSA/GSV/GLL are expected satellite-status packets and can
+                # arrive dozens of times per second. Only log invalid packets
+                # that should have contained a usable position.
+                if message_type in ("RMC", "GGA", "GNS"):
+                    print(
+                        "NMEA {}：无有效GPS数据（{}）".format(
+                            message_type,
+                            nmea_rejection_reason(sentence),
+                        )
+                    )
+                continue
+
+            if state.update(sample):
+                if "latitude" not in sample or "longitude" not in sample:
+                    continue
+
+                now = time.monotonic()
+                if now - last_position_log_at >= 5:
+                    print(
+                        "NMEA {}：有效GPS定位 经度={:.6f} 纬度={:.6f} "
+                        "速度={} km/h，已写入 {}".format(
+                            message_type,
+                            state.values["longitude"],
+                            state.values["latitude"],
+                            state.values.get("speed_kph", "—"),
+                            state.output_path,
+                        )
+                    )
+                    last_position_log_at = now
+            else:
                 print(
-                    "GNSS更新 经度={:.6f} 纬度={:.6f} 速度={} km/h".format(
-                        state.values["longitude"], state.values["latitude"],
-                        state.values.get("speed_kph", "—")
+                    "NMEA {}：已接收辅助数据，等待有效经纬度".format(
+                        message_type
                     )
                 )
+
+    except serial.SerialException as exc:
+        raise OSError(
+            "GNSS串口访问失败 {} @ {} baud: {}".format(
+                args.nmea_device,
+                args.nmea_baud,
+                exc,
+            )
+        )
+
+    finally:
+        if nmea_port is not None:
+            try:
+                nmea_port.close()
+            except OSError:
+                pass
 
 
 def run_test_route(args, state):
@@ -295,12 +433,20 @@ def run_test_route(args, state):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Jetson GNSS/CAN navigation collector")
-    parser.add_argument("--mode", choices=("udp", "serial", "test"), default="udp")
+    parser.add_argument("--mode", choices=("udp", "serial", "test"), default="serial")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
     parser.add_argument("--udp-host", default="0.0.0.0")
     parser.add_argument("--udp-port", type=int, default=7000)
-    parser.add_argument("--serial-device", default="/dev/ttyUSB0")
-    parser.add_argument("--baud", type=int, default=9600)
+    parser.add_argument(
+        "--nmea-device", "--serial-device", dest="nmea_device",
+        default=DEFAULT_NMEA_DEVICE,
+        help="GNSS NMEA serial port; --serial-device is a compatibility alias",
+    )
+    parser.add_argument(
+        "--nmea-baud", "--baud", dest="nmea_baud", type=int,
+        default=DEFAULT_SERIAL_BAUD,
+        help="GNSS NMEA baud rate; --baud is a compatibility alias",
+    )
     parser.add_argument("--test-latitude", type=float, default=23.1291)
     parser.add_argument("--test-longitude", type=float, default=113.2644)
     return parser.parse_args()
@@ -312,12 +458,15 @@ def main():
     try:
         if args.mode == "serial":
             run_serial(args, state)
+        elif args.mode == "udp":
+            run_udp(args, state)
         elif args.mode == "test":
             run_test_route(args, state)
-        else:
-            run_udp(args, state)
     except KeyboardInterrupt:
         print("边缘导航采集已停止")
+    except (OSError, ValueError) as exc:
+        print("边缘GNSS采集失败：{}".format(exc), file=sys.stderr)
+        return 1
     return 0
 
 

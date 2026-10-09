@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>VHC-001 实时视频</title>
+  <style>
+    :root { color-scheme: dark; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: #050d17; color: #e9f8ff; display: grid; place-items: center; }
+    main { width: min(1280px, 100vw); padding: 16px; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 12px; }
+    h1 { margin: 0; font-size: clamp(18px, 3vw, 28px); letter-spacing: .08em; }
+    #status { color: #ffbf4a; font-size: 14px; white-space: nowrap; }
+    #status.online { color: #35e9bb; }
+    .stage { position: relative; overflow: hidden; aspect-ratio: 16/9; background: #02070c; border: 1px solid #1b526a; border-radius: 8px; box-shadow: 0 24px 80px #0009; }
+    video { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; }
+    .badge { position: absolute; left: 14px; top: 12px; padding: 5px 9px; border-radius: 4px; background: #06131dcc; color: #58f1e0; font: 12px Consolas, monospace; }
+    footer { margin-top: 10px; color: #7390a2; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>VHC-001 实时视频</h1><span id="status">正在连接</span></header>
+    <div class="stage">
+      <video id="video" autoplay muted playsinline controls></video>
+      <span class="badge">LIVE · H.265/fMP4</span>
+    </div>
+    <footer>公开只读视频页面，不提供车辆控制、定位、指标或后台接口。</footer>
+  </main>
+  <script>
+  (() => {
+    "use strict";
+    const HEADER_SIZE = 17;
+    const H264_MIME = 'video/mp4; codecs="avc1.640029"';
+    const HEVC_MIMES = [
+      'video/mp4; codecs="hvc1"',
+      'video/mp4; codecs="hvc1.1.6.L93.B0"',
+      'video/mp4; codecs="hvc1.1.6.L120.B0"',
+      'video/mp4; codecs="hvc1.1.6.L123.B0"',
+      'video/mp4; codecs="hev1"',
+    ];
+    const video = document.getElementById("video");
+    const status = document.getElementById("status");
+    let socket = null;
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let mediaUrl = null;
+    let queue = [];
+    let appending = null;
+    let reconnectTimer = null;
+
+    function setStatus(text, online = false) {
+      status.textContent = text;
+      status.classList.toggle("online", online);
+    }
+
+    function containsFourCc(buffer, fourCc) {
+      const bytes = new Uint8Array(buffer);
+      const target = [...fourCc].map((character) => character.charCodeAt(0));
+      for (let index = 0; index <= bytes.length - target.length; index += 1) {
+        if (target.every((value, offset) => bytes[index + offset] === value)) return true;
+      }
+      return false;
+    }
+
+    function mimeFromInit(buffer) {
+      if (containsFourCc(buffer, "hvcC") || containsFourCc(buffer, "hvc1") || containsFourCc(buffer, "hev1")) {
+        return HEVC_MIMES.find((mime) => MediaSource.isTypeSupported(mime)) || null;
+      }
+      return MediaSource.isTypeSupported(H264_MIME) ? H264_MIME : null;
+    }
+
+    function destroyMediaSource() {
+      queue = [];
+      sourceBuffer = null;
+      mediaSource = null;
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      if (mediaUrl) URL.revokeObjectURL(mediaUrl);
+      mediaUrl = null;
+    }
+
+    function createMediaSource(mime, initPayload) {
+      destroyMediaSource();
+      queue.push({ kind: 0, payload: initPayload });
+      mediaSource = new MediaSource();
+      mediaUrl = URL.createObjectURL(mediaSource);
+      video.src = mediaUrl;
+      mediaSource.addEventListener("sourceopen", () => {
+        try {
+          sourceBuffer = mediaSource.addSourceBuffer(mime);
+          sourceBuffer.mode = "segments";
+          sourceBuffer.addEventListener("updateend", onUpdateEnd);
+          appendNext();
+        } catch (_) {
+          setStatus("浏览器不支持该视频格式");
+        }
+      }, { once: true });
+    }
+
+    function appendNext() {
+      if (!sourceBuffer || sourceBuffer.updating || !queue.length) return;
+      appending = queue.shift();
+      try {
+        sourceBuffer.appendBuffer(appending.payload);
+      } catch (_) {
+        appending = null;
+        setTimeout(appendNext, 100);
+      }
+    }
+
+    function onUpdateEnd() {
+      appending = null;
+      if (sourceBuffer && sourceBuffer.buffered.length) {
+        const start = sourceBuffer.buffered.start(0);
+        const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+        if (video.paused && end - start >= 0.8) {
+          video.currentTime = Math.max(start, end - 0.4);
+          video.play().catch(() => {});
+        } else if (!video.paused && end - video.currentTime > 5) {
+          video.currentTime = Math.max(start, end - 0.35);
+        }
+        if (start < video.currentTime - 10 && !sourceBuffer.updating) {
+          sourceBuffer.remove(start, video.currentTime - 8);
+          return;
+        }
+      }
+      appendNext();
+    }
+
+    function onPacket(event) {
+      const buffer = event.data;
+      if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= HEADER_SIZE) return;
+      const view = new DataView(buffer);
+      const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+      if (magic !== "FMP4") return;
+      const kind = view.getUint8(4);
+      const payload = buffer.slice(HEADER_SIZE);
+      if (kind === 0) {
+        const mime = mimeFromInit(payload);
+        if (!mime) {
+          setStatus("当前浏览器不支持 H.265/HEVC");
+          return;
+        }
+        createMediaSource(mime, payload);
+      } else {
+        queue.push({ kind, payload });
+        appendNext();
+      }
+    }
+
+    function connect() {
+      clearTimeout(reconnectTimer);
+      if (!("MediaSource" in window)) {
+        setStatus("浏览器不支持 MediaSource");
+        return;
+      }
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      socket = new WebSocket(`${scheme}://${location.host}/ws/public/live-fmp4/VHC-001`);
+      socket.binaryType = "arraybuffer";
+      socket.onopen = () => setStatus("已连接，等待车端视频", true);
+      socket.onmessage = onPacket;
+      socket.onerror = () => socket.close();
+      socket.onclose = () => {
+        setStatus("连接中断，正在重连");
+        reconnectTimer = setTimeout(connect, 1800);
+      };
+    }
+
+    video.addEventListener("playing", () => setStatus("实时播放中", true));
+    video.addEventListener("waiting", () => setStatus("网络缓冲中", true));
+    video.addEventListener("error", () => setStatus("视频解码失败"));
+    window.addEventListener("beforeunload", () => {
+      clearTimeout(reconnectTimer);
+      if (socket) socket.close();
+      destroyMediaSource();
+    });
+    connect();
+  })();
+  </script>
+</body>
+</html>

@@ -1,13 +1,9 @@
-# Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-
-# Runtime output
-navigation_live.json
-navigation_live.json.tmp
-*_udp_log.txt
+.idea/
 *.log
+*.pid
+*.tmp
 
 # Local environments
 .env
@@ -24,3 +20,7 @@ conda enviroments/
 # OS
 .DS_Store
 Thumbs.db
+
+#Runtime outputs
+*_udp_log.txt
+*.log

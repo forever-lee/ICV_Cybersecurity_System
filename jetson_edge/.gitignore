@@ -1,0 +1,7 @@
+__pycache__/
+logs/
+*.log
+*.pid
+*.lock
+navigation_live.json
+navigation_live.json.tmp
