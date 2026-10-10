@@ -191,7 +191,7 @@
         viewMode: "2D",
         zoom: 4,
         center: [104.1954, 35.8617],
-        mapStyle: "amap://styles/darkblue",
+        mapStyle: "amap://styles/normal",
         resizeEnable: true,
       });
       state.vehicleMap.addControl(new window.AMap.Scale());

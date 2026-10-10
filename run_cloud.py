@@ -8,7 +8,8 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "http://719b8bb7.r7.nas.cpolar.cn"
+# PUBLIC_DASHBOARD_URL = "http://719b8bb7.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "http://15151e1e.r7.nas.cpolar.cn"
 
 # 必须与 jetson_edge 中配置的 VEHICLE_INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
