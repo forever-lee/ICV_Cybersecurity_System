@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start and supervise Jetson GPS plus both vehicle camera uplinks.
+"""Start and supervise Jetson GPS, WiFi telemetry, and camera uplinks.
 
 Run on the Jetson from this directory:
     python3 start_edge.py
@@ -21,6 +21,14 @@ LOG_DIR = BASE_DIR / "logs"
 NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
+
+# 视频使用 WebSocket，WiFi 遥测使用 HTTP；二者共用同一公网代理域名。
+CLOUD_WS_URL = os.getenv(
+    "CLOUD_WS_URL", "ws://15151e1e.r7.nas.cpolar.cn"
+).rstrip("/")
+CLOUD_HTTP_URL = os.getenv(
+    "CLOUD_HTTP_URL", "http://15151e1e.r7.nas.cpolar.cn"
+).rstrip("/")
 
 
 @dataclass
@@ -114,8 +122,9 @@ def build_components():
         "VIDEO_MODE": os.getenv("VIDEO_MODE", "copy"),
         "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
         "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
+        "CLOUD_WS_URL": CLOUD_WS_URL,
     }
-    for name in ("CLOUD_WS_URL", "VEHICLE_INGEST_TOKEN", "VIDEO_BUFFER_SECONDS"):
+    for name in ("VEHICLE_INGEST_TOKEN", "VIDEO_BUFFER_SECONDS"):
         if os.getenv(name):
             common_vehicle_environment[name] = os.environ[name]
 
@@ -131,6 +140,27 @@ def build_components():
                 "--output", str(NAVIGATION_FILE),
             ],
             environment={},
+        ))
+
+    if enabled("WIFI_ENABLED"):
+        wifi_environment = {
+            "WIFI_UDP_HOST": os.getenv("WIFI_UDP_HOST", "0.0.0.0"),
+            "WIFI_UDP_PORT": os.getenv("WIFI_UDP_PORT", "6001"),
+            "ESP32_BRIDGE_HOST": os.getenv("ESP32_BRIDGE_HOST", "192.168.3.1"),
+            "ESP32_BRIDGE_PORT": os.getenv("ESP32_BRIDGE_PORT", "8080"),
+            "CLOUD_HTTP_URL": CLOUD_HTTP_URL,
+            "VEHICLE_ID": os.getenv(
+                "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
+            ),
+        }
+        if os.getenv("VEHICLE_INGEST_TOKEN"):
+            wifi_environment["VEHICLE_INGEST_TOKEN"] = os.environ[
+                "VEHICLE_INGEST_TOKEN"
+            ]
+        components.append(Component(
+            name="wifi",
+            command=[sys.executable, "-u", str(BASE_DIR / "WiFi_Module.py")],
+            environment=wifi_environment,
         ))
 
     cameras = [
@@ -167,8 +197,8 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    print("Jetson 边缘端统一启动：GPS + {} 路摄像头".format(
-        sum(component.name.startswith("camera_") for component in components)
+    print("Jetson 边缘端统一启动：{}".format(
+        " + ".join(component.name for component in components) or "无启用组件"
     ))
     try:
         for component in components:
