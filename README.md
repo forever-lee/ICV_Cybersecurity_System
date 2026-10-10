@@ -27,8 +27,8 @@ http://0.0.0.0:8001
 
 公网隧道地址在 `run_cloud.py` 中配置。当前入口：
 
-- 管理大屏：`http://719b8bb7.r7.nas.cpolar.cn/`
-- VHC-001 免口令只读视频：`http://719b8bb7.r7.nas.cpolar.cn/public/live/VHC-001`
+- 管理大屏：`http://15151e1e.r7.nas.cpolar.cn/`
+- VHC-001 免口令只读视频：`http://15151e1e.r7.nas.cpolar.cn/public/live/VHC-001`
 
 ## 当前数据链路
 
@@ -44,9 +44,24 @@ Jetson GNSS /dev/ttyTHS1
   → 视频遥测 WebSocket
   → 云端车辆状态
   → 网页地图、速度、轨迹
+
+BMS 报文产生端（电脑 A 或电脑 B，连接 S32K344_WIFI）
+  → WiFi / UDP 报文
+  → ESP32 热点 192.168.3.1
+  → UART
+  → S32K344 以太网 192.168.4.201
+  → 网线 / UDP
+  → 交换机
+  → Jetson eth0（图示地址 192.168.4.11）监听 UDP 6001
+  → WiFi_Module.py
+  → HTTP POST /api/vehicles/{vehicle_id}/wifi
+  → cpolar 公网映射 / 电脑 A 云端 8001
+  → WiFi 充电状态、报文历史与 IDS 告警页面
 ```
 
 网页不再读取访问者手机定位，仅显示 Jetson 上传的 GNSS/CAN 数据。
+
+WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的无线网段，`192.168.4.x` 是 S32K344、交换机与 Jetson `eth0` 之间的有线网段。图中的 `192.168.4.11` 是示例地址，部署时应以 Jetson 实际的 `eth0` 地址为准。Jetson 收到 UDP 6001 报文后，再通过自身可访问互联网的网络接口将数据上传到云端。
 
 ## 核心接口
 
@@ -127,6 +142,46 @@ Jetson 必须同时具备两条网络：`eth0` 用于接收板子的 UDP；WiFi 
    ```
 
    程序会先检查热点 `192.168.3.1`，倒数 3 秒后开始发送。每秒一条充电报文；每轮 120 秒，随机插入 1～3 条 SOC 突变报文用于 IDS 演示。`Ctrl+C` 可停止。
+
+#### 使用 cpolar 公网映射（可选）
+
+上面的局域网直连方式继续保留。若电脑 A 已将本地 `8001` 端口通过 cpolar 映射到公网，Jetson 也可以通过公网域名上传视频、GPS 和 WiFi 数据，不再要求 Jetson WiFi 与电脑 A 位于同一局域网。
+
+当前公网域名为：
+
+```text
+15151e1e.r7.nas.cpolar.cn
+```
+
+公网和本地服务的对应关系为：
+
+```text
+http://15151e1e.r7.nas.cpolar.cn
+  → cpolar
+  → 电脑 A 的 http://127.0.0.1:8001
+```
+
+Jetson 上的不同上传协议使用同一个公网域名，但 URL 协议不同：
+
+```text
+视频及 GPS 遥测：ws://15151e1e.r7.nas.cpolar.cn
+WiFi 报文上传：http://15151e1e.r7.nas.cpolar.cn
+```
+
+`jetson_edge/start_edge.py` 已内置以上两个地址。直接运行它会同时监管 GPS、WiFi 和两路视频上传进程：
+
+```bash
+cd jetson_edge
+python3 start_edge.py
+```
+
+启动前可在 Jetson 上检查公网入口：
+
+```bash
+curl -i http://15151e1e.r7.nas.cpolar.cn/healthz
+```
+
+公网方式下，Jetson 的 WiFi 只需要能够访问互联网；Jetson `eth0` 与 S32K344 仍需保持在可互通的 `192.168.4.x` 网络中。公网映射只替代“Jetson WiFi → 电脑 A TCP 8001”这一段，不改变“S32K344 → Jetson UDP 6001”链路。
 
 ### 排查顺序
 
