@@ -5,7 +5,8 @@
 ## 云端文件
 
 - `run_cloud.py`：云端启动入口和运行配置。
-- `server.py`：FastAPI、WebSocket、视频中继、车辆遥测与导航数据服务。
+- `server.py`：FastAPI、WebSocket、视频中继、车辆遥测、导航和座舱图像比对服务。
+- `hmi_comparison.py`：智能座舱 Expected/Actual 图像比对算法。
 - `stream_protocol.py`：云端与 Jetson 共用的二进制帧协议。
 - `static/`：管理大屏及免口令 VHC-001 只读视频页面。
 - `requirements.txt`：云端 Python 依赖。
@@ -61,6 +62,12 @@ Jetson 摄像头 RTSP/H.265
   → 云端短缓冲
   → 浏览器 MediaSource 播放
 
+智能座舱测试页面
+  → 复用当前车辆浏览器视频画面或上传 Actual 图片
+  → POST /api/vehicles/{vehicle_id}/cockpit/compare
+  → 电脑 A 执行 Expected/Actual 图像比对
+  → 返回相似度、MS-SSIM、差异区域和 PASS/FAIL
+
 Jetson GNSS /dev/ttyTHS1
   → navigation_live.json
   → 视频遥测 WebSocket
@@ -113,6 +120,20 @@ WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的�
 - `POST /api/vehicles/{vehicle_id}/domains/body/control`：Jetson 轮询车身域启停控制。
 - `POST /api/vehicles/{vehicle_id}/body/transmission`：网页设置车身域上传状态。
 - `GET /api/vehicles/{vehicle_id}/body/history`：车身域历史报文。
+- `GET /api/cockpit/comparison/status`：座舱图像比对算法状态。
+- `POST /api/vehicles/{vehicle_id}/cockpit/compare`：座舱 Expected/Actual 图像比对。
+
+## 智能座舱图像比对
+
+座舱页面复用现有 Jetson 摄像头视频链路，不需要额外启动座舱边缘进程。浏览器可以采集当前中控画面，也可以上传不超过 4 MB 的 JPEG、PNG 或 WebP 图片，然后由电脑 A 上的 `hmi_comparison.py` 与本地参考图库进行比对。
+
+云端需要安装 OpenCV 与 NumPy：
+
+```powershell
+python -m pip install -r requirements.txt
+```
+
+如需从其他位置加载算法文件，可以设置 `HMI_COMPARISON_PATH`；最大图片大小由 `MAX_COMPARISON_IMAGE_BYTES` 控制。图像算法加载失败时 `/readyz` 返回 `degraded`，其他车辆域仍继续服务。
 
 ## 安全说明
 

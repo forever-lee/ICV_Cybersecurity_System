@@ -2,6 +2,9 @@
 
 import argparse
 import asyncio
+import base64
+import binascii
+import importlib.util
 import json
 import logging
 import math
@@ -9,10 +12,13 @@ import os
 import random
 import secrets
 import sqlite3
+import sys
 import time
 from collections import deque
 from pathlib import Path
 
+import cv2
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +38,7 @@ from wifi_ids import detect_wifi_intrusion, parse_charging_packet
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
+REFERENCE_LIBRARY_DIR = (STATIC_DIR / "reference-library").resolve()
 INGEST_TOKEN = os.getenv("VEHICLE_INGEST_TOKEN", "change-me-in-production")
 DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 OFFLINE_AFTER_SECONDS = float(os.getenv("OFFLINE_AFTER_SECONDS", "4"))
@@ -48,6 +55,17 @@ CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "
 FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
+MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
+HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
+
+_HMI_COMPARE_FUNCTION = None
+_HMI_COMPARE_SOURCE = None
+HMI_COMPARISON_RUNTIME = {
+    "status": "starting",
+    "source": None,
+    "error": None,
+    "loaded_at_ms": 0,
+}
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -204,7 +222,33 @@ class VehicleState:
                 "navigation": self.navigation_snapshot(),
             }
         )
+        data["cockpit_stream"] = self.cockpit_stream_snapshot(data["status"])
         return data
+
+    def cockpit_stream_snapshot(self, status):
+        """Expose the existing video relay metrics to the cockpit test page."""
+        fields = (
+            "stream_mode", "transport", "codec", "encoder", "pipeline",
+            "sequence", "width", "height", "fps", "encoded_fps",
+            "bitrate_kbps", "upload_kbps", "segment_bytes", "segment_seconds",
+            "ingest_latency_ms", "queue_seconds", "queue_dropped_fragments",
+            "queue_dropped_frames", "capture_reconnects", "agent_reconnects",
+            "source_status",
+        )
+        stream = {key: self.metrics[key] for key in fields if key in self.metrics}
+        stream.update({
+            "vehicle_id": self.vehicle_id,
+            "status": status,
+            "last_seen_ms": self.last_seen_ms,
+            "received_frames": self.received_frames,
+            "cloud_dropped_frames": self.cloud_dropped_frames,
+            "invalid_frames": self.invalid_frames,
+            "viewer_count": self.viewer_count,
+            "ingest_connected": self.fmp4_connected,
+            "init_received": self.fmp4_init is not None,
+            "buffered_fragments": len(self.fmp4_fragments),
+        })
+        return stream
 
     def navigation_snapshot(self):
         if not self.navigation:
@@ -306,6 +350,131 @@ def bearer_token(headers):
 
 def token_matches(actual, expected):
     return bool(actual and expected and secrets.compare_digest(str(actual), str(expected)))
+
+
+def comparison_algorithm_candidates():
+    candidates = []
+    if HMI_COMPARISON_PATH:
+        configured = Path(HMI_COMPARISON_PATH).expanduser()
+        candidates.append(configured if configured.is_absolute() else BASE_DIR / configured)
+    candidates.extend(
+        (
+            BASE_DIR / "hmi_comparison.py",
+            BASE_DIR.parent / "expected和actual算法" / "AI_Apple_Bad" / "hmi_comparison.py",
+        )
+    )
+    return candidates
+
+
+def get_hmi_compare_function():
+    """Load the Expected/Actual algorithm without duplicating its implementation."""
+
+    global _HMI_COMPARE_FUNCTION, _HMI_COMPARE_SOURCE
+    if _HMI_COMPARE_FUNCTION is not None:
+        return _HMI_COMPARE_FUNCTION
+
+    source_path = next(
+        (path.resolve() for path in comparison_algorithm_candidates() if path.is_file()),
+        None,
+    )
+    if source_path is None:
+        searched = ", ".join(str(path) for path in comparison_algorithm_candidates())
+        raise RuntimeError("未找到 hmi_comparison.py；已检查：{}".format(searched))
+
+    module_name = "_vshield_hmi_comparison"
+    specification = importlib.util.spec_from_file_location(module_name, str(source_path))
+    if specification is None or specification.loader is None:
+        raise RuntimeError("无法加载图像比对算法：{}".format(source_path))
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[module_name] = module
+    try:
+        specification.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    compare_function = getattr(module, "compare_frames", None)
+    if not callable(compare_function):
+        raise RuntimeError("图像比对算法未提供 compare_frames：{}".format(source_path))
+    _HMI_COMPARE_FUNCTION = compare_function
+    _HMI_COMPARE_SOURCE = source_path
+    LOGGER.info("hmi_comparison_loaded source=%s", source_path)
+    return _HMI_COMPARE_FUNCTION
+
+
+def comparison_runtime_snapshot():
+    return {
+        "status": HMI_COMPARISON_RUNTIME["status"],
+        "source": HMI_COMPARISON_RUNTIME["source"],
+        "error": HMI_COMPARISON_RUNTIME["error"],
+        "loaded_at_ms": HMI_COMPARISON_RUNTIME["loaded_at_ms"],
+    }
+
+
+def initialize_hmi_comparison():
+    HMI_COMPARISON_RUNTIME.update(status="starting", source=None, error=None, loaded_at_ms=0)
+    try:
+        compare_function = get_hmi_compare_function()
+    except Exception as error:
+        HMI_COMPARISON_RUNTIME.update(status="error", error=str(error))
+        LOGGER.exception("hmi_comparison_startup_failure")
+        return None
+    HMI_COMPARISON_RUNTIME.update(
+        status="ready",
+        source=_HMI_COMPARE_SOURCE.name if _HMI_COMPARE_SOURCE else "hmi_comparison.py",
+        error=None,
+        loaded_at_ms=now_ms(),
+    )
+    LOGGER.info("hmi_comparison_ready waiting_for_images=true")
+    return compare_function
+
+
+def decode_comparison_image(data_url):
+    if not isinstance(data_url, str):
+        raise HTTPException(status_code=400, detail="actual_image must be a base64 image data URL")
+    header, separator, encoded = data_url.partition(",")
+    if not separator or not header.lower().startswith("data:image/") or ";base64" not in header.lower():
+        raise HTTPException(status_code=400, detail="actual_image must be a base64 image data URL")
+    if len(encoded) > ((MAX_COMPARISON_IMAGE_BYTES + 2) // 3) * 4 + 16:
+        raise HTTPException(status_code=413, detail="actual image is too large")
+    try:
+        image_bytes = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="actual_image contains invalid base64 data")
+    if not image_bytes or len(image_bytes) > MAX_COMPARISON_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="actual image is empty or too large")
+    image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="actual_image is not a supported image")
+    return image
+
+
+def resolve_reference_image(reference_url):
+    if not isinstance(reference_url, str):
+        raise HTTPException(status_code=400, detail="expected_image must be a reference-library URL")
+    clean_path = reference_url.split("?", 1)[0].replace("\\", "/")
+    prefix = "/static/reference-library/"
+    if not clean_path.startswith(prefix):
+        raise HTTPException(status_code=400, detail="expected_image must come from /static/reference-library/")
+    relative_path = clean_path[len(prefix):]
+    candidate = (REFERENCE_LIBRARY_DIR / relative_path).resolve()
+    try:
+        candidate.relative_to(REFERENCE_LIBRARY_DIR)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid expected_image path")
+    if not candidate.is_file():
+        raise HTTPException(status_code=404, detail="expected image was not found")
+    encoded = np.fromfile(str(candidate), dtype=np.uint8)
+    image = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if image is None:
+        raise HTTPException(status_code=400, detail="expected image is not readable")
+    return candidate, image
+
+
+def encode_comparison_preview(image):
+    ok, encoded = cv2.imencode(".jpg", image, (cv2.IMWRITE_JPEG_QUALITY, 88))
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
 
 
 def finite_number(payload, keys, minimum, maximum, required=False):
@@ -628,6 +797,13 @@ app = FastAPI(title="V-SHIELD Vehicle Cybersecurity Platform", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.on_event("startup")
+async def start_hmi_comparison_runtime():
+    """Warm the comparison engine without blocking the other vehicle domains."""
+
+    await asyncio.to_thread(initialize_hmi_comparison)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     public_path = request.url.path in {
@@ -683,14 +859,31 @@ async def public_vhc001_live():
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "time_ms": now_ms(), "vehicles": len(registry.vehicles)}
+    return {
+        "status": "ok",
+        "time_ms": now_ms(),
+        "vehicles": len(registry.vehicles),
+        "hmi_comparison": comparison_runtime_snapshot(),
+    }
 
 
 @app.get("/readyz")
 async def readyz():
     if not STATIC_DIR.exists():
-        return JSONResponse({"status": "not_ready"}, status_code=503)
-    return {"status": "ready"}
+        return JSONResponse(
+            {"status": "not_ready", "hmi_comparison": comparison_runtime_snapshot()},
+            status_code=503,
+        )
+    comparison = comparison_runtime_snapshot()
+    return {
+        "status": "ready" if comparison["status"] == "ready" else "degraded",
+        "hmi_comparison": comparison,
+    }
+
+
+@app.get("/api/cockpit/comparison/status")
+async def cockpit_comparison_status():
+    return comparison_runtime_snapshot()
 
 
 @app.get("/api/config/map")
@@ -720,6 +913,80 @@ async def vehicle_metrics(vehicle_id: str):
 @app.get("/api/vehicles/{vehicle_id}/history")
 async def vehicle_history(vehicle_id: str):
     return {"vehicle_id": vehicle_id, "samples": list(registry.get(vehicle_id).history)}
+
+
+@app.post("/api/vehicles/{vehicle_id}/cockpit/compare")
+async def compare_cockpit_images(vehicle_id: str, request: Request):
+    """Compare a local reference image with a captured or uploaded HMI frame."""
+
+    state = registry.get(vehicle_id)
+    maximum_json_bytes = ((MAX_COMPARISON_IMAGE_BYTES + 2) // 3) * 4 + 65536
+    try:
+        content_length = int(request.headers.get("content-length", "0"))
+    except ValueError:
+        content_length = 0
+    if content_length > maximum_json_bytes:
+        raise HTTPException(status_code=413, detail="comparison payload is too large")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="comparison payload must be an object")
+
+    expected_path, expected_image = resolve_reference_image(payload.get("expected_image"))
+    actual_image = decode_comparison_image(payload.get("actual_image"))
+    try:
+        compare_function = _HMI_COMPARE_FUNCTION or initialize_hmi_comparison()
+        if compare_function is None:
+            raise RuntimeError(HMI_COMPARISON_RUNTIME["error"] or "图像比对算法未就绪")
+        result = await asyncio.to_thread(compare_function, expected_image, actual_image)
+    except HTTPException:
+        raise
+    except (RuntimeError, ImportError) as error:
+        LOGGER.error("hmi_comparison_unavailable error=%s", error)
+        raise HTTPException(status_code=503, detail=str(error))
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error))
+    except Exception as error:
+        LOGGER.exception("hmi_comparison_failure vehicle_id=%s", state.vehicle_id)
+        raise HTTPException(status_code=500, detail="图像比对失败：{}".format(error))
+
+    alignment = result.alignment
+    return {
+        "vehicle_id": state.vehicle_id,
+        "case_id": str(payload.get("case_id", ""))[:80],
+        "step_index": payload.get("step_index"),
+        "algorithm": "hmi_comparison.compare_frames",
+        "status": result.status,
+        "passed": bool(result.passed),
+        "similarity": round(float(result.similarity), 4),
+        "ms_ssim": round(float(result.structural_similarity), 4),
+        "color_similarity": round(float(result.color_similarity), 4),
+        "difference_ratio": round(float(result.difference_ratio), 4),
+        "valid_ratio": round(float(result.valid_ratio), 4),
+        "mean_delta_e": round(float(result.mean_delta_e), 4),
+        "p95_delta_e": round(float(result.p95_delta_e), 4),
+        "alignment": {
+            "success": bool(alignment.success),
+            "status": alignment.status,
+            "method": alignment.method,
+            "confidence": round(float(alignment.confidence), 4),
+        },
+        "difference_boxes": [list(map(int, box)) for box in result.boxes],
+        "critical_failures": list(result.critical_failures),
+        "annotated_actual": encode_comparison_preview(result.annotated),
+        "expected": {
+            "src": "/static/reference-library/"
+            + expected_path.relative_to(REFERENCE_LIBRARY_DIR).as_posix(),
+            "width": int(expected_image.shape[1]),
+            "height": int(expected_image.shape[0]),
+        },
+        "actual": {
+            "width": int(actual_image.shape[1]),
+            "height": int(actual_image.shape[0]),
+        },
+    }
 
 
 @app.get("/api/vehicles/{vehicle_id}/body/history")

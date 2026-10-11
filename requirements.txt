@@ -1,3 +1,5 @@
 # Versions validated by the active TM cloud environment.
 fastapi==0.139.0
 uvicorn[standard]==0.51.0
+numpy>=1.23,<3
+opencv-python>=4.8,<6

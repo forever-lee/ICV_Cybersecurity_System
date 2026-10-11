@@ -1,0 +1,140 @@
+{
+  "purpose": "智能座舱前端原型步骤级标准参考图库；每个测试步骤独立绑定一张本地图片，仅供初版展示与交互验证。",
+  "downloaded_at": "2026-09-09",
+  "features": {
+    "lowBeam": {
+      "name": "近光灯控制",
+      "steps": [
+        {
+          "step": 1,
+          "file": "low-beam/step-01-system-ready.png",
+          "label": "系统上电与灯光控制入口",
+          "source_name": "上汽大通 V90 使用手册",
+          "source_page": "https://c2b.saicmaxus.com/h5/manual/V90/Content/V90%E4%BA%A7%E5%93%81%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C-%E5%B7%A6%E8%88%B5%E4%B8%AD%E6%96%87/%E9%A9%BE%E9%A9%B6%E4%B9%8B%E5%89%8D/%E8%BD%A6%E5%A4%96%E7%81%AF%E5%BC%80%E5%85%B3.htm"
+        },
+        {
+          "step": 2,
+          "file": "low-beam/step-02-open-light-settings.jpg",
+          "label": "进入车辆灯光设置页面",
+          "source_name": "长安 CS55 PLUS 中控灯光界面",
+          "source_image": "https://car3.autoimg.cn/cardfs/product/g33/M01/B7/20/1400x1050_autohomecar__ChxpVWjrRSqAN8r6AEu0o-e8UHc622.jpg"
+        },
+        {
+          "step": 3,
+          "file": "low-beam/step-03-auto-light-off.jpg",
+          "label": "自动大灯关闭状态",
+          "source_name": "问界 M5 中控灯光界面",
+          "source_image": "https://img.pcauto.com.cn/images/upload/upc/tx/auto5/2205/12/c31/312341731_1652342736554_1024.jpg"
+        },
+        {
+          "step": 4,
+          "file": "low-beam/step-04-low-beam-on.jpeg",
+          "label": "近光灯开启操作",
+          "source_name": "深蓝 S7 中控灯光界面",
+          "source_image": "https://p8.itc.cn/images01/20230531/0cd98dcf00434a85a2f9516ce9cd398b.jpeg"
+        },
+        {
+          "step": 5,
+          "file": "low-beam/step-05-on-state-check.jpg",
+          "label": "近光灯开启状态校验",
+          "source_name": "马自达 EZ-60 中控界面",
+          "source_image": "https://bex-auto.md/storage/products/5968/mazda-ez-60-ev-top-2025-yUUWNZ6A.jpg"
+        },
+        {
+          "step": 6,
+          "file": "low-beam/step-06-low-beam-off.jpg",
+          "label": "近光灯关闭操作",
+          "source_name": "深蓝 S7 中控灯光界面",
+          "source_image": "https://img1.baa.bitautotech.com/dzusergroupfiles/2023/09/07/0fae1ffd865348259d04d58c820e1a2b.jpg"
+        },
+        {
+          "step": 7,
+          "file": "low-beam/step-07-off-state-check.jpg",
+          "label": "近光灯关闭状态校验",
+          "source_name": "深蓝 S05 中控界面",
+          "source_image": "https://club2.autoimg.cn/album/g33/M09/9B/0E/userphotos/2025/11/09/11/ChxpVmkQDguALRvUABd7sGMjbgQ063.jpg"
+        }
+      ]
+    },
+    "climate": {
+      "name": "空调控制",
+      "steps": [
+        {
+          "step": 1,
+          "file": "climate/step-01-system-ready.jpg",
+          "label": "空调系统初始界面",
+          "source_name": "奇瑞瑞虎 8 中控空调界面",
+          "source_page": "https://www.bitauto.com/global/chery/tiggo-8/image-9207-s1513-g7-a1-p0/"
+        },
+        {
+          "step": 2,
+          "file": "climate/step-02-open-climate.jpg",
+          "label": "进入空调控制页面",
+          "source_name": "MG U9 中控空调界面",
+          "source_page": "https://essendonmg.com.au/stock/details/OAG-AD-25304637/2025-mg-u9-new"
+        },
+        {
+          "step": 3,
+          "file": "climate/step-03-temperature-setting.webp",
+          "label": "空调温度设置",
+          "source_name": "广汽传祺 GS4 中控空调界面",
+          "source_page": "https://sglauto.com/products/gac-gs4-2024-max-1-5tgdi-navigator-edition"
+        },
+        {
+          "step": 4,
+          "file": "climate/step-04-fan-setting.jpg",
+          "label": "空调风量与模式设置",
+          "source_name": "奇瑞瑞虎 8 PRO 中控空调界面",
+          "source_page": "https://photo.yiche.com/photo/show_8110_12301849/"
+        },
+        {
+          "step": 5,
+          "file": "climate/step-05-state-check.jpg",
+          "label": "空调状态校验",
+          "source_name": "雪铁龙 C5 Aircross 中控空调界面",
+          "source_page": "https://www.oneshift.com/articles/car-reviews/citroen-c5-aircross-12-puretech-eat8-feel-review-rather-comfortable-in-its-own-skin/"
+        }
+      ]
+    },
+    "seatHeating": {
+      "name": "座椅加热",
+      "steps": [
+        {
+          "step": 1,
+          "file": "seat-heating/step-01-system-ready.jpg",
+          "label": "座椅加热初始界面",
+          "source_name": "CUPRA Born 中控界面",
+          "source_page": "https://www.evexperts.co.uk/electric-cars-for-sale/cupra/born/34998/"
+        },
+        {
+          "step": 2,
+          "file": "seat-heating/step-02-open-seat-panel.jpg",
+          "label": "进入座椅加热页面",
+          "source_name": "CUPRA 中控座椅界面",
+          "source_image": "https://eurocar-production.a.1cdn.it/photos/6ccbdb264d58c6ef2ce7c72a00757b98.jpg"
+        },
+        {
+          "step": 3,
+          "file": "seat-heating/step-03-heating-level.webp",
+          "label": "座椅加热挡位设置",
+          "source_name": "DS 中控座椅界面",
+          "source_image": "https://assets.stoneacre.co.uk/stock/9993408/conversions/image_19-2000.webp"
+        },
+        {
+          "step": 4,
+          "file": "seat-heating/step-04-indicator-check.jpg",
+          "label": "加热指示状态校验",
+          "source_name": "Chrysler 中控座椅控制界面",
+          "source_page": "https://www.obdgenie.com/products/edit-chrysler-climate-package-programmer"
+        },
+        {
+          "step": 5,
+          "file": "seat-heating/step-05-state-check.jpg",
+          "label": "座椅加热结果校验",
+          "source_name": "Jeep Compass 中控座椅界面",
+          "source_page": "https://www.autonationcanada.com/Pre-owned-Inventory-2018-Jeep-SUV-Compass-Limited-4WD-Acheson-16766368"
+        }
+      ]
+    }
+  }
+}

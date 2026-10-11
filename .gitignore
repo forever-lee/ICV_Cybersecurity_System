@@ -1,19 +1,32 @@
+# Python caches and tooling
 __pycache__/
 *.py[cod]
-.idea/
-*.log
-*.pid
-*.tmp
-data/*.db
-.body_demo_runtime/
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
 
-# Local environments
+# Local environments and secrets
 .env
 .env.*
 !.env.example
 .venv/
 venv/
-conda enviroments/
+env/
+.conda/
+
+# Runtime data and process artifacts
+data/
+.body_demo_runtime/
+*.log
+*.pid
+*.lock
+*.tmp
+*_udp_log.txt
+navigation_live.json
+navigation_live.json.tmp
 
 # IDE
 .idea/
@@ -22,7 +35,3 @@ conda enviroments/
 # OS
 .DS_Store
 Thumbs.db
-
-#Runtime outputs
-*_udp_log.txt
-*.log

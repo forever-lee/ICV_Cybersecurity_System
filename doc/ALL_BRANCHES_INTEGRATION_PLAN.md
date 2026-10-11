@@ -25,7 +25,7 @@
    ```
 
 4. Jetson 不运行 `run_cloud.py`，不承载网页、云端 API、数据库或 IDS/图像比对服务。
-5. 每个领域的“采集并上传后端”代码必须是 `start_edge.py` 管理的独立子进程；一个领域异常不得阻塞摄像头、GPS 或其他领域。
+5. 需要独立硬件采集的领域由 `start_edge.py` 管理独立子进程；座舱测试复用现有视频链路，由浏览器抓帧上传，不额外创建 Jetson 子进程。一个领域异常不得阻塞摄像头、GPS 或其他领域。
 6. Jetson 方案不增加 `.sh` 启动脚本，也不增加 systemd 服务。
 7. 不直接合并会删除或覆盖主线功能的分支；尤其禁止直接整体合并 `body` 分支，应按文件和逻辑块选择性迁移。
 
@@ -39,7 +39,7 @@
    ├─ WiFi/UDP 报文 ────────> wifi 子进程 ── HTTP(S) ────┤
    ├─ 蓝牙网关/UDP 报文 ────> bluetooth 子进程 ─ HTTP(S) ┤
    ├─ 车身域串口/UDP 报文 ──> body 子进程 ── HTTP(S) ────┤
-   └─ 座舱画面源 ───────────> cockpit 子进程 ─ HTTP(S) ──┤
+   └─ 座舱测试 ─────────────> 复用 camera 视频链路 ──────┤
                                                            │
 Jetson: jetson_edge/start_edge.py                           │
                                                            ▼
@@ -139,15 +139,9 @@ git switch -c integration/all-domains
 - 座舱比对 API、状态接口和页面逻辑；
 - `static/reference-library/` 中确实需要的基准图像。
 
-该分支目前主要是云端和浏览器端功能，没有完整的 Jetson 上传进程。需要新增 `jetson_edge/cockpit_edge_agent.py`：
+该功能复用现有 Jetson 摄像头和 fMP4/WebSocket 链路。浏览器在座舱页面镜像当前车辆视频，按测试步骤采集一帧或接受用户上传的 Actual 图片，再调用 `/api/vehicles/{vehicle_id}/cockpit/compare`。图像比对在电脑 A 的 `hmi_comparison.py` 中执行，因此不新增 `cockpit_edge_agent.py`，也不修改 `jetson_edge` 的视频实现。
 
-- 从独立配置的 RTSP、V4L2 或文件源抓取座舱/HMI 画面；
-- 按配置频率上传到座舱接口；
-- 不复用、不修改智能驾驶域摄像头的进程、WebSocket、DOM 元素或缓存；
-- 图像比对仍在电脑 A 的 `hmi_comparison.py` 中执行，Jetson 只负责采集和上传；
-- 未配置座舱画面源时保持禁用，避免无限重启。
-
-如果继续使用 `/api/vehicles/{vehicle_id}/cockpit/compare` 作为上传接口，必须为其补齐与其他上行接口一致的 Bearer Token 校验和请求大小限制。
+座舱比对接口受管理页面访问口令保护，并限制请求及解码后图片大小；Expected 图片只允许来自本地 `static/reference-library/`，防止路径穿越和任意文件读取。
 
 ## 4. Jetson 目录目标结构
 
@@ -161,8 +155,7 @@ jetson_edge/
 ├── wifi_edge_agent.py            # WiFi UDP 接收与上传
 ├── bluetooth_edge_agent.py       # 蓝牙 UDP 接收与上传
 ├── body_edge_agent.py            # 车身采集、上传及控制轮询
-├── body_protocol.py              # 纯协议解析/组包
-└── cockpit_edge_agent.py         # 座舱画面采集与上传
+└── body_protocol.py              # 纯协议解析/组包
 ```
 
 领域协议文件不得反向依赖 `start_edge.py`；每个 agent 都应可以单独运行以便调试，但生产运行统一由 `start_edge.py` 拉起。
@@ -182,7 +175,6 @@ components = [
     wifi_component,
     bluetooth_component,
     body_component,
-    cockpit_component,
 ]
 ```
 
@@ -204,10 +196,9 @@ CAMERA_VHC002_ENABLED=1
 WIFI_ENABLED=1
 BLUETOOTH_ENABLED=0
 BODY_ENABLED=0
-COCKPIT_ENABLED=0
 ```
 
-蓝牙、车身和座舱在对应硬件尚未接入时默认禁用；部署完成后只需改为 `1`，不用修改代码。
+蓝牙和车身在对应硬件尚未接入时默认禁用；座舱页面不需要 Jetson 启用变量。
 
 进程管理要求：
 
@@ -233,7 +224,7 @@ VEHICLE_TOKEN=<仅保存在部署环境中的令牌>
 规则如下：
 
 - 视频 WebSocket 使用 `CLOUD_WS_URL`。
-- WiFi、蓝牙、车身和座舱 HTTP API 使用 `CLOUD_HTTP_URL`。
+- WiFi、蓝牙和车身 HTTP API 使用 `CLOUD_HTTP_URL`；座舱比对请求由浏览器发送到当前页面同源 API。
 - 公网代理地址变化时只改环境配置，不修改每个 agent 源码。
 - `CLOUD_HTTP_URL` 使用 `http://` 或 `https://`，不能写成 `ws://`；`CLOUD_WS_URL` 使用 `ws://` 或 `wss://`。
 - 若当前公网域名为 `15151e1e.r7.nas.cpolar.cn`，则生产配置应根据代理是否启用 TLS 设置为：
@@ -261,9 +252,6 @@ BODY_UDP_HOST=0.0.0.0
 BODY_STATUS_PORT=7100
 BODY_BOARD_HOST=192.168.4.31
 BODY_CONTROL_PORT=7101
-
-COCKPIT_SOURCE=<rtsp/v4l2/file source>
-COCKPIT_UPLOAD_INTERVAL_SECONDS=5
 ```
 
 ## 7. 云端 API 和页面融合
@@ -278,7 +266,7 @@ COCKPIT_UPLOAD_INTERVAL_SECONDS=5
 | WiFi | `POST /api/vehicles/{vehicle_id}/wifi` | UDP 6001 |
 | 蓝牙 | `POST /api/vehicles/{vehicle_id}/bluetooth` | UDP 5000 |
 | 车身 | `POST /api/vehicles/{vehicle_id}/domains/body` | 串口或 UDP 7100 |
-| 座舱 | `POST /api/vehicles/{vehicle_id}/cockpit/compare` 或专用帧上传接口 | 独立座舱画面源 |
+| 座舱 | `POST /api/vehicles/{vehicle_id}/cockpit/compare` | 浏览器从现有视频链路抓帧或上传图片 |
 
 所有设备上行接口使用统一认证、错误格式、时间戳规则和车辆编号校验。控制类接口还应具有命令 ID、幂等处理、超时和 ACK，避免重复执行。
 
@@ -349,7 +337,7 @@ docs: document single-entry cloud and edge deployment
 2. Jetson 只运行 `python3 start_edge.py`，进程列表中出现已启用的独立领域子进程。
 3. 两路摄像头视频持续播放，原有延迟/码率指标正常。
 4. GPS 位置持续更新，白底地图样式和交互不变。
-5. WiFi、蓝牙、车身、座舱任一链路断开后，只影响本领域；恢复后能按重试策略自动恢复。
+5. WiFi、蓝牙、车身任一链路断开后，只影响本领域；座舱算法异常不影响其他领域服务。
 6. 公网代理更换后，只修改 `CLOUD_HTTP_URL` 和 `CLOUD_WS_URL` 即可恢复全部公网链路。
 
 ## 11. 最终判定标准
@@ -360,6 +348,6 @@ docs: document single-entry cloud and edge deployment
 - 智能驾驶域摄像头 Web 演示和 GPS 地图在功能及样式上保持不变；
 - 电脑 A 的唯一入口是 `run_cloud.py`；
 - Jetson 的唯一入口是 `jetson_edge/start_edge.py`；
-- WiFi、蓝牙、车身、座舱分别作为独立、可启停、可监控、可重启的 Jetson 子进程运行；
+- WiFi、蓝牙、车身按需作为独立、可启停、可监控、可重启的 Jetson 子进程运行；座舱复用摄像头链路且不新增子进程；
 - Jetson 不运行云端服务，不依赖 `.sh` 或 systemd 才能启动整套功能；
 - 所有自动化与真机验收项通过。

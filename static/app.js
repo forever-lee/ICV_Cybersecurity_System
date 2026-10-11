@@ -278,6 +278,13 @@
         renderBodyPage(root);
         return;
       }
+      if (key === "cockpit" && window.VShieldCockpit) {
+        window.VShieldCockpit.render(root, {
+          vehicleId: () => state.vehicleId,
+          toast,
+        });
+        return;
+      }
       root.innerHTML = `
         <div class="page-heading">
           <div><p class="eyebrow">${config.en}</p><h1>${config.title}</h1><p>${config.subtitle}</p></div>
@@ -902,6 +909,7 @@
 
   function updateMetrics(metrics) {
     state.latestMetrics = metrics;
+    window.VShieldCockpit?.updateMetrics(metrics);
     const online = metrics.status === "online";
     if (online) setConnection(true, "车端在线");
     else if (Date.now() - state.lastFrameAt > 3500) setConnection(false, "等待车端");
