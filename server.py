@@ -50,7 +50,9 @@ AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "").strip()
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
-FMP4_BUFFER_SEGMENTS = max(30, int(os.getenv("FMP4_BUFFER_SEGMENTS", "300")))
+# Keep only a short live window.  The edge uploader already has its own FIFO;
+# retaining minutes of fragments here makes new viewers start far behind live.
+FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
 
@@ -140,7 +142,33 @@ class VehicleState:
                 "navigation": self.navigation_snapshot(),
             }
         )
+        data["cockpit_stream"] = self.cockpit_stream_snapshot(data["status"])
         return data
+
+    def cockpit_stream_snapshot(self, status):
+        """Expose the video relay metrics used by the cockpit live-mirror UI."""
+        fields = (
+            "stream_mode", "transport", "codec", "encoder", "pipeline",
+            "sequence", "width", "height", "fps", "encoded_fps",
+            "bitrate_kbps", "upload_kbps", "segment_bytes", "segment_seconds",
+            "ingest_latency_ms", "queue_seconds", "queue_dropped_fragments",
+            "queue_dropped_frames", "capture_reconnects", "agent_reconnects",
+            "source_status",
+        )
+        stream = {key: self.metrics[key] for key in fields if key in self.metrics}
+        stream.update({
+            "vehicle_id": self.vehicle_id,
+            "status": status,
+            "last_seen_ms": self.last_seen_ms,
+            "received_frames": self.received_frames,
+            "cloud_dropped_frames": self.cloud_dropped_frames,
+            "invalid_frames": self.invalid_frames,
+            "viewer_count": self.viewer_count,
+            "ingest_connected": self.fmp4_connected,
+            "init_received": self.fmp4_init is not None,
+            "buffered_fragments": len(self.fmp4_fragments),
+        })
+        return stream
 
     def navigation_snapshot(self):
         if not self.navigation:
@@ -762,7 +790,7 @@ async def test_wifi(vehicle_id: str):
 
 @app.websocket("/ws/ingest-fmp4/{vehicle_id}")
 async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
-    """Receive already-compressed H.264 fragmented MP4 from the vehicle."""
+    """Receive already-compressed H.264/H.265 fragmented MP4 from a vehicle."""
     token = (
         websocket.headers.get("x-vehicle-token", "")
         or bearer_token(websocket.headers)
@@ -777,13 +805,13 @@ async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
     previous = state.fmp4_ingest_websocket
     if previous is not None and previous.client_state == WebSocketState.CONNECTED:
         try:
-            await previous.close(code=4001, reason="superseded by a newer H.264 connection")
+            await previous.close(code=4001, reason="superseded by a newer fMP4 connection")
         except RuntimeError:
             pass
     try:
         await asyncio.wait_for(state.fmp4_ingest_lock.acquire(), timeout=8.0)
     except asyncio.TimeoutError:
-        await websocket.close(code=4409, reason="previous H.264 connection did not close")
+        await websocket.close(code=4409, reason="previous fMP4 connection did not close")
         return
 
     state.fmp4_ingest_websocket = websocket
@@ -794,8 +822,8 @@ async def ingest_fmp4(websocket: WebSocket, vehicle_id: str):
     state.cloud_dropped_frames = 0
     state.last_sequence = None
     state.metrics.update({
-        "status": "online", "transport": "WebSocket / H.264 fMP4",
-        "codec": "H.264", "stream_mode": "h264-fmp4",
+        "status": "online", "transport": "WebSocket / fMP4",
+        "codec": "H.264/H.265", "stream_mode": "fmp4",
     })
     LOGGER.info("h264_vehicle_connected vehicle_id=%s", state.vehicle_id)
     try:
@@ -861,7 +889,7 @@ async def handle_fmp4(state, packet):
         "segment_bytes": len(metadata["payload"]),
         "frame_bytes": round(len(metadata["payload"]) / frames_per_segment),
         "ingest_latency_ms": max(0, state.last_seen_ms - metadata["created_at_ms"]),
-        "transport": "WebSocket / H.264 fMP4", "codec": "H.264",
+        "transport": state.metrics.get("transport") or "WebSocket / fMP4",
     })
     async with state.fmp4_condition:
         state.fmp4_condition.notify_all()
@@ -888,7 +916,7 @@ def handle_fmp4_telemetry(state, text):
         * float(state.metrics.get("segment_seconds") or 0.5)
     )))
     state.metrics["queue_dropped_frames"] = dropped_fragments * frames_per_segment
-    state.metrics["stream_mode"] = "h264-fmp4"
+    state.metrics["stream_mode"] = "fmp4"
     navigation = payload.get("navigation")
     if isinstance(navigation, dict):
         try:
@@ -1077,10 +1105,11 @@ async def live_fmp4(websocket: WebSocket, vehicle_id: str):
                 last_init = init_packet
                 last_sequence = None
             if last_sequence is None:
-                # Do not replay video captured before this viewer connected.
-                # Starting from the newest independently-decodable fragment
-                # still lets the browser build its deep playback buffer.
-                sequence, packet = fragments[-1]
+                # A passthrough fragment is not guaranteed to begin with an IDR
+                # unless the camera GOP exactly matches the mux fragment size.
+                # Replay the short cloud window so MSE sees the preceding keyframe;
+                # the browser then seeks close to the buffered live edge.
+                sequence, packet = fragments[0]
             else:
                 cursor = next((index for index, item in enumerate(fragments) if item[0] == last_sequence), None)
                 if cursor is None:

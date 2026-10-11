@@ -4,7 +4,7 @@
 
 底层工程把原来的“本机打开 RTSP 窗口”拆成两个可独立部署的组件：
 
-- `h264_vehicle_agent.py`：车端 H.264/fMP4 上传核心，Windows 使用 FFmpeg/NVENC，Jetson 使用 NVIDIA GStreamer 硬件管线。
+- `h264_vehicle_agent.py`：车端 H.264/H.265 fMP4 上传核心；Jetson 默认对摄像头原码流做 FFmpeg 零转码封装。
 - `vehicle_agent.py`：旧版 JPEG 兼容链路，新部署不再使用。
 - `server.py`：部署在云端，鉴权接收车辆数据，将最新画面分发给网页，同时提供车辆、指标、历史与控制域扩展 API。
 - `Bluetooth_Module.py`：接收 BLE 转 UDP 报文，记录文本/HEX，并通过鉴权接口转发到云端蓝牙数据模块。
@@ -14,18 +14,29 @@
 ## 1. 本机快速演示
 
 使用指定环境：`D:\Anconda\envs\TM\python.exe`。
-环境安装包：链接:`https://pan.baidu.com/s/1flLG-GHmJnyapGaTVPzGBA` 提取码: uh28 
 
 ### PyCharm 直接运行（推荐）
 
 1. 确认 PyCharm 项目解释器为 `D:\Anconda\envs\TM\python.exe`。
 2. 右键运行 `run_cloud.py`。
 3. 再右键运行 `run_vehicle.py`。
-4. 浏览器打开 `http://127.0.0.1:8000`。
+4. 浏览器打开 `http://127.0.0.1:8001`。
+
+### Expected / Actual 图像对比
+
+进入“智能座舱域”后，中控实时镜像直接复用当前车辆的 RTSP → fMP4 → WebSocket → MediaSource 链路，不再依赖写死的公网 iframe。选择测试用例和步骤后点击“采集当前画面”，页面会把本地参考图作为 Expected、当前中控视频帧作为 Actual，调用 `hmi_comparison.compare_frames`，并自动回填相似度、MS-SSIM、差异比例、画面对齐方式以及 PASS / FAIL。
+
+云端按以下顺序查找算法文件：
+
+1. 环境变量 `HMI_COMPARISON_PATH` 指向的文件；
+2. 本项目根目录下的 `hmi_comparison.py`；
+3. 相邻目录 `expected和actual算法/AI_Apple_Bad/hmi_comparison.py`。
+
+当前两个项目保持现有的相邻目录结构即可直接使用。如部署时只复制云端项目，请同时复制 `hmi_comparison.py` 到项目根目录，或配置 `HMI_COMPARISON_PATH`。算法运行依赖的 OpenCV 与 NumPy 已包含在 `requirements.txt` 中。
 
 摄像头地址、云端地址、车辆编号、视频质量和 Token 都集中在这两个启动文件顶部，可直接修改。
 
-浏览器打开 `http://127.0.0.1:8000`。如需在没有车辆的情况下调试，可暂时将 `run_vehicle.py` 中的 `RTSP_URL` 改为 `lavfi:testsrc2=size=960x540:rate=15`。
+浏览器打开 `http://127.0.0.1:8001`。如需在没有车辆的情况下调试，可暂时将 `run_vehicle.py` 中的 `RTSP_URL` 改为 `lavfi:testsrc2=size=960x540:rate=15`。
 
 蓝牙验证：先运行 `run_cloud.py`，再运行 `Bluetooth_Module.py`。网页底部的“蓝牙数据模块”会实时显示报文。没有板子时可直接点击网页里的“生成测试数据”，也可以另开终端执行：
 
@@ -37,15 +48,15 @@ python Bluetooth_Module.py --send-test --count 3
 
 WiFi 验证：运行 `WiFi_Module.py` 后，网页底部的“WiFi 数据模块”会显示 UDP 6000 收到的报文。没有板子时可点击网页里的“生成测试数据”，或另开终端执行 `python WiFi_Module.py --send-test --count 3`。
 
-当前网页入口为 `http://61bf8db4.vip.cpolar.top`。当 `run_vehicle.py` 与 `run_cloud.py` 在同一台电脑运行时，车端固定使用 `ws://127.0.0.1:8000` 本机直连；Jetson 真车端使用 `ws://61bf8db4.vip.cpolar.top` 上传。cpolar 地址变化后同步修改 Jetson 的 `CLOUD_WS_URL`。
+当前网页与 Jetson 上传入口为 `http://7ae07fbb.r7.nas.cpolar.cn`。当 `run_vehicle.py` 与 `run_cloud.py` 在同一台电脑运行时，车端使用 `ws://127.0.0.1:8001` 本机直连；Jetson 真车端使用 `ws://7ae07fbb.r7.nas.cpolar.cn` 上传。cpolar 地址变化后必须同步修改 Jetson 的 `CLOUD_WS_URL`。
 
-公网页面启用了独立访问口令，打开网址后输入 `run_cloud.py` 启动窗口中显示的口令。Windows 电脑端默认使用 1280×720、30 FPS、H.264 High 2.8 Mbps 严格限速，以适配当前实测约 3.5 Mbps 的 cpolar 公网链路。车端优先使用 NVDEC 解码、CUDA 缩放与 NVENC 编码的全 GPU 链路，并自动回退到软件解码加 NVENC、最后回退 libx264。NVENC 使用 P7 高质量 CBR、双遍、前向分析、时空 AQ 与 B 帧；每 1 秒产生一个独立可解码的 fMP4 片段。浏览器通过 Media Source Extensions 原生解码，并在累计约 10 秒连续内容后开始播放，不会因为延迟增加主动跳帧。
+公网页面启用了独立访问口令，打开网址后输入 `run_cloud.py` 启动窗口中显示的口令。Jetson 默认把摄像头 H.265 原码流用 FFmpeg 仅封装为 fMP4 后上传，不做解码和重编码；云端保留短实时窗口，浏览器通过 Media Source Extensions 原生解码，并在累计约 1 秒内容后开始播放。中控实时镜像与智能驾驶域使用同一已解码画面和同一重连状态。
 
-### Jetson TX2 车端
+### Jetson 车端
 
-`run_vehicle.py` 和 `run_vehicle_jetson.py` 都使用 H.264/fMP4 主链路。Windows 调试机优先走 FFmpeg NVENC；TX2 使用 `nvv4l2decoder + nvvidconv + nvv4l2h264enc + mp4mux`，视频解码、缩放和 H.264 编码由 Jetson 硬件完成，不再逐帧上传 JPEG。
+`run_vehicle_jetson.py` 默认使用已经在 `video` 工程验证的 H.265 零转码链路：摄像头 RTSP/H.265 → FFmpeg fMP4 → WebSocket。设置 `VIDEO_MODE=encode` 时才启用 NVIDIA/CPU H.264 编码兼容管线；旧 JPEG 链路仅作为不支持 MediaSource 时的回退。
 
-板端启动前运行 `python3 run_vehicle_jetson.py --check-only`；它会检查 `nvv4l2decoder`、`nvvidconv`、`nvv4l2h264enc`、`h264parse`、`mp4mux`、摄像头对应的 H.264/H.265 解包插件和 Python 依赖。该链路直接调用 `gst-launch-1.0`，不依赖 OpenCV 是否启用 GStreamer。
+板端启动前运行 `python3 run_vehicle_jetson.py --check-only`；默认透传模式检查 FFmpeg、WebSockets 和 Jetson 基础环境，编码兼容模式再按可用性选择 NVIDIA GStreamer、x264enc 或 FFmpeg libx264。该链路不依赖 OpenCV。
 
 项目已提供 TX2 专用启动文件。把整个项目复制到板子后执行：
 
@@ -55,7 +66,7 @@ python3 run_vehicle_jetson.py --check-only
 python3 run_vehicle_jetson.py
 ```
 
-不要在 TX2 上安装项目原来的 `requirements.txt`。板端只安装 `requirements_jetson.txt`，保留 JetPack 自带的 GStreamer/NVIDIA 多媒体组件。默认档位为 1280×720、20 FPS、H.264 High、2.2 Mbps、1 秒 fMP4 片段和 5 分钟 FIFO；摄像头输入默认 H.265，所有配置均可用环境变量覆盖。
+不要在 Jetson 上安装项目原来的 `requirements.txt`。板端只安装 `requirements_jetson.txt`，保留 JetPack 自带的多媒体组件。默认 `VIDEO_MODE=copy`、`RTSP_CODEC=h265`、1 秒 fMP4 片段和约 3 秒车端 FIFO；透传时分辨率、FPS、码率和关键帧间隔由摄像头控制，所有配置均可用环境变量覆盖。
 
 ### 需要复制到 Jetson 的文件
 
@@ -83,12 +94,12 @@ D:\Anconda\envs\TM\python.exe h264_vehicle_agent.py `
 
 云端与车端必须使用同一个 `VEHICLE_INGEST_TOKEN`。当前令牌机制适合样机和内网验证；正式部署应升级为每车独立证书的双向 TLS，并将凭据放入 TPM/HSM，不写入脚本或镜像。
 
-## 3. 画质优先与深度 FIFO 缓冲策略
+## 3. 原码流低延迟与短 FIFO 策略
 
-- OpenCV/FFmpeg 使用 TCP RTSP 并持续排空摄像头源缓冲，避免读取端自身越积越慢。
-- Windows 电脑端默认使用 1280×720、30 FPS、H.264 High 2.8 Mbps 严格限速；保留 P7、双遍、前向分析、AQ 与 B 帧，在当前公网带宽内优先保证连续播放并尽量保留细节。
-- 车端和云端各保留最多 300 个 1 秒 fMP4 片段；链路恢复后按 FIFO 顺序补传，观看期间不主动追到最新画面。浏览器预缓冲约 10 秒，卡顿后积累 6 秒连续内容再恢复播放。
-- Jetson 默认使用 1280×720、20 FPS、2.2 Mbps 严格 CBR，并保留最长 5 分钟编码片段。持续带宽低于 2.2 Mbps 时仍需降码率，缓冲不能长期弥补带宽缺口。
+- FFmpeg 使用 TCP RTSP，将摄像头 H.264/H.265 访问单元原样封装为 fMP4，避免重复编解码。
+- 车端默认保留约 3 秒、云端默认保留 4 个片段；新观看端从短窗口最早片段开始，以便 H.265 解码器先取得关键帧。
+- 浏览器预缓冲约 1 秒；当采集时间显示直播延迟超过 5 秒时，播放器在连续缓冲区内追到直播边缘。
+- 若实际浏览器不支持 HEVC MediaSource，可将摄像头改为 H.264，或设置 `VIDEO_MODE=encode` 让 Jetson 转为 H.264。
 - 每帧携带采集、发送时间与序号。页面端到端延迟包含车端接收 RTSP 后到浏览器完成绘制的时间。
 - WebSocket 单次发送允许等待 60 秒；重连后继续补传车端 FIFO 中仍保留的片段。
 - OpenCV RTSP 打开和读取默认 5 秒超时，超时后释放连接并重新拉流，避免坏连接阻塞约 30 秒。
@@ -121,23 +132,13 @@ python run_cloud.py
 }
 ```
 
-车端导航支持以下接入方式：
+有两种车端接入方式：
 
 1. Jetson 运行 `Navigation_Module_Board.py`，它把边缘端GNSS/CAN数据原子写入同目录的 `navigation_live.json`。`run_vehicle_jetson.py` 默认每秒读取并随现有WebSocket遥测上传，无需额外配置文件路径。
-2. EC20 双串口模式直接运行 `python3 Navigation_Module_Board.py --mode serial`。程序通过 `/dev/ttyUSB2` 发送 `AT`、`AT+QGPSCFG="outport","usbnmea"`、`AT+QGPS?` 和必要的 `AT+QGPS=1`，同时从 `/dev/ttyUSB1` 持续读取 GGA、RMC、GNS、VTG；退出时发送 `AT+QGPSEND`。终端会标明报文是有效定位、尚未定位、校验失败还是辅助数据。NMEA 不落盘为 TXT，只有取得有效经纬度后才会创建并更新 `navigation_live.json`。
+2. GNSS串口输出标准NMEA时运行：`python3 Navigation_Module_Board.py --mode serial --serial-device /dev/ttyUSB0 --baud 9600`。
 3. GNSS/CAN适配程序输出JSON时运行：`python3 Navigation_Module_Board.py --mode udp`，然后向Jetson UDP 7000发送上面的JSON。允许GNSS先发送经纬度、CAN再单独发送 `{"speed_kph":42.6,"source":"EDGE-CAN"}`，模块会自动合并最新值。
 4. 没有真实设备时运行 `python3 Navigation_Module_Board.py --mode test`，可在地图上验证边缘端测试轨迹。测试模式使用Jetson生成的坐标，不读取手机或浏览器定位。
 5. 独立导航进程也可以鉴权调用 `POST /api/vehicles/{vehicle_id}/navigation`。请求体就是上面的JSON，`Authorization` 使用与车端一致的Bearer Token。
-
-EC20 默认使用 115200 波特率。设备名或速率不同时可覆盖：
-
-```bash
-python3 Navigation_Module_Board.py --mode serial \
-  --at-device /dev/ttyUSB2 --at-baud 115200 \
-  --nmea-device /dev/ttyUSB1 --nmea-baud 115200
-```
-
-旧参数 `--serial-device` 和 `--baud` 仍可使用，分别等价于 `--nmea-device` 和 `--nmea-baud`。
 
 实际车速优先使用导航数据中的 `speed_kph`；未提供时，页面会回退显示底盘域 `domains.chassis.speed_kph`。位置超过 10 秒未更新会明确标记为过期。
 
@@ -179,46 +180,11 @@ Content-Type: application/json
 - `GET /api/config/map`：高德地图前端加载配置。
 - `POST /api/vehicles/{vehicle_id}/navigation`：边缘端位置、车速与航向上传入口，需要 Bearer Token。
 - `WS /ws/ingest/{vehicle_id}`：车端上传入口，需要 Bearer Token。
-- `WS /ws/ingest-fmp4/{vehicle_id}`：车端 H.264/fMP4 压缩片段入口。
-- `WS /ws/live-fmp4/{vehicle_id}`：浏览器 H.264/fMP4 连续视频入口。
+- `WS /ws/ingest-fmp4/{vehicle_id}`：车端 H.264/H.265 fMP4 压缩片段入口。
+- `WS /ws/live-fmp4/{vehicle_id}`：浏览器 H.264/H.265 fMP4 连续视频入口。
 - `WS /ws/live/{vehicle_id}`：旧 JPEG 浏览器入口，仅作兼容回退。
 - `WS /ws/metrics/{vehicle_id}`：浏览器指标入口。
 - `POST /api/vehicles/{vehicle_id}/bluetooth`：蓝牙数据上传入口，需要 Bearer Token。
 - `POST /api/vehicles/{vehicle_id}/bluetooth/test`：网页随机蓝牙测试数据入口。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 数据上传入口，需要 Bearer Token。
 - `POST /api/vehicles/{vehicle_id}/wifi/test`：网页随机 WiFi 测试数据入口。
-
-## 团队提交规范
-
-团队成员上传代码前应当写清楚 commit 日志，说明本次提交做了什么、影响了哪些模块。
-
-推荐格式：
-
-```text
-<type>: <简短说明>
-```
-
-常用 `type`：
-
-- `feat`：新增功能
-- `fix`：修复问题
-- `docs`：文档更新
-- `refactor`：代码重构
-- `test`：测试相关
-- `chore`：依赖、脚本、配置等杂项
-
-示例：
-
-```text
-feat: add lubancat edge sender skeleton
-docs: add cpolar deployment notes
-fix: handle websocket reconnect error
-```
-
-不要使用含义不清的提交信息，例如：
-
-```text
-update
-test
-修改
-```

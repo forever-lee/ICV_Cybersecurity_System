@@ -28,6 +28,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("h264-vehicle-agent")
+_FFMPEG_RTSP_TIMEOUT_CACHE = {}
 
 
 def read_navigation_file(path):
@@ -133,6 +134,68 @@ def gst_launch_executable(value):
     if not found:
         raise RuntimeError("gst-launch-1.0 not found")
     return found
+
+
+def gst_plugin_available(name):
+    inspector = shutil.which("gst-inspect-1.0")
+    if not inspector:
+        return False
+    try:
+        result = subprocess.run(
+            [inspector, name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def ffmpeg_encoder_available(name, executable="ffmpeg"):
+    try:
+        ffmpeg = ffmpeg_executable(executable)
+        output = subprocess.check_output(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        ).decode("utf-8", "replace")
+        return re.search(
+            r"^\s*[VAS][A-Z\.]{5}\s+{}\s".format(re.escape(name)),
+            output,
+            re.MULTILINE,
+        ) is not None
+    except (OSError, subprocess.SubprocessError, RuntimeError):
+        return False
+
+
+def ffmpeg_rtsp_timeout_args(executable):
+    """Select a client I/O timeout option supported by this FFmpeg build."""
+    cached = _FFMPEG_RTSP_TIMEOUT_CACHE.get(executable)
+    if cached is not None:
+        return list(cached)
+    try:
+        output = subprocess.check_output(
+            [executable, "-hide_banner", "-h", "full"],
+            stderr=subprocess.STDOUT,
+            timeout=8,
+        ).decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError):
+        output = ""
+    if re.search(r"^\s*-rw_timeout\s", output, re.MULTILINE):
+        result = ("-rw_timeout", "15000000")
+    elif re.search(r"^\s*-stimeout\s", output, re.MULTILINE):
+        result = ("-stimeout", "15000000")
+    else:
+        # Never use -timeout here: some builds interpret it as a listen
+        # timeout and try to bind to the camera's remote address.
+        result = ()
+    _FFMPEG_RTSP_TIMEOUT_CACHE[executable] = result
+    LOGGER.info(
+        "ffmpeg_rtsp_timeout_option option=%s",
+        result[0] if result else "disabled",
+    )
+    return list(result)
 
 
 def gst_encoder_properties():
@@ -243,7 +306,11 @@ def build_command(args, encoder, gpu_pipeline=False):
     if is_lavfi:
         source = ["-f", "lavfi", "-re", "-i", args.source[6:]]
     else:
-        source = ["-rtsp_transport", "tcp", "-timeout", "15000000"]
+        # Timeout option names vary across FFmpeg/Libav builds. Probe the
+        # installed executable instead of passing an incompatible fixed flag.
+        source = ["-rtsp_transport", "tcp"] + ffmpeg_rtsp_timeout_args(executable)
+        if encoder == "copy":
+            source += ["-max_delay", "500000"]
         if gpu_pipeline:
             # Keep decoded frames on the GPU through scaling and NVENC. FFmpeg
             # selects H.264 or HEVC NVDEC from the actual RTSP input codec.
@@ -253,7 +320,14 @@ def build_command(args, encoder, gpu_pipeline=False):
     # A one-second GOP keeps every fragment independently decodable while
     # avoiding the severe quality loss caused by the previous 250 ms GOP.
     gop_frames = max(1, int(round(args.fps * args.segment_ms / 1000.0)))
-    if encoder == "h264_nvenc":
+    if encoder == "copy":
+        if is_lavfi:
+            raise ValueError("passthrough requires an encoded H.264/H.265 camera stream")
+        # Keep the camera's encoded access units unchanged. FFmpeg only
+        # remuxes them into fragmented MP4 for browser MediaSource playback.
+        codec_tag = "hvc1" if args.rtsp_codec == "h265" else "avc1"
+        video = ["-map", "0:v:0", "-c:v", "copy", "-tag:v", codec_tag]
+    elif encoder == "h264_nvenc":
         if gpu_pipeline:
             video_filter = "fps={0},scale_cuda={1}:-2:format=nv12:interp_algo=bilinear".format(
                 args.fps, args.width
@@ -290,8 +364,52 @@ def build_command(args, encoder, gpu_pipeline=False):
     return base + video + mux
 
 
-def build_jetson_gstreamer_command(args, output_fd=1):
-    """Build a TX2 NVDEC/VIC/NVENC pipeline that emits fragmented MP4."""
+def build_jetson_passthrough_gstreamer_command(args, output_fd=1):
+    """Remux an RTSP H.264/H.265 stream to fMP4 without decoding it."""
+    executable = gst_launch_executable(args.gst_launch)
+    codec = "h265" if args.rtsp_codec == "h265" else "h264"
+    depay = "rtph265depay" if codec == "h265" else "rtph264depay"
+    parser = "h265parse" if codec == "h265" else "h264parse"
+    caps = "video/x-h265,stream-format=hvc1,alignment=au" if codec == "h265" else \
+        "video/x-h264,stream-format=avc,alignment=au"
+    return [
+        executable,
+        "-q",
+        "-e",
+        "rtspsrc",
+        "location={}".format(args.source),
+        "protocols=tcp",
+        "latency=250",
+        "drop-on-latency=true",
+        "!",
+        depay,
+        "!",
+        parser,
+        "config-interval=-1",
+        "!",
+        caps,
+        "!",
+        "mp4mux",
+        "fragment-duration={}".format(args.segment_ms),
+        "streamable=true",
+        "!",
+        "fdsink",
+        "fd={}".format(output_fd),
+        "sync=false",
+    ]
+
+
+def jetson_passthrough_available(gst_launch="gst-launch-1.0", codec="h264"):
+    depay = "rtph265depay" if codec == "h265" else "rtph264depay"
+    parser = "h265parse" if codec == "h265" else "h264parse"
+    return (os.path.isfile(gst_launch) or shutil.which(gst_launch) is not None) and all(
+        gst_plugin_available(name)
+        for name in ("rtspsrc", depay, parser, "mp4mux", "fdsink")
+    )
+
+
+def build_jetson_hardware_gstreamer_command(args, output_fd=1):
+    """Build a Jetson NVDEC/VIC/NVENC pipeline that emits fragmented MP4."""
     executable = gst_launch_executable(args.gst_launch)
     codec = "h265" if args.rtsp_codec in ("h265", "hevc") else "h264"
     depay = "rtph265depay" if codec == "h265" else "rtph264depay"
@@ -368,9 +486,88 @@ def build_jetson_gstreamer_command(args, output_fd=1):
     ]
 
 
+def build_jetson_software_gstreamer_command(args, output_fd=1):
+    """Use Jetson NVDEC/VIC and CPU x264 encoding (required by Orin Nano)."""
+    executable = gst_launch_executable(args.gst_launch)
+    codec = "h265" if args.rtsp_codec in ("h265", "hevc") else "h264"
+    depay = "rtph265depay" if codec == "h265" else "rtph264depay"
+    parser = "h265parse" if codec == "h265" else "h264parse"
+    height = int(round(args.width * 9 / 16))
+    gop_frames = max(1, int(round(args.fps * args.segment_ms / 1000.0)))
+    return [
+        executable,
+        "-q",
+        "-e",
+        "rtspsrc",
+        "location={}".format(args.source),
+        "protocols=tcp",
+        "latency=500",
+        "drop-on-latency=false",
+        "!",
+        depay,
+        "!",
+        parser,
+        "!",
+        "nvv4l2decoder",
+        "enable-max-performance=1",
+        "!",
+        "nvvidconv",
+        "!",
+        "video/x-raw,width={},height={},format=I420".format(args.width, height),
+        "!",
+        "videorate",
+        "!",
+        "video/x-raw,format=I420,framerate={}/1".format(args.fps),
+        "!",
+        "x264enc",
+        "bitrate={}".format(args.bitrate_kbps),
+        "speed-preset={}".format(args.software_preset),
+        "key-int-max={}".format(gop_frames),
+        "bframes=2",
+        "byte-stream=false",
+        "aud=true",
+        "!",
+        "video/x-h264,profile=high,stream-format=avc,alignment=au",
+        "!",
+        "h264parse",
+        "config-interval=-1",
+        "!",
+        "video/x-h264,stream-format=avc,alignment=au",
+        "!",
+        "mp4mux",
+        "fragment-duration={}".format(args.segment_ms),
+        "streamable=true",
+        "!",
+        "fdsink",
+        "fd={}".format(output_fd),
+        "sync=false",
+    ]
+
+
 def capture_loop(shared, args):
-    if args.encoder == "jetson":
-        pipelines = [("jetson", False, "NVDEC/VIC/nvv4l2h264enc")]
+    if args.encoder == "copy":
+        pipelines = []
+        # Use the exact same browser-compatible avc1/hvc1 remuxer on the PC
+        # and Jetson. Mixing remuxers produced different HEVC fragments.
+        try:
+            ffmpeg_executable(args.ffmpeg)
+            pipelines.append(("copy", False, "RTSP/{}/passthrough/FFmpeg-fMP4".format(args.rtsp_codec.upper())))
+        except RuntimeError:
+            pass
+        if not pipelines:
+            raise RuntimeError("FFmpeg is required for H.264/H.265 passthrough")
+    elif args.encoder == "jetson":
+        pipelines = []
+        if gst_plugin_available("nvv4l2h264enc"):
+            pipelines.append(("jetson-hw", False, "NVDEC/VIC/nvv4l2h264enc"))
+        if gst_plugin_available("x264enc"):
+            pipelines.append(("jetson-sw", False, "NVDEC/VIC/x264enc-CPU"))
+        if ffmpeg_encoder_available("libx264", args.ffmpeg):
+            pipelines.append(("libx264", False, "FFmpeg/software/libx264"))
+        if not pipelines:
+            raise RuntimeError(
+                "no Jetson H.264 encoder available; install x264enc or FFmpeg libx264"
+            )
     elif args.encoder == "auto":
         pipelines = [
             ("h264_nvenc", True, "NVDEC/CUDA/NVENC"),
@@ -393,12 +590,17 @@ def capture_loop(shared, args):
         with shared.lock:
             fragments_before = shared.encoded_fragments
 
-        if encoder == "jetson":
-            # Some JetPack 4 NVIDIA libraries print nvbuf_utils diagnostics to
+        if encoder in ("copy-gst", "jetson-hw", "jetson-sw"):
+            # Some NVIDIA libraries print nvbuf_utils diagnostics to
             # stdout.  Keep fragmented MP4 on a dedicated inherited FD so
             # those messages can never corrupt the binary media stream.
             media_read_fd, media_write_fd = os.pipe()
-            command = build_jetson_gstreamer_command(args, media_write_fd)
+            if encoder == "copy-gst":
+                command = build_jetson_passthrough_gstreamer_command(args, media_write_fd)
+            elif encoder == "jetson-hw":
+                command = build_jetson_hardware_gstreamer_command(args, media_write_fd)
+            else:
+                command = build_jetson_software_gstreamer_command(args, media_write_fd)
             try:
                 process = subprocess.Popen(
                     command,
@@ -439,7 +641,14 @@ def capture_loop(shared, args):
                 shared.init_segment = payload
                 shared.fragments.clear()
                 shared.source_status = "online"
-                shared.encoder = "nvv4l2h264enc" if encoder == "jetson" else encoder
+                if encoder in ("copy", "copy-gst"):
+                    shared.encoder = "copy"
+                elif encoder == "jetson-hw":
+                    shared.encoder = "nvv4l2h264enc"
+                elif encoder == "jetson-sw":
+                    shared.encoder = "x264enc"
+                else:
+                    shared.encoder = encoder
                 shared.pipeline = pipeline_name
 
         def on_fragment(payload):
@@ -556,8 +765,12 @@ async def upload_loop(shared, args):
                     if now >= next_telemetry:
                         elapsed = max(0.001, now - stats_at)
                         telemetry = {
-                            "type": "fmp4_telemetry", "transport": "WebSocket / H.264 fMP4",
-                            "codec": "H.264", "encoder": encoder, "pipeline": pipeline,
+                            "type": "fmp4_telemetry",
+                            "transport": "WebSocket / {} fMP4".format(
+                                "H.265" if args.rtsp_codec == "h265" else "H.264"
+                            ),
+                            "codec": "H.265" if args.rtsp_codec == "h265" else "H.264",
+                            "encoder": encoder, "pipeline": pipeline,
                             "width": args.width,
                             "height": int(round(args.width * 9 / 16)), "encoded_fps": args.fps,
                             "fps": args.fps, "bitrate_kbps": args.bitrate_kbps,
@@ -601,7 +814,7 @@ def parse_args():
     parser.add_argument("--navigation-file", default=os.getenv("VEHICLE_NAVIGATION_FILE", ""))
     parser.add_argument("--ffmpeg", default=os.getenv("FFMPEG_PATH", "ffmpeg"))
     parser.add_argument(
-        "--encoder", choices=("auto", "jetson", "h264_nvenc", "libx264"), default="auto"
+        "--encoder", choices=("copy", "auto", "jetson", "h264_nvenc", "libx264"), default="auto"
     )
     parser.add_argument("--gst-launch", default=os.getenv("GST_LAUNCH_PATH", "gst-launch-1.0"))
     parser.add_argument(
@@ -613,6 +826,12 @@ def parse_args():
     parser.add_argument("--segment-ms", type=int, choices=(250, 500, 1000), default=1000)
     parser.add_argument("--buffer-seconds", type=float, default=300.0)
     parser.add_argument("--send-timeout", type=float, default=60.0)
+    parser.add_argument(
+        "--software-preset",
+        choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium"),
+        default=os.getenv("VIDEO_SOFTWARE_PRESET", "veryfast"),
+        help="x264 CPU preset used on Jetson models without NVENC",
+    )
     return parser.parse_args()
 
 

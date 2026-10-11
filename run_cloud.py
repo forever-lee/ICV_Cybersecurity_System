@@ -8,7 +8,7 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "http://7e1f03fc.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "http://6636ed15.r7.nas.cpolar.cn"
 
 # 必须与 run_vehicle.py 中的 INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
@@ -20,9 +20,9 @@ DASHBOARD_ACCESS_TOKEN = "view_GJEhQFY45cXFdZ2NA2MVex8m"
 # 超过多少秒没有收到车端数据，判定车辆离线。
 OFFLINE_AFTER_SECONDS = 20
 
-# 每个车辆保留 5 分钟 1 秒 fMP4 片段，观看端短时变慢时继续按顺序补发，
-# 不因延迟增加而跳到最新画面。可用环境变量覆盖。
-FMP4_BUFFER_SEGMENTS = int(os.getenv("FMP4_BUFFER_SEGMENTS", "300"))
+# 实时透传只保留约 4 个 1 秒片段；观看端落后超过窗口时回到短窗口
+# 的关键帧起点，避免运行时间越长端到端延迟越高。
+FMP4_BUFFER_SEGMENTS = int(os.getenv("FMP4_BUFFER_SEGMENTS", "4"))
 
 # 高德开放平台申请的“Web 端（JS API）”Key 与安全密钥。
 # 本机/PyCharm 调试可直接填在引号内；环境变量存在时会覆盖这里的值。
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     print("局域网访问：http://本机IP:{}".format(PORT))
     print("公网访问：{}".format(PUBLIC_DASHBOARD_URL))
     print("公网访问口令：{}".format(DASHBOARD_ACCESS_TOKEN))
-    print("请保持此窗口运行；需要实时视频时再启动 run_vehicle.py")
+    print("请保持此窗口运行；视频与定位由 Jetson 边缘端上传")
     print("=" * 64)
     uvicorn.run(
         "server:app",

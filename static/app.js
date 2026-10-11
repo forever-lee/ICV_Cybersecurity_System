@@ -4,8 +4,16 @@
   const HEADER_SIZE = 29;
   const FMP4_HEADER_SIZE = 17;
   const H264_MIME = 'video/mp4; codecs="avc1.640029"';
-  const H264_TARGET_BUFFER_SECONDS = 10;
-  const H264_RESUME_BUFFER_SECONDS = 6;
+  const HEVC_MIMES = [
+    'video/mp4; codecs="hvc1"',
+    'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'video/mp4; codecs="hvc1.1.6.L120.B0"',
+    'video/mp4; codecs="hvc1.1.6.L123.B0"',
+    'video/mp4; codecs="hev1"',
+  ];
+  const H264_TARGET_BUFFER_SECONDS = 1;
+  const H264_RESUME_BUFFER_SECONDS = 0.5;
+  const H264_MAX_LIVE_LATENCY_MS = 5000;
   const VIEW_NAMES = {
     overview: "全局安全态势", telematics: "车联网域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
@@ -56,6 +64,7 @@
     browserLocationWatchId: null, lastBrowserPosition: null,
     navigationSourceKind: null,
     mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
+    mediaMime: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
     h264Rebuffering: false,
     cockpitVideoCallbackId: null, cockpitAnimationFrameId: null,
@@ -273,6 +282,13 @@
                   <div class="cockpit-stream-placeholder" data-cockpit-stream-placeholder><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待车端摄像头视频流</strong><p>与智能驾驶域共用采集、传输、解码和重连链路</p></div>
                   <div class="cockpit-video-overlay cockpit-overlay-top"><span class="live-tag"><i></i> LIVE</span><span data-cockpit-sequence>SEQ —</span></div>
                   <div class="cockpit-video-overlay cockpit-overlay-bottom"><span data-cockpit-vehicle>CAM-IVI-01 · ${escapeHtml(state.vehicleId)}</span><span data-cockpit-transport>WS / VIDEO</span></div>
+                </div>
+                <div class="cockpit-stream-metrics" aria-label="中控视频链路实时指标" aria-live="polite">
+                  <div class="cockpit-stream-metric" data-tone="waiting"><span>端到端延迟</span><strong data-cockpit-metric="latency">—</strong><small>ms</small><em data-cockpit-metric-state="latency">等待测量</em></div>
+                  <div class="cockpit-stream-metric"><span>云端接收帧率</span><strong data-cockpit-metric="fps">—</strong><small>FPS</small><em>实时遥测</em></div>
+                  <div class="cockpit-stream-metric"><span>上行传输速率</span><strong data-cockpit-metric="uplink">—</strong><small>Mbps</small><em data-cockpit-metric-state="buffer">队列 —</em></div>
+                  <div class="cockpit-stream-metric"><span>链路丢帧</span><strong data-cockpit-metric="dropped">—</strong><small>帧</small><em data-cockpit-metric-state="loss">等待统计</em></div>
+                  <div class="cockpit-stream-metric wide"><span>编码 / 传输</span><strong data-cockpit-metric="codec">—</strong><small data-cockpit-metric="transport">FMP4</small><em data-cockpit-metric-state="connection">观看端 0 · 重连 0</em></div>
                 </div>
               </article>
             </div>
@@ -1174,6 +1190,53 @@
     if (statusLabel) statusLabel.textContent = label;
   }
 
+  function setCockpitMetric(name, value, tone = null) {
+    const element = document.querySelector(`[data-cockpit-metric="${name}"]`);
+    if (!element) return;
+    element.textContent = value;
+    if (tone) element.closest(".cockpit-stream-metric")?.setAttribute("data-tone", tone);
+  }
+
+  function updateCockpitLatencyMetric(latency) {
+    const rounded = Number.isFinite(latency) && latency >= 0 ? Math.round(latency) : null;
+    const tone = rounded == null ? "waiting" : rounded < 1000 ? "good" : rounded < 3000 ? "warn" : "bad";
+    setCockpitMetric("latency", rounded == null ? "—" : rounded, tone);
+    const stateElement = document.querySelector('[data-cockpit-metric-state="latency"]');
+    if (stateElement) stateElement.textContent = rounded == null
+      ? "等待测量"
+      : rounded < 1000 ? "实时性良好" : rounded < 3000 ? "链路延迟偏高" : "已偏离直播边缘";
+  }
+
+  function updateCockpitStreamMetrics(metrics) {
+    const stream = metrics.cockpit_stream || metrics;
+    const online = stream.status === "online";
+    const fps = Number(stream.fps || stream.encoded_fps || 0);
+    const uploadKbps = Number(stream.upload_kbps || 0);
+    const dropped = Number(stream.cloud_dropped_frames || 0)
+      + Number(stream.queue_dropped_frames || 0)
+      + Number(stream.invalid_frames || 0);
+    const received = Number(stream.received_frames || 0);
+    const lossRate = dropped / Math.max(1, received + dropped) * 100;
+    const reconnects = Number(stream.agent_reconnects || 0) + Number(stream.capture_reconnects || 0);
+    const latency = Math.max(Number(stream.ingest_latency_ms || 0), state.playbackLatency || 0);
+    const queueSeconds = Number(stream.queue_seconds || 0);
+    const codec = stream.codec || (String(stream.stream_mode || "").includes("fmp4") ? "H.264/H.265" : "JPEG");
+    const transport = String(stream.transport || "WebSocket / fMP4").replace("WebSocket / ", "WS / ").toUpperCase();
+
+    updateCockpitLatencyMetric(online || latency ? latency : NaN);
+    setCockpitMetric("fps", online && fps ? fps.toFixed(1) : "—", online ? "good" : "waiting");
+    setCockpitMetric("uplink", online && uploadKbps ? (uploadKbps / 1000).toFixed(2) : "—", online ? "good" : "waiting");
+    setCockpitMetric("dropped", online ? dropped.toLocaleString() : "—", !online ? "waiting" : lossRate < 1 ? "good" : lossRate < 5 ? "warn" : "bad");
+    setCockpitMetric("codec", codec, online ? "good" : "waiting");
+    setCockpitMetric("transport", transport);
+    const queueElement = document.querySelector('[data-cockpit-metric-state="buffer"]');
+    if (queueElement) queueElement.textContent = `发送队列 ${queueSeconds.toFixed(1)}s`;
+    const lossElement = document.querySelector('[data-cockpit-metric-state="loss"]');
+    if (lossElement) lossElement.textContent = online ? `丢失率 ${lossRate.toFixed(2)}%` : "等待统计";
+    const connectionElement = document.querySelector('[data-cockpit-metric-state="connection"]');
+    if (connectionElement) connectionElement.textContent = `上传 ${stream.ingest_connected ? "已连接" : "未连接"} · 观看端 ${Number(stream.viewer_count || 0)} · 重连 ${reconnects}`;
+  }
+
   function updateCockpitStreamDetails({ profile, sequence, capturedAt, transport } = {}) {
     const profileElement = document.querySelector("[data-cockpit-stream-profile]");
     const sequenceElement = document.querySelector("[data-cockpit-sequence]");
@@ -1224,11 +1287,12 @@
       if (!state.h264Active || video.paused || video.ended) return;
       if (video.readyState >= 2 && video.videoWidth && video.videoHeight) {
         const metrics = state.latestMetrics;
+        const codecLabel = metrics.codec || (state.mediaMime?.includes("hvc1") || state.mediaMime?.includes("hev1") ? "H.265/HEVC" : "H.264");
         drawCockpitStreamFrame(video, video.videoWidth, video.videoHeight, {
-          profile: `${video.videoWidth} × ${video.videoHeight} · H.264 · 与智能驾驶域同步`,
+          profile: `${video.videoWidth} × ${video.videoHeight} · ${codecLabel} · 与智能驾驶域同步`,
           sequence: `SEG ${Number(metrics.sequence || 0).toLocaleString()}`,
           capturedAt: state.latestMediaCreatedAt || Date.now(),
-          transport: "WS / H.264",
+          transport: `WS / ${codecLabel}`,
         });
       }
       if (typeof video.requestVideoFrameCallback === "function") {
@@ -1249,6 +1313,7 @@
     state.mediaQueue = [];
     state.sourceBuffer = null;
     state.mediaSource = null;
+    state.mediaMime = null;
     state.h264Active = false;
     state.h264Started = false;
     state.latestMediaCreatedAt = 0;
@@ -1262,21 +1327,49 @@
     state.mediaUrl = null;
   }
 
-  function prepareMediaSource() {
+  function initContainsFourCc(buffer, fourCc) {
+    const bytes = new Uint8Array(buffer);
+    const target = [...fourCc].map((character) => character.charCodeAt(0));
+    for (let index = 0; index <= bytes.length - target.length; index += 1) {
+      if (target.every((value, offset) => bytes[index + offset] === value)) return true;
+    }
+    return false;
+  }
+
+  function mediaMimeFromInit(buffer) {
+    if (initContainsFourCc(buffer, "hvcC") || initContainsFourCc(buffer, "hvc1") || initContainsFourCc(buffer, "hev1")) {
+      return HEVC_MIMES.find((mime) => MediaSource.isTypeSupported(mime)) || null;
+    }
+    return MediaSource.isTypeSupported(H264_MIME) ? H264_MIME : null;
+  }
+
+  function ensureMediaSourceBuffer() {
+    if (
+      state.sourceBuffer
+      || !state.mediaMime
+      || !state.mediaSource
+      || state.mediaSource.readyState !== "open"
+    ) return;
+    try {
+      state.sourceBuffer = state.mediaSource.addSourceBuffer(state.mediaMime);
+      state.sourceBuffer.mode = "segments";
+      state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
+      appendNextMediaSegment();
+    } catch (_) {
+      const codec = state.mediaMime.includes("hvc1") || state.mediaMime.includes("hev1") ? "H.265/HEVC" : "H.264";
+      setConnection(false, `浏览器不支持 ${codec} 播放`);
+      setCockpitStreamConnection(false, `${codec} 解码不可用`);
+    }
+  }
+
+  function prepareMediaSource(mime = null) {
     destroyMediaSource();
+    state.mediaMime = mime;
     state.mediaSource = new MediaSource();
     state.mediaUrl = URL.createObjectURL(state.mediaSource);
     video.src = state.mediaUrl;
     state.mediaSource.addEventListener("sourceopen", () => {
-      if (!state.mediaSource || state.mediaSource.readyState !== "open") return;
-      try {
-        state.sourceBuffer = state.mediaSource.addSourceBuffer(H264_MIME);
-        state.sourceBuffer.mode = "segments";
-        state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
-        appendNextMediaSegment();
-      } catch (_) {
-        setConnection(false, "H.264 decoder unavailable");
-      }
+      ensureMediaSourceBuffer();
     }, { once: true });
   }
 
@@ -1293,9 +1386,21 @@
       payload: buffer.slice(FMP4_HEADER_SIZE),
     };
     if (item.kind === 0) {
+      const mime = mediaMimeFromInit(item.payload);
+      if (!mime) {
+        state.mediaQueue = [];
+        setConnection(false, "当前浏览器不支持摄像头的 H.265/HEVC 格式");
+        setCockpitStreamConnection(false, "浏览器不支持当前视频格式");
+        return;
+      }
       // FFmpeg or the edge uplink restarted. Rebuild MSE so an old timestamp
       // range cannot leave playback stalled in a discontinuity.
-      if (state.h264Started || state.h264Active) prepareMediaSource();
+      if (state.h264Started || state.h264Active || (state.mediaMime && state.mediaMime !== mime)) {
+        prepareMediaSource(mime);
+      } else {
+        state.mediaMime = mime;
+        ensureMediaSourceBuffer();
+      }
       state.mediaQueue = [];
     }
     state.mediaQueue.push(item);
@@ -1341,6 +1446,14 @@
         state.h264Rebuffering = false;
         video.play().catch(() => {});
       }
+      if (
+        state.h264Started
+        && state.latestMediaCreatedAt > 0
+        && Date.now() - state.latestMediaCreatedAt > H264_MAX_LIVE_LATENCY_MS
+        && end - start > 0.5
+      ) {
+        video.currentTime = Math.max(start, end - 0.35);
+      }
       if (state.h264Started && start < video.currentTime - 10 && !state.sourceBuffer.updating) {
         state.sourceBuffer.remove(start, video.currentTime - 8);
         return;
@@ -1357,7 +1470,7 @@
     $("videoPlaceholder").classList.add("hidden");
     $("videoStage").classList.add("has-video");
     startCockpitVideoMirror();
-    setConnection(true, "H.264 连续播放");
+    setConnection(true, "压缩码流连续播放");
   });
 
   video.addEventListener("waiting", () => {
@@ -1370,6 +1483,19 @@
     if (state.h264Started) state.h264Rebuffering = true;
   });
 
+  video.addEventListener("error", () => {
+    const code = video.error ? video.error.code : 0;
+    const labels = {
+      1: "视频加载被中止",
+      2: "视频网络读取失败",
+      3: "浏览器无法解码摄像头码流",
+      4: "浏览器不支持该视频格式",
+    };
+    const label = labels[code] || "视频播放失败";
+    setConnection(false, label);
+    setCockpitStreamConnection(false, label);
+  });
+
   video.addEventListener("timeupdate", () => {
     if (!state.h264Active || !state.latestMediaCreatedAt) return;
     let ahead = 0;
@@ -1377,6 +1503,7 @@
     const latency = Math.max(0, Date.now() - state.latestMediaCreatedAt + ahead * 1000);
     state.playbackLatency = latency;
     $("latencyValue").textContent = Math.round(latency);
+    updateCockpitLatencyMetric(latency);
     updateLatencyState(latency);
   });
 
@@ -1385,13 +1512,17 @@
     closeSockets();
     resetPlayback();
     setConnection(false, "正在连接");
-    const h264Supported = "MediaSource" in window && MediaSource.isTypeSupported(H264_MIME);
-    if (h264Supported) prepareMediaSource();
-    const livePath = h264Supported ? "/ws/live-fmp4/" : "/ws/live/";
+    setCockpitStreamConnection(false, "正在连接车端视频");
+    const fmp4Supported = "MediaSource" in window;
+    if (fmp4Supported) prepareMediaSource();
+    const livePath = fmp4Supported ? "/ws/live-fmp4/" : "/ws/live/";
     state.liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
     state.liveSocket.binaryType = "arraybuffer";
-    state.liveSocket.onmessage = h264Supported ? enqueueFmp4 : enqueueFrame;
-    state.liveSocket.onopen = () => setConnection(false, "等待车端");
+    state.liveSocket.onmessage = fmp4Supported ? enqueueFmp4 : enqueueFrame;
+    state.liveSocket.onopen = () => {
+      setConnection(false, "等待车端");
+      setCockpitStreamConnection(false, "等待车端视频");
+    };
     state.liveSocket.onclose = scheduleReconnect;
     state.liveSocket.onerror = () => state.liveSocket.close();
     state.metricsSocket = new WebSocket(wsUrl(`/ws/metrics/${encodeURIComponent(state.vehicleId)}`));
@@ -1410,6 +1541,7 @@
 
   function scheduleReconnect() {
     setConnection(false, "连接中断");
+    setCockpitStreamConnection(false, "视频连接中断，正在重连");
     clearTimeout(state.reconnectTimer);
     state.reconnectTimer = setTimeout(connect, 1800);
   }
@@ -1533,6 +1665,7 @@
     $("overlayTimestamp").textContent = formatFrameTime(frame.capturedAt);
     $("streamProfile").textContent = `${frame.width} × ${frame.height} · JPEG Q${frame.quality} · ${bufferedSeconds.toFixed(1)}s 缓冲`;
     $("latencyValue").textContent = Math.round(latency);
+    updateCockpitLatencyMetric(latency);
     updateLatencyState(latency);
     setConnection(true, "车端在线");
   }
@@ -1549,28 +1682,39 @@
 
   function updateMetrics(metrics) {
     state.latestMetrics = metrics;
+    updateCockpitStreamMetrics(metrics);
     const online = metrics.status === "online";
-    if (online) setConnection(true, "车端在线");
-    else if (Date.now() - state.lastFrameAt > 3500) setConnection(false, "等待车端");
+    const cockpitStream = metrics.cockpit_stream || metrics;
+    if (online) {
+      setConnection(true, "车端在线");
+      setCockpitStreamConnection(true, "中控视频链路在线");
+    } else if (Date.now() - state.lastFrameAt > 3500) {
+      setConnection(false, "等待车端");
+      setCockpitStreamConnection(false, cockpitStream.last_seen_ms
+        ? "车端视频已离线，等待重连"
+        : "云端未收到车端视频上传");
+    }
     const fps = Number(metrics.fps || metrics.encoded_fps || state.frameTimes.length || 0);
     const kbps = Number(metrics.upload_kbps || 0);
     const latency = Math.max(Number(metrics.ingest_latency_ms || 0), state.playbackLatency || 0);
     $("fpsValue").textContent = fps ? fps.toFixed(1) : "—";
     $("bitrateValue").textContent = kbps ? (kbps / 1000).toFixed(2) : "—";
-    const h264 = metrics.stream_mode === "h264-fmp4";
-    $("qualityLabel").textContent = h264 ? `H.264 ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
-    $("frameSizeLabel").textContent = h264 && metrics.segment_bytes
+    const fmp4 = String(metrics.stream_mode || "").includes("fmp4");
+    const passthrough = metrics.encoder === "copy";
+    const codecLabel = metrics.codec || "H.264/H.265";
+    $("qualityLabel").textContent = fmp4 ? `${codecLabel} ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
+    $("frameSizeLabel").textContent = fmp4 && metrics.segment_bytes
       ? `${(metrics.segment_bytes / 1024).toFixed(0)} KB/片段`
       : metrics.frame_bytes ? `${(metrics.frame_bytes / 1024).toFixed(0)} KB/帧` : "— KB/帧";
-    if (h264) {
-      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · H.264 High · ${metrics.encoded_fps || 30} FPS · ${H264_TARGET_BUFFER_SECONDS}s 连续缓冲 · 流畅优先`;
+    if (fmp4) {
+      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · ${codecLabel} · ${metrics.encoded_fps || 20} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
     }
     updateCockpitStreamDetails({
-      profile: h264
-        ? `${metrics.width || 1280} × ${metrics.height || 720} · H.264 · ${metrics.encoded_fps || 30} FPS · 与智能驾驶域同步`
+      profile: fmp4
+        ? `${metrics.width || 1280} × ${metrics.height || 720} · ${codecLabel} · ${metrics.encoded_fps || 20} FPS · 原码流同步`
         : `${metrics.width || 1280} × ${metrics.height || 720} · JPEG Q${metrics.jpeg_quality || "—"} · 与智能驾驶域同步`,
-      sequence: `${h264 ? "SEG" : "SEQ"} ${Number(metrics.sequence || 0).toLocaleString()}`,
-      transport: h264 ? "WS / H.264" : "WS / JPEG",
+      sequence: `${fmp4 ? "SEG" : "SEQ"} ${Number(metrics.sequence || 0).toLocaleString()}`,
+      transport: fmp4 ? `WS / ${codecLabel}` : "WS / JPEG",
     });
     const droppedFrames = Number(metrics.cloud_dropped_frames || 0)
       + Number(metrics.queue_dropped_frames || 0)
