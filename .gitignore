@@ -4,6 +4,8 @@ __pycache__/
 *.log
 *.pid
 *.tmp
+data/*.db
+.body_demo_runtime/
 
 # Local environments
 .env

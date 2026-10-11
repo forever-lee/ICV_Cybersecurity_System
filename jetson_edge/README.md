@@ -4,12 +4,17 @@
 
 - 两路 H.265 摄像头采流与云端上传；
 - Jetson UART GNSS 定位与车速采集；
+- WiFi 充电遥测转发；
+- S32K344 车身域 UDP 状态、控制与时间同步；
 - fMP4/WebSocket 协议；
 - 一个统一的进程管理入口。
 
 ## 文件
 
-- `start_edge.py`：唯一推荐入口，同时监管 GPS、VHC-001 和 VHC-002。
+- `start_edge.py`：唯一推荐入口，同时监管车身域、WiFi、GPS、VHC-001 和 VHC-002。
+- `body_edge_agent.py`：接收 S32K344 UDP/串口数据、对时、控制和云端上传。
+- `body_protocol.py`：车身域二进制协议编解码。
+- `WiFi_Module.py`：WiFi 充电遥测接收和云端转发。
 - `run_vehicle_jetson.py`：单路摄像头环境检查与参数组装。
 - `h264_vehicle_agent.py`：RTSP/fMP4 采流上传实现（同时支持 H.264/H.265）。
 - `stream_protocol.py`：边缘端与云端二进制协议。
@@ -26,6 +31,9 @@
 | VHC-002 | `rtsp://192.168.4.89:8554/main` |
 
 GPS 默认使用 `/dev/ttyTHS1`，波特率 `38400`。两路摄像头共享同一块 Jetson 的 GPS 数据。
+
+车身域默认要求 Jetson `eth0` 为 `192.168.4.100/24`、S32K344 为
+`192.168.4.31/24`，状态报文使用 UDP 7100，控制和对时使用 UDP 7101。
 
 ## 安装和运行
 
@@ -46,7 +54,8 @@ nohup python3 start_edge.py > edge_supervisor.log 2>&1 &
 ## 可选环境变量
 
 ```bash
-export CLOUD_WS_URL='ws://your-cloud-host'
+export CLOUD_HTTP_URL='https://your-cloud-host'
+# CLOUD_WS_URL 可省略，start_edge.py 会根据 HTTP/HTTPS 自动生成 WS/WSS 地址。
 export VEHICLE_INGEST_TOKEN='your-ingest-token'
 export CAMERA_1_RTSP_URL='rtsp://192.168.4.88:8554/main'
 export CAMERA_2_RTSP_URL='rtsp://192.168.4.89:8554/main'
@@ -55,7 +64,8 @@ export GPS_BAUD='38400'
 python3 start_edge.py
 ```
 
-设置 `GPS_ENABLED=0`、`CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。
+设置 `BODY_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
+`CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。
 
 ## 已排除的旧文件
 

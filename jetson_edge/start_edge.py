@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start and supervise Jetson GPS, WiFi telemetry, and camera uplinks.
+"""Start and supervise Jetson body, GPS, WiFi, and camera uplinks.
 
 Run on the Jetson from this directory:
     python3 start_edge.py
@@ -8,6 +8,7 @@ All settings can be overridden with environment variables; see README.md.
 """
 
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,17 +20,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
+BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-
-# 视频使用 WebSocket，WiFi 遥测使用 HTTP；二者共用同一公网代理域名。
-CLOUD_WS_URL = os.getenv(
-    "CLOUD_WS_URL", "ws://15151e1e.r7.nas.cpolar.cn"
-).rstrip("/")
-CLOUD_HTTP_URL = os.getenv(
-    "CLOUD_HTTP_URL", "http://15151e1e.r7.nas.cpolar.cn"
-).rstrip("/")
-
 
 @dataclass
 class Component:
@@ -103,6 +96,46 @@ def enabled(name, default="1"):
     return os.getenv(name, default).strip().lower() not in {"0", "false", "no", "off"}
 
 
+def required_environment():
+    cloud_http_url = os.getenv("CLOUD_HTTP_URL", "").strip().rstrip("/")
+    ingest_token = os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
+    if not cloud_http_url:
+        raise SystemExit("请设置 CLOUD_HTTP_URL（电脑 A 的云端地址）")
+    if not ingest_token:
+        raise SystemExit("请设置 VEHICLE_INGEST_TOKEN")
+    cloud_ws_url = os.getenv("CLOUD_WS_URL", "").strip().rstrip("/")
+    if not cloud_ws_url:
+        cloud_ws_url = (
+            ("wss://" + cloud_http_url[8:])
+            if cloud_http_url.startswith("https://")
+            else ("ws://" + cloud_http_url[7:])
+            if cloud_http_url.startswith("http://")
+            else cloud_http_url
+        )
+    return cloud_http_url, cloud_ws_url, ingest_token
+
+
+def check_expected_eth0_address():
+    if not enabled("BODY_ENABLED"):
+        return
+    expected = os.getenv("BODY_EXPECTED_ETH0_ADDRESS", "192.168.4.100/24").strip()
+    if not expected or os.name != "posix":
+        return
+    ip_command = shutil.which("ip")
+    if not ip_command:
+        raise SystemExit("无法检查 eth0：系统中没有 ip 命令")
+    result = subprocess.run(
+        [ip_command, "-4", "-o", "addr", "show", "dev", "eth0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        universal_newlines=True,
+        check=False,
+    )
+    if result.returncode != 0 or expected not in result.stdout:
+        raise SystemExit("eth0 未配置期望地址 {}".format(expected))
+    print("[CHECK] eth0 地址正确：{}".format(expected))
+
+
 def acquire_instance_lock():
     if os.name != "posix":
         return None
@@ -118,17 +151,44 @@ def acquire_instance_lock():
 
 
 def build_components():
+    cloud_http_url, cloud_ws_url, ingest_token = required_environment()
     common_vehicle_environment = {
         "VIDEO_MODE": os.getenv("VIDEO_MODE", "copy"),
         "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
         "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
-        "CLOUD_WS_URL": CLOUD_WS_URL,
+        "CLOUD_WS_URL": cloud_ws_url,
+        "VEHICLE_INGEST_TOKEN": ingest_token,
     }
-    for name in ("VEHICLE_INGEST_TOKEN", "VIDEO_BUFFER_SECONDS"):
+    for name in ("VIDEO_BUFFER_SECONDS",):
         if os.getenv(name):
             common_vehicle_environment[name] = os.environ[name]
 
     components = []
+    if enabled("BODY_ENABLED"):
+        if not BODY_AGENT_PATH.is_file():
+            raise SystemExit("缺少车身域程序：{}".format(BODY_AGENT_PATH))
+        body_environment = {
+            "CLOUD_HTTP_URL": cloud_http_url,
+            "VEHICLE_INGEST_TOKEN": ingest_token,
+            "VEHICLE_ID": os.getenv("BODY_VEHICLE_ID", "VHC-001"),
+        }
+        components.append(Component(
+            name="body",
+            command=[
+                sys.executable, "-u", str(BODY_AGENT_PATH),
+                "--mode", os.getenv("BODY_INPUT_MODE", "udp"),
+                "--host", os.getenv("BODY_UDP_HOST", "0.0.0.0"),
+                "--port", os.getenv("BODY_UDP_PORT", "7100"),
+                "--board-host", os.getenv("BODY_BOARD_HOST", "192.168.4.31"),
+                "--control-port", os.getenv("BODY_CONTROL_PORT", "7101"),
+                "--serial-port", os.getenv("BODY_SERIAL_PORT", "/dev/ttyUSB0"),
+                "--baudrate", os.getenv("BODY_SERIAL_BAUDRATE", "115200"),
+                "--cloud", cloud_http_url,
+                "--vehicle-id", body_environment["VEHICLE_ID"],
+            ],
+            environment=body_environment,
+        ))
+
     if enabled("GPS_ENABLED"):
         components.append(Component(
             name="gps",
@@ -148,15 +208,12 @@ def build_components():
             "WIFI_UDP_PORT": os.getenv("WIFI_UDP_PORT", "6001"),
             "ESP32_BRIDGE_HOST": os.getenv("ESP32_BRIDGE_HOST", "192.168.3.1"),
             "ESP32_BRIDGE_PORT": os.getenv("ESP32_BRIDGE_PORT", "8080"),
-            "CLOUD_HTTP_URL": CLOUD_HTTP_URL,
+            "CLOUD_HTTP_URL": cloud_http_url,
+            "VEHICLE_INGEST_TOKEN": ingest_token,
             "VEHICLE_ID": os.getenv(
                 "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
             ),
         }
-        if os.getenv("VEHICLE_INGEST_TOKEN"):
-            wifi_environment["VEHICLE_INGEST_TOKEN"] = os.environ[
-                "VEHICLE_INGEST_TOKEN"
-            ]
         components.append(Component(
             name="wifi",
             command=[sys.executable, "-u", str(BASE_DIR / "WiFi_Module.py")],
@@ -183,6 +240,7 @@ def build_components():
 
 
 def main():
+    check_expected_eth0_address()
     LOG_DIR.mkdir(exist_ok=True)
     lock_handle = acquire_instance_lock()
     pid_path = BASE_DIR / "edge_supervisor.pid"

@@ -1,0 +1,29 @@
+from jetson_edge.body_protocol import (
+    build_serial_command,
+    decode_serial_packet,
+)
+
+
+def body_packet(transmission_enabled):
+    packet = bytearray(16)
+    packet[0:4] = bytes((0xA5, 0x5A, 0x01, 0x01))
+    packet[12] = 0x01
+    packet[14] = 0x01 if transmission_enabled else 0x00
+    checksum = 0
+    for value in packet[:15]:
+        checksum ^= value
+    packet[15] = checksum
+    return bytes(packet)
+
+
+def test_start_command_packet():
+    assert build_serial_command("start") == bytes((0xA5, 0x5A, 0x01, 0x02, 0x01, 0xFD))
+
+
+def test_stop_command_packet():
+    assert build_serial_command("stop") == bytes((0xA5, 0x5A, 0x01, 0x02, 0x00, 0xFC))
+
+
+def test_status_packet_reports_transmission_state():
+    assert decode_serial_packet(body_packet(True))["transmissionEnabled"] is True
+    assert decode_serial_packet(body_packet(False))["transmissionEnabled"] is False

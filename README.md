@@ -1,6 +1,6 @@
 # V-SHIELD 云端服务
 
-当前根目录只保留云端服务。Jetson 边缘端代码已经独立整理到 [`jetson_edge/`](jetson_edge/README.md)。
+电脑 A 运行云端服务和 Web 页面；Jetson 统一运行视频、导航、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
 
 ## 云端文件
 
@@ -11,11 +11,14 @@
 - `requirements.txt`：云端 Python 依赖。
 - `.env.example`：云端环境变量示例。
 
-## 启动
+## 电脑 A：启动云端与 Web
 
-当前验证环境：
+先设置上传 Token 和网页访问口令，再启动：
 
 ```powershell
+$env:VEHICLE_INGEST_TOKEN = "请换成长随机字符串"
+$env:DASHBOARD_ACCESS_TOKEN = "请换成另一个访问口令"
+$env:PUBLIC_DASHBOARD_URL = "http://你的cpolar地址"
 D:\Anconda\envs\TM\python.exe run_cloud.py
 ```
 
@@ -25,10 +28,29 @@ D:\Anconda\envs\TM\python.exe run_cloud.py
 http://0.0.0.0:8001
 ```
 
-公网隧道地址在 `run_cloud.py` 中配置。当前入口：
+确认电脑 A 本机健康检查正常：
 
-- 管理大屏：`http://15151e1e.r7.nas.cpolar.cn/`
-- VHC-001 免口令只读视频：`http://15151e1e.r7.nas.cpolar.cn/public/live/VHC-001`
+```powershell
+curl.exe http://127.0.0.1:8001/healthz
+```
+
+如使用 cpolar，把 `8001` 映射到公网；Jetson 的 `CLOUD_HTTP_URL` 填电脑 A 的局域网地址或该公网地址。
+
+- 管理大屏：`PUBLIC_DASHBOARD_URL/`
+- VHC-001 免口令只读视频：`PUBLIC_DASHBOARD_URL/public/live/VHC-001`
+
+## Jetson：启动统一边缘端
+
+K3/S32K344 程序烧录到 Flash 后，只需给板子上电，不需要每次打开 S32DS。Jetson 端执行：
+
+```bash
+cd ~/Desktop/body_1/ICV_Cybersecurity_System/jetson_edge
+export CLOUD_HTTP_URL='http://电脑A的IP:8001'
+export VEHICLE_INGEST_TOKEN='与电脑A完全一致的Token'
+python3 start_edge.py
+```
+
+Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、WiFi 和车身域组件。
 
 ## 当前数据链路
 
@@ -57,6 +79,17 @@ BMS 报文产生端（电脑 A 或电脑 B，连接 S32K344_WIFI）
   → HTTP POST /api/vehicles/{vehicle_id}/wifi
   → cpolar 公网映射 / 电脑 A 云端 8001
   → WiFi 充电状态、报文历史与 IDS 告警页面
+
+S32K344 UDP 7100
+  → Jetson body_edge_agent.py
+  → HTTP/HTTPS 上传
+  → 电脑 A server.py
+  → 车身域 Web 页面
+
+电脑 A 页面控制
+  → Jetson HTTP 轮询
+  → UDP 7101
+  → S32K344
 ```
 
 网页不再读取访问者手机定位，仅显示 Jetson 上传的 GNSS/CAN 数据。
@@ -76,6 +109,10 @@ WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的�
 - `POST /api/vehicles/{vehicle_id}/bluetooth`：BLE 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
+- `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。
+- `POST /api/vehicles/{vehicle_id}/domains/body/control`：Jetson 轮询车身域启停控制。
+- `POST /api/vehicles/{vehicle_id}/body/transmission`：网页设置车身域上传状态。
+- `GET /api/vehicles/{vehicle_id}/body/history`：车身域历史报文。
 
 ## 安全说明
 

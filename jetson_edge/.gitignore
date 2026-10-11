@@ -5,3 +5,4 @@ logs/
 *.lock
 navigation_live.json
 navigation_live.json.tmp
+edge_supervisor.log
