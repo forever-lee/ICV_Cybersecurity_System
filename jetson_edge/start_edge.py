@@ -123,7 +123,8 @@ def check_expected_eth0_address():
         return
     ip_command = shutil.which("ip")
     if not ip_command:
-        raise SystemExit("无法检查 eth0：系统中没有 ip 命令")
+        print("[WARN] 无法检查 eth0：系统中没有 ip 命令；继续启动其他组件")
+        return False
     result = subprocess.run(
         [ip_command, "-4", "-o", "addr", "show", "dev", "eth0"],
         stdout=subprocess.PIPE,
@@ -132,8 +133,12 @@ def check_expected_eth0_address():
         check=False,
     )
     if result.returncode != 0 or expected not in result.stdout:
-        raise SystemExit("eth0 未配置期望地址 {}".format(expected))
+        print("[WARN] eth0 未配置期望地址 {}；车身域可能不可用，继续启动其他组件".format(
+            expected
+        ))
+        return False
     print("[CHECK] eth0 地址正确：{}".format(expected))
+    return True
 
 
 def acquire_instance_lock():
