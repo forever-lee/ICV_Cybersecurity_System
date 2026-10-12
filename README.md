@@ -46,12 +46,20 @@ K3/S32K344 程序烧录到 Flash 后，只需给板子上电，不需要每次�
 
 ```bash
 cd ~/Desktop/body_1/ICV_Cybersecurity_System/jetson_edge
-export CLOUD_HTTP_URL='http://电脑A的IP:8001'
-export VEHICLE_INGEST_TOKEN='与电脑A完全一致的Token'
 python3 start_edge.py
 ```
 
 Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、WiFi 和车身域组件。
+
+`start_edge.py` 集中配置的默认云端地址为：
+
+```text
+CLOUD_HTTP_URL=http://15151e1e.r7.nas.cpolar.cn
+CLOUD_WS_URL=ws://15151e1e.r7.nas.cpolar.cn
+VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
+```
+
+所有子进程统一继承这些配置，不需要再修改各自源码。公网域名或 Token 变化时可以直接修改 `start_edge.py` 顶部的默认值，或在启动前通过同名环境变量临时覆盖。
 
 ## 当前数据链路
 

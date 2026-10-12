@@ -54,15 +54,22 @@ nohup python3 start_edge.py > edge_supervisor.log 2>&1 &
 ## 可选环境变量
 
 ```bash
-export CLOUD_HTTP_URL='https://your-cloud-host'
-# CLOUD_WS_URL 可省略，start_edge.py 会根据 HTTP/HTTPS 自动生成 WS/WSS 地址。
-export VEHICLE_INGEST_TOKEN='your-ingest-token'
 export CAMERA_1_RTSP_URL='rtsp://192.168.4.88:8554/main'
 export CAMERA_2_RTSP_URL='rtsp://192.168.4.89:8554/main'
 export GPS_DEVICE='/dev/ttyTHS1'
 export GPS_BAUD='38400'
 python3 start_edge.py
 ```
+
+云端地址统一在 `start_edge.py` 中配置，当前默认值为：
+
+```text
+CLOUD_HTTP_URL=http://15151e1e.r7.nas.cpolar.cn
+CLOUD_WS_URL=ws://15151e1e.r7.nas.cpolar.cn
+VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
+```
+
+车身、WiFi、GPS 和摄像头子进程都会继承这些变量。需要临时切换服务器或 Token 时仍可在启动前设置同名环境变量；如果只覆盖 HTTP 地址，程序会自动推导 WS/WSS 地址。
 
 设置 `BODY_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
 `CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。

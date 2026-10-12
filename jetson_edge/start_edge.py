@@ -23,6 +23,9 @@ NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
 BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
+DEFAULT_CLOUD_HTTP_URL = "http://15151e1e.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://15151e1e.r7.nas.cpolar.cn"
+DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
 class Component:
@@ -34,6 +37,8 @@ class Component:
     restart_at: float = 0.0
 
     @property
+
+    
     def log_path(self):
         return LOG_DIR / "{}.log".format(self.name)
 
@@ -97,14 +102,16 @@ def enabled(name, default="1"):
 
 
 def required_environment():
-    cloud_http_url = os.getenv("CLOUD_HTTP_URL", "").strip().rstrip("/")
-    ingest_token = os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
-    if not cloud_http_url:
-        raise SystemExit("请设置 CLOUD_HTTP_URL（电脑 A 的云端地址）")
-    if not ingest_token:
-        raise SystemExit("请设置 VEHICLE_INGEST_TOKEN")
-    cloud_ws_url = os.getenv("CLOUD_WS_URL", "").strip().rstrip("/")
-    if not cloud_ws_url:
+    configured_http_url = os.getenv("CLOUD_HTTP_URL", "").strip()
+    cloud_http_url = (configured_http_url or DEFAULT_CLOUD_HTTP_URL).rstrip("/")
+    ingest_token = (
+        os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
+        or DEFAULT_VEHICLE_INGEST_TOKEN
+    )
+    configured_ws_url = os.getenv("CLOUD_WS_URL", "").strip()
+    if configured_ws_url:
+        cloud_ws_url = configured_ws_url.rstrip("/")
+    elif configured_http_url:
         cloud_ws_url = (
             ("wss://" + cloud_http_url[8:])
             if cloud_http_url.startswith("https://")
@@ -112,6 +119,8 @@ def required_environment():
             if cloud_http_url.startswith("http://")
             else cloud_http_url
         )
+    else:
+        cloud_ws_url = DEFAULT_CLOUD_WS_URL
     return cloud_http_url, cloud_ws_url, ingest_token
 
 
@@ -157,13 +166,17 @@ def acquire_instance_lock():
 
 def build_components():
     cloud_http_url, cloud_ws_url, ingest_token = required_environment()
-    common_vehicle_environment = {
-        "VIDEO_MODE": os.getenv("VIDEO_MODE", "copy"),
-        "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
-        "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
+    common_cloud_environment = {
+        "CLOUD_HTTP_URL": cloud_http_url,
         "CLOUD_WS_URL": cloud_ws_url,
         "VEHICLE_INGEST_TOKEN": ingest_token,
     }
+    common_vehicle_environment = dict(common_cloud_environment)
+    common_vehicle_environment.update({
+        "VIDEO_MODE": os.getenv("VIDEO_MODE", "copy"),
+        "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
+        "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
+    })
     for name in ("VIDEO_BUFFER_SECONDS",):
         if os.getenv(name):
             common_vehicle_environment[name] = os.environ[name]
@@ -172,11 +185,8 @@ def build_components():
     if enabled("BODY_ENABLED"):
         if not BODY_AGENT_PATH.is_file():
             raise SystemExit("缺少车身域程序：{}".format(BODY_AGENT_PATH))
-        body_environment = {
-            "CLOUD_HTTP_URL": cloud_http_url,
-            "VEHICLE_INGEST_TOKEN": ingest_token,
-            "VEHICLE_ID": os.getenv("BODY_VEHICLE_ID", "VHC-001"),
-        }
+        body_environment = dict(common_cloud_environment)
+        body_environment["VEHICLE_ID"] = os.getenv("BODY_VEHICLE_ID", "VHC-001")
         components.append(Component(
             name="body",
             command=[
@@ -204,21 +214,20 @@ def build_components():
                 "--nmea-baud", os.getenv("GPS_BAUD", "38400"),
                 "--output", str(NAVIGATION_FILE),
             ],
-            environment={},
+            environment=dict(common_cloud_environment),
         ))
 
     if enabled("WIFI_ENABLED"):
-        wifi_environment = {
+        wifi_environment = dict(common_cloud_environment)
+        wifi_environment.update({
             "WIFI_UDP_HOST": os.getenv("WIFI_UDP_HOST", "0.0.0.0"),
             "WIFI_UDP_PORT": os.getenv("WIFI_UDP_PORT", "6001"),
             "ESP32_BRIDGE_HOST": os.getenv("ESP32_BRIDGE_HOST", "192.168.3.1"),
             "ESP32_BRIDGE_PORT": os.getenv("ESP32_BRIDGE_PORT", "8080"),
-            "CLOUD_HTTP_URL": cloud_http_url,
-            "VEHICLE_INGEST_TOKEN": ingest_token,
             "VEHICLE_ID": os.getenv(
                 "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
             ),
-        }
+        })
         components.append(Component(
             name="wifi",
             command=[sys.executable, "-u", str(BASE_DIR / "WiFi_Module.py")],
