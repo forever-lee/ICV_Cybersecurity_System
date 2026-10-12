@@ -1244,19 +1244,38 @@ def record_wifi_packet(state, payload, is_test=False):
     charge = parse_charging_packet(text)
     ids_result = detect_wifi_intrusion(state, charge, state.wifi_last_seen_ms)
     sender_time_ms = payload.get("sender_time_ms")
+    if sender_time_ms is None and charge is not None:
+        sender_time_ms = charge.get("sender_time_ms")
     try:
         sender_time_ms = int(sender_time_ms) if sender_time_ms is not None else None
     except (TypeError, ValueError):
         sender_time_ms = None
+    try:
+        udp_received_at_ms = int(payload.get("udp_received_at_ms"))
+    except (TypeError, ValueError):
+        udp_received_at_ms = None
+    sender_to_edge_latency_ms = (
+        max(0, udp_received_at_ms - sender_time_ms)
+        if sender_time_ms is not None and udp_received_at_ms is not None
+        else None
+    )
+    edge_to_cloud_latency_ms = (
+        max(0, state.wifi_last_seen_ms - udp_received_at_ms)
+        if udp_received_at_ms is not None
+        else None
+    )
     record = {
         "sequence": state.wifi_sequence,
         "received_at_ms": state.wifi_last_seen_ms,
         "source_time_ms": payload.get("source_time_ms"),
-        "udp_received_at_ms": payload.get("udp_received_at_ms"),
+        "udp_received_at_ms": udp_received_at_ms,
         "sender_time_ms": sender_time_ms,
-        "e2e_latency_ms": (state.wifi_last_seen_ms - sender_time_ms)
+        "sender_to_edge_latency_ms": sender_to_edge_latency_ms,
+        "edge_to_cloud_latency_ms": edge_to_cloud_latency_ms,
+        "e2e_latency_ms": max(0, state.wifi_last_seen_ms - sender_time_ms)
         if sender_time_ms is not None else None,
         "latency_estimated": sender_time_ms is not None,
+        "latency_source": "computer_b_ts" if sender_time_ms is not None else "unavailable",
         "source": str(payload.get("source", "WIFI-UDP"))[:80],
         "text": text,
         "hex": hex_text,

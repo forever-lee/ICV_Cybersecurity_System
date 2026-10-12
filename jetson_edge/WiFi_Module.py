@@ -14,9 +14,6 @@ from urllib import error, request
 # 可直接修改，也可通过同名环境变量覆盖。
 UDP_IP = os.getenv("WIFI_UDP_HOST", "0.0.0.0")
 UDP_PORT = int(os.getenv("WIFI_UDP_PORT", "6001"))
-ESP32_BRIDGE_HOST = os.getenv("ESP32_BRIDGE_HOST", "192.168.3.1")
-ESP32_BRIDGE_PORT = int(os.getenv("ESP32_BRIDGE_PORT", "8080"))
-TIME_SYNC_INTERVAL_SECONDS = 10.0
 CLOUD_HTTP_URL = os.getenv("CLOUD_HTTP_URL", "http://127.0.0.1:8001").rstrip("/")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "VHC-001")
 # 必须与 run_cloud.py 中的 INGEST_TOKEN 一致。
@@ -67,23 +64,12 @@ def send_test_packets(host, port, count, interval):
         sock.close()
 
 
-def send_time_sync(sock):
-    """Give the S32K an epoch reference for board-to-server delay estimates."""
-    text = "SYNC,TS={}\r\n".format(now_ms())
-    try:
-        sock.sendto(text.encode("ascii"), (ESP32_BRIDGE_HOST, ESP32_BRIDGE_PORT))
-        print("Time sync sent to {}:{}".format(ESP32_BRIDGE_HOST, ESP32_BRIDGE_PORT))
-        return True
-    except OSError as exc:
-        print("Time sync failed: {}".format(exc))
-        return False
-
-
-def forward_to_cloud(data, addr):
+def build_cloud_payload(data, addr, udp_received_at_ms=None):
+    """Build telemetry using the Computer B TS value as the source timestamp."""
     text = data.decode("utf-8", errors="replace").strip()
-    udp_received_at_ms = now_ms()
+    if udp_received_at_ms is None:
+        udp_received_at_ms = now_ms()
     payload = {
-        "source_time_ms": udp_received_at_ms,
         "udp_received_at_ms": udp_received_at_ms,
         "source": "{}:{}".format(addr[0], addr[1]),
         "text": text,
@@ -96,6 +82,19 @@ def forward_to_cloud(data, addr):
     sender_time_ms = extract_sender_time_ms(text)
     if sender_time_ms is not None:
         payload["sender_time_ms"] = sender_time_ms
+        payload["source_time_ms"] = sender_time_ms
+        payload["timestamp_source"] = "computer_b_ts"
+        payload["sender_to_edge_latency_ms"] = max(
+            0, udp_received_at_ms - sender_time_ms
+        )
+    else:
+        payload["source_time_ms"] = udp_received_at_ms
+        payload["timestamp_source"] = "jetson_udp_receive"
+    return payload
+
+
+def forward_to_cloud(data, addr, udp_received_at_ms=None):
+    payload = build_cloud_payload(data, addr, udp_received_at_ms)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     url = "{}/api/vehicles/{}/wifi".format(CLOUD_HTTP_URL, VEHICLE_ID)
     http_request = request.Request(
@@ -124,17 +123,14 @@ def run_receiver(host, port):
     sock.settimeout(1.0)
     print("UDP receiver started, listening on {}:{}".format(host, port))
     print("Forwarding WiFi data to {} (vehicle {})".format(CLOUD_HTTP_URL, VEHICLE_ID))
+    print("Latency source: Computer B packet TS (no Jetson-to-ESP32 time sync)")
     print("Waiting for data...")
-    last_sync_at = 0.0
 
     try:
         while True:
-            if (time.monotonic() - last_sync_at) >= TIME_SYNC_INTERVAL_SECONDS:
-                send_time_sync(sock)
-                last_sync_at = time.monotonic()
-
             try:
                 data, addr = sock.recvfrom(4096)
+                udp_received_at_ms = now_ms()
             except socket.timeout:
                 continue
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -146,7 +142,11 @@ def run_receiver(host, port):
             print("HEX   : {}".format(bytes_to_hex(data)))
             with open("wifi_udp_log.txt", "a", encoding="utf-8") as log_file:
                 log_file.write(line + "\n")
-            print("CLOUD : {}".format("accepted" if forward_to_cloud(data, addr) else "failed"))
+            print("CLOUD : {}".format(
+                "accepted"
+                if forward_to_cloud(data, addr, udp_received_at_ms)
+                else "failed"
+            ))
             print("-" * 60)
     except KeyboardInterrupt:
         print("\nWiFi receiver stopped.")

@@ -253,8 +253,6 @@ def build_components():
         wifi_environment.update({
             "WIFI_UDP_HOST": os.getenv("WIFI_UDP_HOST", "0.0.0.0"),
             "WIFI_UDP_PORT": os.getenv("WIFI_UDP_PORT", "6001"),
-            "ESP32_BRIDGE_HOST": os.getenv("ESP32_BRIDGE_HOST", "192.168.3.1"),
-            "ESP32_BRIDGE_PORT": os.getenv("ESP32_BRIDGE_PORT", "8080"),
             "VEHICLE_ID": os.getenv(
                 "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
             ),
