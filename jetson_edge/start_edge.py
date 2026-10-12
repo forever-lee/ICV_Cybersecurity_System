@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start and supervise Jetson GPS plus both vehicle camera uplinks.
+"""Start and supervise Jetson vehicle-domain uplinks.
 
 Run on the Jetson from this directory:
     python3 start_edge.py
@@ -120,6 +120,27 @@ def build_components():
             common_vehicle_environment[name] = os.environ[name]
 
     components = []
+    if enabled("BLUETOOTH_ENABLED", "0"):
+        bluetooth_environment = {
+            "CLOUD_HTTP_URL": os.getenv("CLOUD_HTTP_URL", ""),
+            "VEHICLE_ID": os.getenv("BLUETOOTH_VEHICLE_ID", os.getenv("VEHICLE_ID", "VHC-001")),
+            "VEHICLE_INGEST_TOKEN": os.getenv("VEHICLE_INGEST_TOKEN", ""),
+            "BLUETOOTH_UDP_HOST": os.getenv("BLUETOOTH_UDP_HOST", "0.0.0.0"),
+            "BLUETOOTH_UDP_PORT": os.getenv("BLUETOOTH_UDP_PORT", "5000"),
+        }
+        for name in (
+            "BLUETOOTH_QUEUE_SIZE",
+            "BLUETOOTH_HTTP_TIMEOUT_SECONDS",
+            "BLUETOOTH_SOURCE_PREFIX",
+        ):
+            if os.getenv(name):
+                bluetooth_environment[name] = os.environ[name]
+        components.append(Component(
+            name="bluetooth",
+            command=[sys.executable, "-u", str(BASE_DIR / "bluetooth_edge_agent.py")],
+            environment=bluetooth_environment,
+        ))
+
     if enabled("GPS_ENABLED"):
         components.append(Component(
             name="gps",
@@ -167,8 +188,8 @@ def main():
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
 
-    print("Jetson 边缘端统一启动：GPS + {} 路摄像头".format(
-        sum(component.name.startswith("camera_") for component in components)
+    print("Jetson 边缘端统一启动：{}".format(
+        "、".join(component.name for component in components) or "没有启用组件"
     ))
     try:
         for component in components:

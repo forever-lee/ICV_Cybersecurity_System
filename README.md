@@ -2,6 +2,8 @@
 
 当前根目录只保留云端服务。Jetson 边缘端代码已经独立整理到 [`jetson_edge/`](jetson_edge/README.md)。
 
+蓝牙域实验链路：笔记本 `bluetooth_gateway/ble_s32_sender.py` → BLE/nRF52840 → S32K344 UART → S32K344 以太网 UDP → Jetson `jetson_edge/bluetooth_edge_agent.py` → HTTP → 云端 `server.py`。云端运行 `python run_cloud.py`，Jetson 运行 `python3 start_edge.py`。
+
 ## 云端文件
 
 - `run_cloud.py`：云端启动入口和运行配置。

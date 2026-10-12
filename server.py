@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import random
+import re
 import secrets
 import time
 from collections import deque
@@ -35,6 +36,9 @@ DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 OFFLINE_AFTER_SECONDS = float(os.getenv("OFFLINE_AFTER_SECONDS", "4"))
 MAX_FRAME_BYTES = int(os.getenv("MAX_FRAME_BYTES", str(4 * 1024 * 1024)))
 BLUETOOTH_OFFLINE_AFTER_SECONDS = float(os.getenv("BLUETOOTH_OFFLINE_AFTER_SECONDS", "10"))
+BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS = float(
+    os.getenv("BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS", "5")
+)
 MAX_BLUETOOTH_TEXT_BYTES = int(os.getenv("MAX_BLUETOOTH_TEXT_BYTES", "2048"))
 WIFI_OFFLINE_AFTER_SECONDS = float(os.getenv("WIFI_OFFLINE_AFTER_SECONDS", "10"))
 MAX_WIFI_TEXT_BYTES = int(os.getenv("MAX_WIFI_TEXT_BYTES", "4096"))
@@ -44,6 +48,14 @@ AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
 FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
+S32_COMPACT_TIME_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
+S32_COMPACT_TIME_PATTERN = re.compile(r"^(S32K344_HELLO_\d{2})([0-9A-Za-z_-]{3})$")
+S32_SOURCE_TIME_PATTERN = re.compile(r"(?:^|;)TS=(\d{13})(?=;|$)")
+S32_SHORT_ABNORMAL_PATTERN = re.compile(r"^S32K344_ABNORMAL_(\d{2})$")
+S32_NORMAL_PATTERN = re.compile(r"^S32K344_HELLO_\d{2,4}$")
+S32_ABNORMAL_PATTERN = re.compile(
+    r"^S32K344_ABNORMAL_\d{4};TYPE=BLE_ATTACK;LEVEL=HIGH$"
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -96,6 +108,17 @@ class VehicleState:
         self.bluetooth_last_seen_ms = 0
         self.bluetooth_latest = None
         self.bluetooth_history = deque(maxlen=60)
+        self.bluetooth_abnormal_count = 0
+        self.bluetooth_latest_abnormal = None
+        self.bluetooth_abnormal_history = deque(maxlen=60)
+        self.bluetooth_abnormal_fingerprints = set()
+        self.bluetooth_abnormal_fingerprint_order = deque()
+        self.bluetooth_send_times = {}
+        self.bluetooth_control_sequence = 0
+        self.bluetooth_control_last_seen_ms = 0
+        self.bluetooth_control_state = "unknown"
+        self.bluetooth_control_pending = None
+        self.bluetooth_control_last_ack = None
         self.wifi_sequence = 0
         self.wifi_last_seen_ms = 0
         self.wifi_latest = None
@@ -147,6 +170,27 @@ class VehicleState:
             "packet_count": self.bluetooth_sequence,
             "latest": self.bluetooth_latest,
             "history": list(self.bluetooth_history)[:12],
+            "abnormal_count": self.bluetooth_abnormal_count,
+            "latest_abnormal": self.bluetooth_latest_abnormal,
+            "abnormal_history": list(self.bluetooth_abnormal_history)[:12],
+            "control": self.bluetooth_control_snapshot(),
+        }
+
+    def bluetooth_control_snapshot(self):
+        agent_online = bool(
+            self.bluetooth_control_last_seen_ms
+            and now_ms() - self.bluetooth_control_last_seen_ms
+            < BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS * 1000
+        )
+        pending = self.bluetooth_control_pending
+        return {
+            "agent_status": "online" if agent_online else "offline",
+            "last_seen_ms": self.bluetooth_control_last_seen_ms,
+            "state": self.bluetooth_control_state,
+            "pending": bool(pending),
+            "pending_command": pending.get("command") if pending else None,
+            "pending_id": pending.get("id") if pending else None,
+            "last_ack": self.bluetooth_control_last_ack,
         }
 
     def wifi_snapshot(self):
@@ -259,7 +303,14 @@ async def security_headers(request: Request, call_next):
         "/healthz", "/readyz", "/public/live/VHC-001",
     }
     domain_ingest = request.method == "POST" and "/domains/" in request.url.path
-    bluetooth_ingest = request.method == "POST" and request.url.path.endswith("/bluetooth")
+    bluetooth_ingest = request.method == "POST" and (
+        request.url.path.endswith("/bluetooth")
+        or request.url.path.endswith("/bluetooth/timing")
+        or request.url.path.endswith("/bluetooth/control/ack")
+    )
+    bluetooth_control_poll = (
+        request.method == "GET" and request.url.path.endswith("/bluetooth/control/next")
+    )
     wifi_ingest = request.method == "POST" and request.url.path.endswith("/wifi")
     navigation_ingest = request.method == "POST" and request.url.path.endswith("/navigation")
     if (
@@ -267,6 +318,7 @@ async def security_headers(request: Request, call_next):
         and not public_path
         and not domain_ingest
         and not bluetooth_ingest
+        and not bluetooth_control_poll
         and not wifi_ingest
         and not navigation_ingest
     ):
@@ -376,6 +428,84 @@ async def update_domain(vehicle_id: str, domain: str, request: Request):
     return {"accepted": True, "vehicle_id": state.vehicle_id, "domain": domain}
 
 
+def bluetooth_abnormal_reason(payload, text, parsed=None):
+    """Return a displayable reason when a Bluetooth packet is marked abnormal."""
+    truthy = {"1", "true", "yes", "on", "abnormal", "anomaly", "alert", "error", "fault"}
+    for container in (payload, payload.get("parsed"), parsed):
+        if not isinstance(container, dict):
+            continue
+        for key in ("abnormal", "is_abnormal", "anomaly", "alarm", "alert"):
+            value = container.get(key)
+            if value is True or (value is not None and str(value).strip().lower() in truthy):
+                return "设备显式异常标记"
+        for key in ("type", "status", "state", "level", "event"):
+            value = str(container.get(key, "")).strip().lower()
+            if value in {"abnormal", "anomaly", "alert", "error", "fault", "attack", "invalid", "warning", "critical"}:
+                return "设备状态：{}".format(value.upper())
+
+    message = str(text).strip()
+    if any(keyword in message for keyword in ("异常", "告警", "故障", "攻击")):
+        return "报文包含中文异常标识"
+    marker = re.search(
+        r"(?:^|[^A-Z0-9])"
+        r"(?<!NOT_)(?<!NO_)"
+        r"(ABNORMAL(?:_FRAME)?|ANOMALY|ALERT|FAULT|ATTACK|INVALID|WARN(?:ING)?|ERR(?:OR)?(?:_FRAME)?)"
+        r"(?!\s*[:=]\s*(?:0|FALSE|NO|OFF)(?:$|[^A-Z0-9]))"
+        r"(?:$|[^A-Z0-9])",
+        message.upper(),
+    )
+    if marker:
+        return "报文异常标识：{}".format(marker.group(1))
+    return None
+
+
+def bluetooth_number(value, minimum, maximum):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        return None
+    return int(number) if number.is_integer() else round(number, 2)
+
+
+def bluetooth_text_number(text, field_names, minimum, maximum):
+    pattern = r"(?:^|[;,\s])(?:{})\s*[=:]\s*(-?\d+(?:\.\d+)?)".format("|".join(field_names))
+    match = re.search(pattern, str(text), re.IGNORECASE)
+    return bluetooth_number(match.group(1), minimum, maximum) if match else None
+
+
+def normalize_s32_bluetooth_text(text):
+    """Strip transport-only timing metadata from an S32 telemetry frame."""
+    compact_match = S32_COMPACT_TIME_PATTERN.fullmatch(text)
+    if compact_match:
+        tick = 0
+        for character in compact_match.group(2):
+            tick = (tick << 6) | S32_COMPACT_TIME_ALPHABET.index(character)
+        return compact_match.group(1), None, tick, True
+
+    timestamp_match = S32_SOURCE_TIME_PATTERN.search(text)
+    if timestamp_match:
+        clean_text = S32_SOURCE_TIME_PATTERN.sub("", text).strip(";")
+        return clean_text, int(timestamp_match.group(1)), None, True
+
+    short_abnormal_match = S32_SHORT_ABNORMAL_PATTERN.fullmatch(text)
+    if short_abnormal_match:
+        clean_text = "S32K344_ABNORMAL_{:04d};TYPE=BLE_ATTACK;LEVEL=HIGH".format(
+            int(short_abnormal_match.group(1))
+        )
+        return clean_text, None, None, True
+
+    return text, None, None, False
+
+
+def is_valid_s32_bluetooth_text(text):
+    return bool(
+        S32_NORMAL_PATTERN.fullmatch(text)
+        or S32_ABNORMAL_PATTERN.fullmatch(text)
+    )
+
+
 def record_bluetooth_packet(state, payload, is_test=False):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="bluetooth payload must be an object")
@@ -387,32 +517,123 @@ def record_bluetooth_packet(state, payload, is_test=False):
     else:
         parsed = payload.get("parsed") if isinstance(payload.get("parsed"), dict) else None
         text = str(text)
+    source = str(payload.get("source", "BLE-UDP"))[:80]
+    text, embedded_source_time_ms, embedded_source_tick_ms, timing_removed = (
+        normalize_s32_bluetooth_text(text)
+    )
+    if source.startswith(("S32K344-ETH@", "BLE-GATEWAY@")) and not is_valid_s32_bluetooth_text(text):
+        raise HTTPException(status_code=422, detail="incomplete S32K344 bluetooth frame")
     encoded = text.encode("utf-8")
     if len(encoded) > MAX_BLUETOOTH_TEXT_BYTES:
         raise HTTPException(status_code=413, detail="bluetooth payload is too large")
 
-    hex_text = str(payload.get("hex", "")).strip().lower()
+    hex_text = "" if timing_removed else str(payload.get("hex", "")).strip().lower()
     if not hex_text:
         hex_text = " ".join("{:02x}".format(value) for value in encoded)
     hex_text = " ".join(hex_text.split())[: MAX_BLUETOOTH_TEXT_BYTES * 3]
 
     state.bluetooth_sequence += 1
     state.bluetooth_last_seen_ms = now_ms()
+    abnormal_reason = bluetooth_abnormal_reason(payload, text, parsed)
+    rssi = bluetooth_number(payload.get("rssi"), -127, 20)
+    if rssi is None:
+        rssi = bluetooth_text_number(text, ("RSSI",), -127, 20)
+    latency_ms = bluetooth_number(payload.get("latency_ms", payload.get("delay_ms")), 0, 600000)
+    if latency_ms is None:
+        latency_ms = bluetooth_text_number(text, ("LATENCY", "DELAY"), 0, 600000)
+    source_time_ms = bluetooth_number(
+        payload.get("source_time_ms", embedded_source_time_ms), 1, 9999999999999
+    )
+    source_tick_ms = bluetooth_number(
+        payload.get("source_tick_ms", embedded_source_tick_ms), 0, (1 << 18) - 1
+    )
+    clock_unsynced = False
+    registered_send_time_ms = state.bluetooth_send_times.pop(text, None)
+    if latency_ms is None and registered_send_time_ms is not None:
+        registered_delta_ms = state.bluetooth_last_seen_ms - registered_send_time_ms
+        if registered_delta_ms >= 0:
+            latency_ms = registered_delta_ms
+    if latency_ms is None and source_time_ms is not None:
+        clock_delta_ms = state.bluetooth_last_seen_ms - source_time_ms
+        if clock_delta_ms >= -100:
+            # The sender and this service normally share the laptop clock.
+            # Tolerate a very small scheduling/clock adjustment around zero.
+            latency_ms = max(0, clock_delta_ms)
+        else:
+            clock_unsynced = True
+    if latency_ms is None and source_tick_ms is not None:
+        latency_ms = (
+            (state.bluetooth_last_seen_ms & ((1 << 18) - 1))
+            - int(source_tick_ms)
+        ) & ((1 << 18) - 1)
     record = {
         "sequence": state.bluetooth_sequence,
         "received_at_ms": state.bluetooth_last_seen_ms,
-        "source_time_ms": payload.get("source_time_ms"),
-        "source": str(payload.get("source", "BLE-UDP"))[:80],
+        "source_time_ms": source_time_ms,
+        "source_tick_ms": source_tick_ms,
+        "latency_ms": latency_ms,
+        "clock_unsynced": clock_unsynced,
+        "source": source,
         "text": text,
         "hex": hex_text,
-        "byte_count": int(payload.get("byte_count", len(encoded))),
-        "rssi": payload.get("rssi"),
+        "byte_count": (
+            len(encoded)
+            if timing_removed
+            else int(payload.get("byte_count", len(encoded)))
+        ),
+        "rssi": rssi,
         "parsed": parsed,
         "test": bool(is_test or payload.get("test")),
+        "abnormal": bool(abnormal_reason),
+        "abnormal_reason": abnormal_reason,
+        "abnormal_duplicate": False,
     }
-    state.bluetooth_latest = record
-    state.bluetooth_history.appendleft(record)
+    if abnormal_reason:
+        fingerprint = hex_text or text.strip().lower()
+        if fingerprint in state.bluetooth_abnormal_fingerprints:
+            record["abnormal_duplicate"] = True
+        else:
+            if len(state.bluetooth_abnormal_fingerprint_order) >= 512:
+                oldest = state.bluetooth_abnormal_fingerprint_order.popleft()
+                state.bluetooth_abnormal_fingerprints.discard(oldest)
+            state.bluetooth_abnormal_fingerprint_order.append(fingerprint)
+            state.bluetooth_abnormal_fingerprints.add(fingerprint)
+            state.bluetooth_abnormal_count += 1
+            state.bluetooth_latest_abnormal = record
+            state.bluetooth_abnormal_history.appendleft(record)
+    else:
+        state.bluetooth_latest = record
+        state.bluetooth_history.appendleft(record)
     return record
+
+
+@app.post("/api/vehicles/{vehicle_id}/bluetooth/timing")
+async def register_bluetooth_send_time(vehicle_id: str, request: Request):
+    """Register the laptop send time without adding metadata to the BLE frame."""
+    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="timing payload must be an object")
+
+    text = str(payload.get("text", "")).strip().rstrip("#")
+    text, _, _, _ = normalize_s32_bluetooth_text(text)
+    if not is_valid_s32_bluetooth_text(text):
+        raise HTTPException(status_code=400, detail="invalid S32K344 frame text")
+    sent_at_ms = bluetooth_number(payload.get("sent_at_ms"), 1, 9999999999999)
+    if sent_at_ms is None or abs(now_ms() - sent_at_ms) > 600000:
+        raise HTTPException(status_code=400, detail="invalid send timestamp")
+
+    state = registry.get(vehicle_id)
+    state.bluetooth_send_times[text] = int(sent_at_ms)
+    cutoff = now_ms() - 30000
+    stale = [key for key, value in state.bluetooth_send_times.items() if value < cutoff]
+    for key in stale:
+        state.bluetooth_send_times.pop(key, None)
+    return {"accepted": True, "vehicle_id": state.vehicle_id, "text": text}
 
 
 @app.post("/api/vehicles/{vehicle_id}/bluetooth")
@@ -429,31 +650,123 @@ async def ingest_bluetooth(vehicle_id: str, request: Request):
 
 
 @app.post("/api/vehicles/{vehicle_id}/bluetooth/test")
-async def test_bluetooth(vehicle_id: str):
+async def test_bluetooth(vehicle_id: str, abnormal: bool = False):
     state = registry.get(vehicle_id)
     temperature = round(random.uniform(18.0, 36.0), 1)
     humidity = random.randint(35, 85)
     battery = random.randint(45, 100)
     rssi = random.randint(-88, -38)
-    text = "TEMP={:.1f};HUM={};BAT={};SEQ={}".format(
-        temperature, humidity, battery, state.bluetooth_sequence + 1
-    )
+    if abnormal:
+        text = "TYPE=ABNORMAL;CODE=0xE1;TEMP={:.1f};SEQ={}".format(
+            temperature, state.bluetooth_sequence + 1
+        )
+    else:
+        text = "TEMP={:.1f};HUM={};BAT={};SEQ={}".format(
+            temperature, humidity, battery, state.bluetooth_sequence + 1
+        )
     record = record_bluetooth_packet(
         state,
         {
             "text": text,
+            "source_time_ms": now_ms() - random.randint(8, 80),
             "source": "云端随机测试",
             "rssi": rssi,
             "parsed": {
                 "temperature_c": temperature,
                 "humidity_percent": humidity,
                 "battery_percent": battery,
+                "status": "abnormal" if abnormal else "normal",
             },
             "test": True,
         },
         is_test=True,
     )
     return {"accepted": True, "vehicle_id": state.vehicle_id, "bluetooth": record}
+
+
+@app.post("/api/vehicles/{vehicle_id}/bluetooth/control")
+async def queue_bluetooth_control(vehicle_id: str, request: Request):
+    """Queue an idempotent on/off command from the authenticated dashboard."""
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="control payload must be an object")
+    command = str(payload.get("command", "")).strip().lower()
+    if command not in {"on", "off"}:
+        raise HTTPException(status_code=400, detail="command must be on or off")
+
+    state = registry.get(vehicle_id)
+    state.bluetooth_control_sequence += 1
+    state.bluetooth_control_pending = {
+        "id": state.bluetooth_control_sequence,
+        "command": command,
+        "created_at_ms": now_ms(),
+    }
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "control": state.bluetooth_control_snapshot(),
+    }
+
+
+@app.get("/api/vehicles/{vehicle_id}/bluetooth/control/next")
+async def next_bluetooth_control(vehicle_id: str, request: Request):
+    """Return the pending command to the authenticated PC-side BLE gateway."""
+    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    state = registry.get(vehicle_id)
+    state.bluetooth_control_last_seen_ms = now_ms()
+    return {
+        "vehicle_id": state.vehicle_id,
+        "server_time_ms": now_ms(),
+        "command": state.bluetooth_control_pending,
+    }
+
+
+@app.post("/api/vehicles/{vehicle_id}/bluetooth/control/ack")
+async def acknowledge_bluetooth_control(vehicle_id: str, request: Request):
+    """Record the gateway result after the board ACK has been received or timed out."""
+    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="ack payload must be an object")
+
+    state = registry.get(vehicle_id)
+    state.bluetooth_control_last_seen_ms = now_ms()
+    pending = state.bluetooth_control_pending
+    try:
+        command_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid command id")
+    if not pending or command_id != pending.get("id"):
+        raise HTTPException(status_code=409, detail="command is no longer pending")
+
+    status = str(payload.get("status", "error")).strip().lower()
+    if status not in {"applied", "error"}:
+        raise HTTPException(status_code=400, detail="status must be applied or error")
+    ack = {
+        "id": command_id,
+        "command": pending["command"],
+        "status": status,
+        "message": str(payload.get("message", ""))[:200],
+        "serial_port": str(payload.get("serial_port", ""))[:40],
+        "acknowledged_at_ms": now_ms(),
+    }
+    state.bluetooth_control_last_ack = ack
+    state.bluetooth_control_pending = None
+    if status == "applied":
+        state.bluetooth_control_state = pending["command"]
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "control": state.bluetooth_control_snapshot(),
+    }
 
 
 def record_wifi_packet(state, payload, is_test=False):

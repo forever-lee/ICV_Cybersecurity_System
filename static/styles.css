@@ -281,3 +281,46 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 /* H.264/fMP4 is decoded by the browser's native video pipeline. */
 .video-stage .video-element { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; display: block; object-fit: contain; background: #03070d; }
 .video-stage .video-element.hidden { display: none; }
+
+/* Bluetooth domain additions. Kept separate so other domain styles remain unchanged. */
+.primary-button.danger { color: #ffc4c8; border-color: rgba(255,93,104,.34); background: rgba(255,93,104,.1); }
+.bluetooth-packet-stats { grid-template-columns: repeat(4, 1fr); }
+.abnormal-packet-panel { margin: 0 14px 14px; overflow: hidden; border: 1px solid rgba(255,93,104,.22); border-radius: 7px; background: linear-gradient(100deg, rgba(255,93,104,.055), rgba(4,12,22,.42)); }
+.abnormal-packet-panel.active { border-color: rgba(255,93,104,.5); box-shadow: inset 3px 0 rgba(255,93,104,.75), 0 0 18px rgba(255,93,104,.05); }
+.abnormal-panel-head { min-height: 52px; display: flex; justify-content: space-between; align-items: center; padding: 10px 13px; border-bottom: 1px solid rgba(255,93,104,.14); }
+.abnormal-panel-head > div { display: flex; align-items: center; gap: 9px; }
+.abnormal-panel-head i { width: 27px; height: 27px; display: grid; place-items: center; border: 1px solid rgba(255,93,104,.34); border-radius: 50%; color: var(--red); background: rgba(255,93,104,.09); font-size: 12px; font-style: normal; font-weight: 700; }
+.abnormal-panel-head strong, .abnormal-panel-head small { display: block; }
+.abnormal-panel-head strong { color: #ffc6ca; font-size: 10px; }
+.abnormal-panel-head small { margin-top: 3px; color: #745963; font-size: 7px; }
+.abnormal-panel-head > span { color: #8b6269; font-size: 8px; }
+.abnormal-panel-head > span b { margin-left: 5px; color: var(--red); font-size: 14px; font-weight: 600; }
+.abnormal-history { max-height: 180px; overflow: auto; padding: 5px 13px 9px; }
+.abnormal-empty { min-height: 65px; display: grid; place-items: center; color: #694f59; font-size: 8px; }
+.abnormal-row { display: grid; grid-template-columns: 160px minmax(120px, 1fr) minmax(120px, .8fr); gap: 10px; align-items: center; min-height: 44px; padding: 7px 4px; border-bottom: 1px solid rgba(255,93,104,.1); }
+.abnormal-row:last-child { border-bottom: 0; }
+.abnormal-meta { min-width: 0; color: #8b656d; font-size: 7px; }
+.abnormal-meta b { display: block; margin-bottom: 4px; color: #e69ba2; font-size: 8px; font-weight: 500; }
+.abnormal-row code { min-width: 0; overflow: hidden; color: #ffc1c6; font: 9px Consolas, monospace; white-space: nowrap; text-overflow: ellipsis; }
+.abnormal-hex { min-width: 0; overflow: hidden; color: #77545d; font: 7px Consolas, monospace; white-space: nowrap; text-overflow: ellipsis; }
+.abnormal-hex span { margin-right: 6px; color: var(--red); }
+.bluetooth-control-group { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; margin-right: 2px; }
+.bluetooth-control-group > small { min-height: 11px; color: var(--muted); font-size: 8px; white-space: nowrap; }
+.bluetooth-control-group > small.online { color: var(--green); }
+.bluetooth-control-group > small.pending { color: #f2cb72; }
+.bluetooth-control-group > small.error { color: #ff7b84; }
+.bluetooth-control-buttons { display: inline-flex; overflow: hidden; border: 1px solid var(--line); border-radius: 5px; }
+.bluetooth-control-button { min-width: 64px; height: 30px; border: 0; padding: 0 9px; color: #6f8799; background: rgba(255,255,255,.025); font-size: 8px; cursor: pointer; transition: .2s ease; }
+.bluetooth-control-button + .bluetooth-control-button { border-left: 1px solid var(--line); }
+.bluetooth-control-button.on:hover, .bluetooth-control-button.on.active { color: #082319; background: var(--green); }
+.bluetooth-control-button.off:hover, .bluetooth-control-button.off.active { color: #ffe0e2; background: rgba(255,93,104,.24); }
+.bluetooth-control-button:disabled { cursor: default; opacity: .5; }
+.bluetooth-control-button.active:disabled { opacity: 1; }
+
+@media (max-width: 680px) {
+  .bluetooth-control-group { align-items: stretch; width: 100%; }
+  .bluetooth-control-buttons { display: flex; }
+  .bluetooth-control-button { flex: 1; }
+  .module-actions { flex-wrap: wrap; }
+  .abnormal-row { grid-template-columns: 1fr; gap: 5px; }
+}

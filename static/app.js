@@ -779,20 +779,97 @@
     const latest = bluetooth.latest;
     const online = bluetooth.status === "online" && latest;
     const status = $("bluetoothStatus");
+    updateBluetoothControl(bluetooth.control || {});
     status.classList.toggle("online", Boolean(online));
     status.classList.toggle("offline", !online);
     status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
     $("bluetoothPacketCount").textContent = Number(bluetooth.packet_count || 0).toLocaleString();
+    updateBluetoothAbnormal(bluetooth);
     updateWirelessTotal(bluetooth, state.latestMetrics.wifi || {});
     if (!latest) {
-      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—";
+      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "—";
       $("bluetoothHistory").innerHTML = '<div class="history-empty">等待蓝牙模块发送数据…</div>'; return;
     }
     $("bluetoothText").textContent = latest.text || "（空报文）";
     $("bluetoothHex").textContent = latest.hex || "—";
     $("bluetoothRssi").textContent = latest.rssi == null ? "—" : `${latest.rssi} dBm`;
     $("bluetoothTime").textContent = formatFrameTime(latest.received_at_ms);
+    const latency = Number(latest.latency_ms);
+    if (latest.latency_ms != null && Number.isFinite(latency) && latency >= 0) {
+      $("bluetoothLatency").textContent = latency === 0 ? "<1 ms" : `${Math.round(latency)} ms`;
+      $("bluetoothLatency").title = "笔记本生成报文到云端服务接收的端到端耗时";
+    } else {
+      $("bluetoothLatency").textContent = "—";
+      $("bluetoothLatency").title = "等待包含发送时间戳的新报文";
+    }
     $("bluetoothHistory").innerHTML = renderHistory(bluetooth.history, "BLE-UDP", "等待蓝牙模块发送数据…");
+  }
+
+  function ensureBluetoothControlUi() {
+    let group = $("bluetoothControlGroup");
+    if (group) return group;
+    const status = $("bluetoothStatus");
+    if (!status || !status.parentElement) return null;
+    group = document.createElement("div");
+    group.className = "bluetooth-control-group";
+    group.id = "bluetoothControlGroup";
+    group.setAttribute("aria-label", "蓝牙发送控制");
+    group.innerHTML = `
+      <small id="bluetoothControlStatus">控制端未连接</small>
+      <div class="bluetooth-control-buttons">
+        <button class="bluetooth-control-button on" id="bluetoothOnButton" type="button">打开蓝牙</button>
+        <button class="bluetooth-control-button off" id="bluetoothOffButton" type="button">关闭蓝牙</button>
+      </div>`;
+    status.parentElement.insertBefore(group, status);
+    return group;
+  }
+
+  function updateBluetoothControl(control) {
+    ensureBluetoothControlUi();
+    const label = $("bluetoothControlStatus");
+    const onButton = $("bluetoothOnButton");
+    const offButton = $("bluetoothOffButton");
+    if (!label || !onButton || !offButton) return;
+
+    const online = control.agent_status === "online";
+    const pending = Boolean(control.pending);
+    const current = control.state || "unknown";
+    const lastAck = control.last_ack || {};
+    label.className = online ? "online" : "offline";
+    label.title = "";
+    if (pending) {
+      label.className = "pending";
+      label.textContent = `正在下发 ${String(control.pending_command || "").toUpperCase()}…`;
+    } else if (!online) {
+      label.textContent = "控制端未连接";
+    } else if (lastAck.status === "error") {
+      label.className = "error";
+      label.textContent = "执行失败";
+      label.title = lastAck.message || "电脑端未能执行蓝牙指令";
+    } else if (current === "on") {
+      label.textContent = "蓝牙发送已开启";
+    } else if (current === "off") {
+      label.textContent = "蓝牙发送已关闭";
+    } else {
+      label.textContent = "控制端在线";
+    }
+    onButton.classList.toggle("active", current === "on" && !pending);
+    offButton.classList.toggle("active", current === "off" && !pending);
+    onButton.disabled = pending || current === "on";
+    offButton.disabled = pending || current === "off";
+  }
+
+  function updateBluetoothAbnormal(bluetooth) {
+    const records = Array.isArray(bluetooth.abnormal_history) ? bluetooth.abnormal_history.slice(0, 8) : [];
+    const count = Number(bluetooth.abnormal_count || 0);
+    $("bluetoothAbnormalCount").textContent = count.toLocaleString();
+    $("bluetoothAbnormalPanel").classList.toggle("active", count > 0);
+    $("bluetoothAbnormalHistory").innerHTML = records.map((record) => `
+      <div class="abnormal-row">
+        <div class="abnormal-meta"><b>#${escapeHtml(record.sequence)} · ${escapeHtml(formatFrameTime(record.received_at_ms))}</b>${escapeHtml(record.abnormal_reason || "设备上报异常")} · ${escapeHtml(record.source || "BLE-UDP")}</div>
+        <code title="${escapeHtml(record.text || "")}">${escapeHtml(record.text || "（空报文）")}</code>
+        <div class="abnormal-hex" title="${escapeHtml(record.hex || "")}"><span>HEX</span>${escapeHtml(record.hex || "—")}</div>
+      </div>`).join("") || '<div class="abnormal-empty">尚未检测到异常报文</div>';
   }
 
   function updateWifi(wifi) {
@@ -909,23 +986,74 @@
     document.querySelectorAll(".domain-page [data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
   }
 
-  async function createTestData(kind) {
-    const button = $(`${kind}TestButton`);
+  async function createTestData(kind, abnormal = false) {
+    const button = abnormal ? $("bluetoothAnomalyTestButton") : $(`${kind}TestButton`);
+    const originalLabel = button.textContent;
     button.disabled = true; button.textContent = "生成中…";
     try {
-      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/${kind}/test`, { method: "POST" });
+      const suffix = abnormal ? "?abnormal=true" : "";
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/${kind}/test${suffix}`, { method: "POST" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const data = await response.json(); const record = data[kind]; const current = state.latestMetrics[kind] || {};
-      const next = { ...current, status: "online", packet_count: record.sequence, latest: record, history: [record, ...(current.history || []).filter((item) => item.sequence !== record.sequence)] };
+      const isBluetoothAbnormal = kind === "bluetooth" && record.abnormal;
+      const next = {
+        ...current,
+        status: "online",
+        packet_count: record.sequence,
+        latest: isBluetoothAbnormal ? current.latest : record,
+        history: isBluetoothAbnormal
+          ? (current.history || [])
+          : [record, ...(current.history || []).filter((item) => item.sequence !== record.sequence)],
+      };
+      if (kind === "bluetooth" && record.abnormal && !record.abnormal_duplicate) {
+        next.abnormal_count = Number(current.abnormal_count || 0) + 1;
+        next.latest_abnormal = record;
+        next.abnormal_history = [record, ...(current.abnormal_history || []).filter((item) => item.sequence !== record.sequence)];
+      }
       state.latestMetrics[kind] = next;
       if (kind === "bluetooth") updateBluetooth(next); else updateWifi(next);
-      toast(`已生成一条随机${kind === "bluetooth" ? "蓝牙" : " WiFi"}测试数据`);
+      toast(abnormal ? "已生成一条蓝牙异常测试报文" : `已生成一条随机${kind === "bluetooth" ? "蓝牙" : " WiFi"}测试数据`);
     } catch (_) { toast("测试数据发送失败，请检查云端服务"); }
-    finally { button.disabled = false; button.textContent = "生成测试数据"; }
+    finally { button.disabled = false; button.textContent = originalLabel; }
   }
 
   $("bluetoothTestButton").addEventListener("click", () => createTestData("bluetooth"));
+  $("bluetoothAnomalyTestButton").addEventListener("click", () => createTestData("bluetooth", true));
   $("wifiTestButton").addEventListener("click", () => createTestData("wifi"));
+
+  async function sendBluetoothControl(command) {
+    const onButton = $("bluetoothOnButton");
+    const offButton = $("bluetoothOffButton");
+    const label = $("bluetoothControlStatus");
+    onButton.disabled = true;
+    offButton.disabled = true;
+    label.className = "pending";
+    label.textContent = `正在下发 ${command.toUpperCase()}…`;
+    try {
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/bluetooth/control`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
+      const currentBluetooth = state.latestMetrics.bluetooth || {};
+      state.latestMetrics.bluetooth = { ...currentBluetooth, control: data.control };
+      updateBluetoothControl(data.control || {});
+      const waiting = data.control && data.control.agent_status !== "online";
+      toast(waiting
+        ? `${command.toUpperCase()} 指令已排队，等待电脑控制端连接`
+        : `${command.toUpperCase()} 指令已下发，等待笔记本发送端确认`);
+    } catch (controlError) {
+      toast(`蓝牙控制失败：${controlError.message || "请检查云端服务"}`);
+      updateBluetoothControl((state.latestMetrics.bluetooth || {}).control || {});
+    }
+  }
+
+  ensureBluetoothControlUi();
+  $("bluetoothOnButton").addEventListener("click", () => sendBluetoothControl("on"));
+  $("bluetoothOffButton").addEventListener("click", () => sendBluetoothControl("off"));
+
   async function loadVehicles() {
     try {
       const response = await fetch("/api/vehicles"); const data = await response.json(); const select = $("vehicleSelect");
