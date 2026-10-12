@@ -1,3 +1,5 @@
+import subprocess
+
 from jetson_edge import start_edge
 
 
@@ -40,4 +42,24 @@ def test_token_is_only_in_child_environment(monkeypatch):
     assert "--token" not in component.command
     assert component.environment["VEHICLE_INGEST_TOKEN"] == token
     assert component.command[2].endswith("body_edge_agent.py")
+
+
+def test_body_address_check_auto_detects_eno1(monkeypatch, capsys):
+    monkeypatch.setattr(start_edge.os, "name", "posix")
+    monkeypatch.setenv("BODY_ENABLED", "1")
+    monkeypatch.delenv("BODY_NETWORK_INTERFACE", raising=False)
+    monkeypatch.setattr(start_edge.shutil, "which", lambda name: "/usr/sbin/ip")
+    monkeypatch.setattr(
+        start_edge.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout="2: eno1    inet 192.168.4.100/24 brd 192.168.4.255 scope global eno1\n",
+            stderr="",
+        ),
+    )
+
+    assert start_edge.check_expected_body_address() is True
+    assert "eno1 地址正确：192.168.4.100/24" in capsys.readouterr().out
 

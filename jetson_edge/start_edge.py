@@ -23,8 +23,8 @@ NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
 BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-DEFAULT_CLOUD_HTTP_URL = "http://15151e1e.r7.nas.cpolar.cn"
-DEFAULT_CLOUD_WS_URL = "ws://15151e1e.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_HTTP_URL = "http://36783a70.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://36783a70.r7.nas.cpolar.cn"
 DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
@@ -71,15 +71,33 @@ class Component:
 
     def stop(self):
         process = self.process
-        if process is None or process.poll() is not None:
+        if process is None:
+            self.close_log()
+            return
+        if process.poll() is not None and os.name != "posix":
             self.close_log()
             return
         try:
             if os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
+                process_group = process.pid
+                os.killpg(process_group, signal.SIGTERM)
+                deadline = time.monotonic() + 8
+                while time.monotonic() < deadline:
+                    process.poll()
+                    try:
+                        os.killpg(process_group, 0)
+                    except ProcessLookupError:
+                        break
+                    time.sleep(0.1)
+                else:
+                    # The Python agent may exit before its FFmpeg/GStreamer
+                    # child. Ensure the complete session is not orphaned.
+                    os.killpg(process_group, signal.SIGKILL)
+                if process.poll() is None:
+                    process.wait(timeout=2)
             else:
                 process.terminate()
-            process.wait(timeout=8)
+                process.wait(timeout=8)
         except (OSError, subprocess.TimeoutExpired):
             try:
                 if os.name == "posix":
@@ -124,29 +142,42 @@ def required_environment():
     return cloud_http_url, cloud_ws_url, ingest_token
 
 
-def check_expected_eth0_address():
+def check_expected_body_address():
     if not enabled("BODY_ENABLED"):
         return
     expected = os.getenv("BODY_EXPECTED_ETH0_ADDRESS", "192.168.4.100/24").strip()
+    configured_interface = os.getenv("BODY_NETWORK_INTERFACE", "").strip()
     if not expected or os.name != "posix":
         return
     ip_command = shutil.which("ip")
     if not ip_command:
-        print("[WARN] 无法检查 eth0：系统中没有 ip 命令；继续启动其他组件")
+        print("[WARN] 无法检查车身域网口：系统中没有 ip 命令；继续启动其他组件")
         return False
+    command = [ip_command, "-4", "-o", "addr", "show"]
+    if configured_interface:
+        command.extend(["dev", configured_interface])
     result = subprocess.run(
-        [ip_command, "-4", "-o", "addr", "show", "dev", "eth0"],
+        command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         universal_newlines=True,
         check=False,
     )
     if result.returncode != 0 or expected not in result.stdout:
-        print("[WARN] eth0 未配置期望地址 {}；车身域可能不可用，继续启动其他组件".format(
-            expected
+        target = configured_interface or "任一网口"
+        print("[WARN] {} 未配置期望地址 {}；车身域可能不可用，继续启动其他组件".format(
+            target, expected
         ))
         return False
-    print("[CHECK] eth0 地址正确：{}".format(expected))
+    matching_line = next(
+        (line for line in result.stdout.splitlines() if expected in line),
+        "",
+    )
+    fields = matching_line.split()
+    detected_interface = fields[1].rstrip(":") if len(fields) > 1 else configured_interface
+    print("[CHECK] 车身域网口 {} 地址正确：{}".format(
+        detected_interface or "未知", expected
+    ))
     return True
 
 
@@ -254,7 +285,7 @@ def build_components():
 
 
 def main():
-    check_expected_eth0_address()
+    check_expected_body_address()
     LOG_DIR.mkdir(exist_ok=True)
     lock_handle = acquire_instance_lock()
     pid_path = BASE_DIR / "edge_supervisor.pid"
