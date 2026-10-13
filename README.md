@@ -1,6 +1,6 @@
 # V-SHIELD 云端服务
 
-电脑 A 运行云端服务和 Web 页面；Jetson 统一运行视频、导航、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
+电脑 A 运行云端服务和 Web 页面；Ubuntu 蓝牙电脑运行 `ble_s32_sender.py`；Jetson 统一运行视频、导航、蓝牙、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
 
 ## 云端文件
 
@@ -49,7 +49,7 @@ cd ~/Desktop/body_1/ICV_Cybersecurity_System/jetson_edge
 python3 start_edge.py
 ```
 
-Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、WiFi 和车身域组件。
+Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、蓝牙、WiFi 和车身域组件。
 
 `start_edge.py` 集中配置的默认云端地址为：
 
@@ -95,6 +95,14 @@ BMS 报文产生端（电脑 A 或电脑 B，连接 S32K344_WIFI）
   → cpolar 公网映射 / 电脑 A 云端 8001
   → WiFi 充电状态、报文历史与 IDS 告警页面
 
+Ubuntu 蓝牙电脑运行 ble_s32_sender.py
+  → BLE 写入 nRF52840
+  → UART 转交 S32K344（192.168.4.201）
+  → 以太网 UDP 5000
+  → Jetson bluetooth_edge_agent.py（由 start_edge.py 监管）
+  → HTTP POST /api/vehicles/{vehicle_id}/bluetooth
+  → 蓝牙正常/异常报文、延迟与控制状态页面
+
 S32K344 UDP 7100
   → Jetson body_edge_agent.py
   → HTTP/HTTPS 上传
@@ -122,6 +130,10 @@ WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的�
 - `WS /ws/public/live-fmp4/VHC-001`：VHC-001 公开只读视频入口。
 - `WS /ws/metrics/{vehicle_id}`：网页指标入口。
 - `POST /api/vehicles/{vehicle_id}/bluetooth`：BLE 遥测接收接口。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/timing`：登记 Ubuntu 发送时间。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/control`：网页下发发送开关。
+- `GET /api/vehicles/{vehicle_id}/bluetooth/control/next`：Ubuntu 发送端轮询待执行命令。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/control/ack`：Ubuntu 发送端确认执行结果。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
 - `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。

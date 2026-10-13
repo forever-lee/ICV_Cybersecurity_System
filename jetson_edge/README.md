@@ -5,16 +5,18 @@
 - 两路 H.265 摄像头采流与云端上传；
 - Jetson UART GNSS 定位与车速采集；
 - WiFi 充电遥测转发；
+- S32K344 蓝牙域 UDP 遥测转发；
 - S32K344 车身域 UDP 状态、控制与时间同步；
 - fMP4/WebSocket 协议；
 - 一个统一的进程管理入口。
 
 ## 文件
 
-- `start_edge.py`：唯一推荐入口，同时监管车身域、WiFi、GPS、VHC-001 和 VHC-002。
+- `start_edge.py`：唯一推荐入口，同时监管车身域、蓝牙域、WiFi、GPS、VHC-001 和 VHC-002。
 - `body_edge_agent.py`：接收 S32K344 UDP/串口数据、对时、控制和云端上传。
 - `body_protocol.py`：车身域二进制协议编解码。
 - `WiFi_Module.py`：WiFi 充电遥测接收和云端转发。
+- `bluetooth_edge_agent.py`：监听 S32K344 的 UDP 5000 报文，校验、去重并可靠上传云端。
 - `run_vehicle_jetson.py`：单路摄像头环境检查与参数组装。
 - `h264_vehicle_agent.py`：RTSP/fMP4 采流上传实现（同时支持 H.264/H.265）。
 - `stream_protocol.py`：边缘端与云端二进制协议。
@@ -71,9 +73,13 @@ CLOUD_WS_URL=ws://15151e1e.r7.nas.cpolar.cn
 VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 ```
 
-车身、WiFi、GPS 和摄像头子进程都会继承这些变量。需要临时切换服务器或 Token 时仍可在启动前设置同名环境变量；如果只覆盖 HTTP 地址，程序会自动推导 WS/WSS 地址。
+车身、蓝牙、WiFi、GPS 和摄像头子进程都会继承这些变量。需要临时切换服务器或 Token 时仍可在启动前设置同名环境变量；如果只覆盖 HTTP 地址，程序会自动推导 WS/WSS 地址。
 
-设置 `BODY_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
+蓝牙域默认监听 `0.0.0.0:5000`，车辆默认为 `VHC-001`。可通过
+`BLUETOOTH_UDP_HOST`、`BLUETOOTH_UDP_PORT` 和 `BLUETOOTH_VEHICLE_ID`
+覆盖。日志位于 `logs/bluetooth.log`。
+
+设置 `BODY_ENABLED=0`、`BLUETOOTH_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
 `CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。
 
 ## 已排除的旧文件

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start and supervise Jetson body, GPS, WiFi, and camera uplinks.
+"""Start and supervise Jetson body, Bluetooth, GPS, WiFi, and camera uplinks.
 
 Run on the Jetson from this directory:
     python3 start_edge.py
@@ -21,6 +21,7 @@ BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
 BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
+BLUETOOTH_AGENT_PATH = BASE_DIR / "bluetooth_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
 DEFAULT_CLOUD_HTTP_URL = "http://36783a70.r7.nas.cpolar.cn"
@@ -261,6 +262,30 @@ def build_components():
             name="wifi",
             command=[sys.executable, "-u", str(BASE_DIR / "WiFi_Module.py")],
             environment=wifi_environment,
+        ))
+
+    if enabled("BLUETOOTH_ENABLED"):
+        if not BLUETOOTH_AGENT_PATH.is_file():
+            raise SystemExit("缺少蓝牙域程序：{}".format(BLUETOOTH_AGENT_PATH))
+        bluetooth_environment = dict(common_cloud_environment)
+        bluetooth_environment.update({
+            "VEHICLE_ID": os.getenv(
+                "BLUETOOTH_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
+            ),
+            "BLUETOOTH_UDP_HOST": os.getenv("BLUETOOTH_UDP_HOST", "0.0.0.0"),
+            "BLUETOOTH_UDP_PORT": os.getenv("BLUETOOTH_UDP_PORT", "5000"),
+        })
+        for name in (
+            "BLUETOOTH_QUEUE_SIZE",
+            "BLUETOOTH_HTTP_TIMEOUT_SECONDS",
+            "BLUETOOTH_SOURCE_PREFIX",
+        ):
+            if os.getenv(name):
+                bluetooth_environment[name] = os.environ[name]
+        components.append(Component(
+            name="bluetooth",
+            command=[sys.executable, "-u", str(BLUETOOTH_AGENT_PATH)],
+            environment=bluetooth_environment,
         ))
 
     cameras = [

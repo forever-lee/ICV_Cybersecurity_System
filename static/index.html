@@ -25,6 +25,7 @@
 
           <p class="nav-section-title">车辆域控</p>
           <button class="side-link" data-view="telematics"><i>联</i><span>车联网域（WiFi）</span><em class="nav-count">1</em></button>
+          <button class="side-link" data-view="bluetooth"><i>蓝</i><span>车联网域（蓝牙）</span><em class="nav-count">1</em></button>
           <button class="side-link" data-view="adas"><i>智</i><span>智能驾驶域</span><em class="nav-state online">在线</em></button>
           <button class="side-link" data-view="chassis"><i>底</i><span>底盘域</span><em class="domain-dot" data-domain-indicator="chassis"></em></button>
           <button class="side-link" data-view="powertrain"><i>动</i><span>动力域</span><em class="domain-dot" data-domain-indicator="powertrain"></em></button>
@@ -163,6 +164,29 @@
                 <span>变化幅度<strong id="wifiIdsDelta">--%</strong></span>
                 <span>检测时间<strong id="wifiIdsTime">--:--:--</strong></span>
                 <span>本轮告警<strong id="wifiIdsCount">0</strong></span>
+              </div>
+            </article>
+          </section>
+
+          <section class="content-view bluetooth-page" data-view-panel="bluetooth">
+            <div class="page-heading"><div><p class="eyebrow">BLUETOOTH DOMAIN SECURITY</p><h1>车联网域（蓝牙）</h1><p>nRF52840、S32K344 与 Jetson 蓝牙遥测链路的运行状态、异常报文和端到端延迟监测</p></div><div class="domain-summary"><span class="status-chip active">BLE 链路</span><span class="status-chip">UDP 5000</span><span class="status-chip">异常检测</span></div></div>
+            <article class="panel data-module bluetooth-module" aria-labelledby="bluetoothTitle">
+              <div class="module-head">
+                <div class="module-ident ble"><i>BT</i><span><p class="eyebrow">BLUETOOTH TELEMETRY</p><h2 id="bluetoothTitle">蓝牙域数据采集</h2><small>S32K344 以太网 UDP · 文本与 HEX 实时解析</small></span></div>
+                <div class="module-actions">
+                  <div class="bluetooth-control-group" id="bluetoothControlGroup"><small id="bluetoothControlStatus">控制端未连接</small><div class="bluetooth-control-buttons"><button class="bluetooth-control-button on" id="bluetoothOnButton" type="button">打开发送</button><button class="bluetooth-control-button off" id="bluetoothOffButton" type="button">关闭发送</button></div></div>
+                  <span class="module-status offline" id="bluetoothStatus"><i></i><span>等待数据</span></span>
+                  <button class="primary-button" id="bluetoothTestButton" type="button">生成测试数据</button>
+                  <button class="primary-button danger" id="bluetoothAnomalyTestButton" type="button">生成异常测试</button>
+                </div>
+              </div>
+              <div class="telemetry-layout">
+                <div class="latest-packet"><span class="label">最新正常报文</span><strong id="bluetoothText">尚未收到蓝牙数据</strong><div class="packet-stats bluetooth-packet-stats"><span>累计 <b id="bluetoothPacketCount">0</b></span><span>RSSI <b id="bluetoothRssi">—</b></span><span>时间 <b id="bluetoothTime">—</b></span><span>延迟 <b id="bluetoothLatency">—</b></span></div><div class="hex-view"><span>HEX</span><code id="bluetoothHex">—</code></div></div>
+                <div class="packet-history"><div class="history-head"><span>最近正常报文</span><small>最多显示 8 条</small></div><div id="bluetoothHistory" class="history-list"><div class="history-empty">等待蓝牙模块发送数据…</div></div></div>
+              </div>
+              <div class="abnormal-packet-panel" id="bluetoothAbnormalPanel">
+                <div class="abnormal-panel-head"><div><i>!</i><span><strong>异常报文监测</strong><small>S32K344 异常数据独立记录</small></span></div><span>异常累计 <b id="bluetoothAbnormalCount">0</b></span></div>
+                <div id="bluetoothAbnormalHistory" class="abnormal-history"><div class="abnormal-empty">尚未检测到异常报文</div></div>
               </div>
             </article>
           </section>
