@@ -1216,6 +1216,8 @@
     status.classList.toggle("offline", !online);
     status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
     $("bluetoothPacketCount").textContent = Number(bluetooth.packet_count || 0).toLocaleString();
+    const domainPacketTotal = $("bluetoothDomainPacketTotal");
+    if (domainPacketTotal) domainPacketTotal.textContent = Number(bluetooth.packet_count || 0).toLocaleString();
     updateBluetoothAbnormal(bluetooth);
     updateWirelessTotal(bluetooth, state.latestMetrics.wifi || {});
     if (!latest) {

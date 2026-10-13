@@ -533,8 +533,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 @media (max-width: 560px) { .charge-stat-grid { grid-template-columns: 1fr; }.charge-progress-label strong { font-size: 26px; }.charge-visual { transform: scale(.9); margin: -8px 0; }.wifi-ids-alert { grid-template-columns: 1fr; }.wifi-ids-alert-metrics { grid-template-columns: 1fr 1fr; }.wifi-ids-alert-icon { width: 40px; height: 40px; } }
 
 /* Bluetooth domain additions. */
-.bluetooth-page { max-width: 1450px; margin: 0 auto; }
-.bluetooth-page .page-heading { margin-bottom: 18px; padding: 12px 4px 4px; }
+.bluetooth-page { width: 100%; }
 .bluetooth-module { margin-top: 0; }
 .primary-button.danger { color: #ffc4c8; border-color: rgba(255,93,104,.34); background: rgba(255,93,104,.1); }
 .bluetooth-packet-stats { grid-template-columns: repeat(4, 1fr); }
