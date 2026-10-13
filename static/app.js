@@ -15,7 +15,7 @@
   const H264_RESUME_BUFFER_SECONDS = 0.5;
   const H264_MAX_LIVE_LATENCY_MS = 5000;
   const VIEW_NAMES = {
-    overview: "全局安全态势", telematics: "车联网域（WiFi）", bluetooth: "车联网域（蓝牙）", adas: "智能驾驶域",
+    overview: "全局安全态势", telematics: "车联网域", bluetooth: "蓝牙域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
     attack: "攻击验证", defense: "检测防御", events: "安全事件",
   };
