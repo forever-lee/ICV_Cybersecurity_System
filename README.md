@@ -117,6 +117,11 @@ Ubuntu 蓝牙电脑只配置 BLE 地址，不配置云端地址或上传 Token�
   → 电脑 A server.py
   → 车身域 Web 页面
 
+车身操作联调按钮
+  → Web 事件立即覆盖当前门锁/灯光画面
+  → 周期报文继续在后台接收
+  → 最后一次操作 5 秒后自动恢复最新周期状态
+
 电脑 A 页面控制
   → Jetson HTTP 轮询
   → UDP 7101
@@ -156,6 +161,7 @@ WiFi 链路中的 `192.168.3.x` 仅用于 BMS 报文产生端与 ESP32 热点之
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
 - `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。
+- `POST /api/vehicles/{vehicle_id}/body/event`：网页车身操作事件；立即生效，5 秒无新事件后恢复周期数据。
 - `POST /api/vehicles/{vehicle_id}/domains/body/control`：Jetson 轮询车身域启停控制。
 - `POST /api/vehicles/{vehicle_id}/body/transmission`：网页设置车身域上传状态。
 - `GET /api/vehicles/{vehicle_id}/body/history`：车身域历史报文。

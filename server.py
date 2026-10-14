@@ -58,6 +58,7 @@ AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
 FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
+BODY_EVENT_OVERRIDE_MS = 5000
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
@@ -212,6 +213,7 @@ class VehicleState:
         self.body_frame_history = deque(maxlen=80)
         self.body_alerts = deque(maxlen=40)
         self.body_last_seen_ms = 0
+        self.body_event_override = None
         self.body_control_sequence = 0
         self.body_control = {
             "sequence": 0,
@@ -339,7 +341,8 @@ class VehicleState:
 
     def body_snapshot(self):
         body = dict(self.domains.get("body") or {})
-        age_ms = now_ms() - self.body_last_seen_ms if self.body_last_seen_ms else None
+        snapshot_at_ms = now_ms()
+        age_ms = snapshot_at_ms - self.body_last_seen_ms if self.body_last_seen_ms else None
         online = age_ms is not None and age_ms <= BODY_DATA_TIMEOUT_SECONDS * 1000
         link = dict(body.get("link") or {})
         if not online:
@@ -352,6 +355,50 @@ class VehicleState:
         body["status"] = "online" if online else "offline"
         body["connected"] = online
         body["link"] = link
+
+        event_override = self.body_event_override
+        event_active = bool(
+            event_override
+            and snapshot_at_ms < event_override.get("expires_at_ms", 0)
+        )
+        if event_override and not event_active:
+            self.body_event_override = None
+            event_override = None
+        if event_active:
+            event_values = dict(event_override.get("values") or {})
+            body.update(event_values)
+            body["status"] = "online"
+            body["connected"] = True
+            body["data_mode"] = "event"
+            body["source"] = "Web车身操作联调"
+            body["captured_at_ms"] = event_override["triggered_at_ms"]
+            body["updated_at_ms"] = event_override["triggered_at_ms"]
+            changed_at = dict(body.get("signal_changed_at_ms") or {})
+            validity = dict(body.get("signal_validity") or {})
+            invalid_reasons = dict(body.get("signal_invalid_reasons") or {})
+            for field in event_values:
+                changed_at[field] = event_override["triggered_at_ms"]
+                validity[field] = True
+                invalid_reasons[field] = ""
+            body["signal_changed_at_ms"] = changed_at
+            body["signal_validity"] = validity
+            body["signal_invalid_reasons"] = invalid_reasons
+            body["latest_change_at_ms"] = event_override["triggered_at_ms"]
+            body["event_override"] = {
+                "active": True,
+                "duration_ms": BODY_EVENT_OVERRIDE_MS,
+                "triggered_at_ms": event_override["triggered_at_ms"],
+                "expires_at_ms": event_override["expires_at_ms"],
+                "remaining_ms": max(0, event_override["expires_at_ms"] - snapshot_at_ms),
+                "action": event_override["action"],
+                "label": event_override["label"],
+            }
+        else:
+            body["event_override"] = {
+                "active": False,
+                "duration_ms": BODY_EVENT_OVERRIDE_MS,
+                "remaining_ms": 0,
+            }
         alerts = list(self.body_alerts)
         if self.body_last_seen_ms and not online:
             alerts.insert(0, {
@@ -361,8 +408,15 @@ class VehicleState:
             })
         body["alerts"] = alerts[:12]
         body["frame_count"] = self.body_sequence
-        body["latest_frame"] = self.body_frame_history[0] if self.body_frame_history else None
-        body["frame_history"] = list(self.body_frame_history)[:8]
+        frame_history = list(self.body_frame_history)
+        if event_active and event_override.get("frame"):
+            event_frame = event_override["frame"]
+            frame_history = [event_frame] + [
+                frame for frame in frame_history
+                if frame.get("sequence") != event_frame.get("sequence")
+            ]
+        body["latest_frame"] = frame_history[0] if frame_history else None
+        body["frame_history"] = frame_history[:8]
         body["transmission_control"] = dict(self.body_control)
         return body
 
@@ -829,6 +883,76 @@ def record_body_update(state, payload, is_test=False):
     return state.body_snapshot(), created_frames
 
 
+def record_body_event_override(state, action):
+    """Apply a Web control event without interrupting the real periodic data stream."""
+    if action not in BODY_TEST_ACTIONS:
+        raise HTTPException(status_code=400, detail="unsupported body event action")
+
+    triggered_at_ms = now_ms()
+    previous_override = state.body_event_override
+    override_active = bool(
+        previous_override
+        and triggered_at_ms < previous_override.get("expires_at_ms", 0)
+    )
+    override_values = dict(previous_override.get("values") or {}) if override_active else {}
+    current = dict(state.domains.get("body") or {})
+    current.update(override_values)
+    field, label = BODY_TEST_ACTIONS[action]
+    if field == "CentralLockState":
+        value = "unlocked" if str(current.get(field, "unlocked")).lower() == "locked" else "locked"
+    else:
+        value = not body_switch(current.get(field, False))
+    override_values[field] = value
+    if action == "hazard":
+        override_values["TurnLeft"] = value
+        override_values["TurnRight"] = value
+
+    group_name, profile = next(
+        (item for item in BODY_SIGNAL_GROUPS.items() if field in item[1]["fields"]),
+        ("door", BODY_SIGNAL_GROUPS["door"]),
+    )
+    effective_body = dict(state.domains.get("body") or {})
+    effective_body.update(override_values)
+    frame_changes = {
+        key: override_values[key]
+        for key in profile["fields"]
+        if key in override_values and (key == field or action == "hazard")
+    }
+    state.body_sequence += 1
+    frame = {
+        "sequence": state.body_sequence,
+        "event": " / ".join(frame_changes.keys()),
+        "can_id": profile["can_id"],
+        "frame_name": profile["frame_name"],
+        "cycle_ms": 0,
+        "send_type": "Web事件触发",
+        "dlc": 8,
+        "data_hex": body_payload_bytes(effective_body, state.body_sequence, group_name),
+        "signal_changes": frame_changes,
+        "vehicle_time_ms": triggered_at_ms,
+        "cloud_receive_time_ms": triggered_at_ms,
+        "latency_ms": 0,
+        "valid": True,
+        "invalid_reason": "",
+        "device_id": str(effective_body.get("device_id", "WEB-CONTROL"))[:64],
+        "interface_path": "Web按钮 → 云端事件覆盖 → 实时画面",
+        "source": "Web车身操作联调",
+        "test": True,
+        "event_trigger": True,
+    }
+    state.body_frame_history.appendleft(frame)
+    persist_body_frame(state.vehicle_id, frame)
+    state.body_event_override = {
+        "values": override_values,
+        "triggered_at_ms": triggered_at_ms,
+        "expires_at_ms": triggered_at_ms + BODY_EVENT_OVERRIDE_MS,
+        "action": action,
+        "label": label,
+        "frame": frame,
+    }
+    return state.body_snapshot(), [frame], label, value
+
+
 def login_page():
     return """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>V-SHIELD · 访问验证</title>
@@ -1098,43 +1222,22 @@ async def update_domain(vehicle_id: str, domain: str, request: Request):
     return {"accepted": True, "vehicle_id": state.vehicle_id, "domain": domain}
 
 
+@app.post("/api/vehicles/{vehicle_id}/body/event")
 @app.post("/api/vehicles/{vehicle_id}/body/test")
-async def test_body_event(vehicle_id: str, request: Request):
+async def trigger_body_event(vehicle_id: str, request: Request):
     try:
         payload = await request.json()
     except Exception:
         payload = {}
     action = str(payload.get("action", "door_fl"))
     if action not in BODY_TEST_ACTIONS:
-        raise HTTPException(status_code=400, detail="unsupported body test action")
+        raise HTTPException(status_code=400, detail="unsupported body event action")
     state = registry.get(vehicle_id)
-    if (
-        (state.domains.get("body") or {}).get("data_mode") == "real"
-        and state.body_last_seen_ms
-        and now_ms() - state.body_last_seen_ms <= BODY_DATA_TIMEOUT_SECONDS * 1000
-    ):
-        raise HTTPException(status_code=409, detail="real body data is active; test controls are locked")
-    current = state.domains.get("body") or {}
-    field, label = BODY_TEST_ACTIONS[action]
-    if field == "CentralLockState":
-        value = "unlocked" if str(current.get(field, "unlocked")).lower() == "locked" else "locked"
-    else:
-        value = not body_switch(current.get(field, False))
-    update = {
-        field: value,
-        "status": "online",
-        "can_status": "normal",
-        "source": "页面联调模拟器",
-        "captured_at_ms": now_ms() - random.randint(12, 32),
-        "transport": {"protocol": "HTTP/JSON", "fragment_count": random.choice([1, 1, 1, 2])},
-    }
-    if action == "hazard":
-        update["TurnLeft"] = value
-        update["TurnRight"] = value
-    body, frames = record_body_update(state, update, is_test=True)
+    body, frames, label, value = record_body_event_override(state, action)
     return {
         "accepted": True, "vehicle_id": state.vehicle_id, "action": action,
-        "label": label, "value": value, "body": body, "frames": frames,
+        "label": label, "value": value, "override_ms": BODY_EVENT_OVERRIDE_MS,
+        "body": body, "frames": frames,
     }
 
 
