@@ -58,7 +58,8 @@ AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
 FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
-BODY_EVENT_OVERRIDE_MS = 5000
+BODY_EVENT_HOLD_SECONDS = 5
+BODY_EVENT_TIMEOUT_MS = 8000
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
@@ -213,7 +214,10 @@ class VehicleState:
         self.body_frame_history = deque(maxlen=80)
         self.body_alerts = deque(maxlen=40)
         self.body_last_seen_ms = 0
-        self.body_event_override = None
+        # Seed from wall clock so a cloud restart does not reuse the last K3
+        # idempotency key and accidentally turn a new action into a duplicate.
+        self.body_event_sequence = now_ms() & 0xFFFFFFFF
+        self.body_event_command = None
         self.body_control_sequence = 0
         self.body_control = {
             "sequence": 0,
@@ -356,49 +360,13 @@ class VehicleState:
         body["connected"] = online
         body["link"] = link
 
-        event_override = self.body_event_override
-        event_active = bool(
-            event_override
-            and snapshot_at_ms < event_override.get("expires_at_ms", 0)
-        )
-        if event_override and not event_active:
-            self.body_event_override = None
-            event_override = None
-        if event_active:
-            event_values = dict(event_override.get("values") or {})
-            body.update(event_values)
-            body["status"] = "online"
-            body["connected"] = True
-            body["data_mode"] = "event"
-            body["source"] = "Web车身操作联调"
-            body["captured_at_ms"] = event_override["triggered_at_ms"]
-            body["updated_at_ms"] = event_override["triggered_at_ms"]
-            changed_at = dict(body.get("signal_changed_at_ms") or {})
-            validity = dict(body.get("signal_validity") or {})
-            invalid_reasons = dict(body.get("signal_invalid_reasons") or {})
-            for field in event_values:
-                changed_at[field] = event_override["triggered_at_ms"]
-                validity[field] = True
-                invalid_reasons[field] = ""
-            body["signal_changed_at_ms"] = changed_at
-            body["signal_validity"] = validity
-            body["signal_invalid_reasons"] = invalid_reasons
-            body["latest_change_at_ms"] = event_override["triggered_at_ms"]
-            body["event_override"] = {
-                "active": True,
-                "duration_ms": BODY_EVENT_OVERRIDE_MS,
-                "triggered_at_ms": event_override["triggered_at_ms"],
-                "expires_at_ms": event_override["expires_at_ms"],
-                "remaining_ms": max(0, event_override["expires_at_ms"] - snapshot_at_ms),
-                "action": event_override["action"],
-                "label": event_override["label"],
-            }
-        else:
-            body["event_override"] = {
-                "active": False,
-                "duration_ms": BODY_EVENT_OVERRIDE_MS,
-                "remaining_ms": 0,
-            }
+        command = self.body_event_command
+        if command and command.get("status") in {"pending", "executing"}:
+            if snapshot_at_ms - command["requested_at_ms"] >= BODY_EVENT_TIMEOUT_MS:
+                command["status"] = "timeout"
+                command["completed_at_ms"] = snapshot_at_ms
+                command["error"] = "K3真实CAN回读超时"
+        body["event_command"] = dict(command) if command else None
         alerts = list(self.body_alerts)
         if self.body_last_seen_ms and not online:
             alerts.insert(0, {
@@ -409,12 +377,6 @@ class VehicleState:
         body["alerts"] = alerts[:12]
         body["frame_count"] = self.body_sequence
         frame_history = list(self.body_frame_history)
-        if event_active and event_override.get("frame"):
-            event_frame = event_override["frame"]
-            frame_history = [event_frame] + [
-                frame for frame in frame_history
-                if frame.get("sequence") != event_frame.get("sequence")
-            ]
         body["latest_frame"] = frame_history[0] if frame_history else None
         body["frame_history"] = frame_history[:8]
         body["transmission_control"] = dict(self.body_control)
@@ -832,6 +794,7 @@ def record_body_update(state, payload, is_test=False):
         body.pop(transient, None)
     state.domains["body"] = body
     state.body_last_seen_ms = received_at_ms
+    apply_body_control_ack(state, payload, body, received_at_ms)
 
     alerts = body_alerts(body, body["signal_validity"], body["signal_invalid_reasons"], received_at_ms)
     state.body_alerts.clear()
@@ -883,74 +846,67 @@ def record_body_update(state, payload, is_test=False):
     return state.body_snapshot(), created_frames
 
 
-def record_body_event_override(state, action):
-    """Apply a Web control event without interrupting the real periodic data stream."""
+def body_event_target_matches(body, field, target):
+    if field == "CentralLockState":
+        return (str(body.get(field, "")).lower() == "locked") == bool(target)
+    return body_switch(body.get(field, False)) == bool(target)
+
+
+def queue_body_event_command(state, action):
+    """Queue a real K3 command; never fabricate telemetry or a CAN frame."""
     if action not in BODY_TEST_ACTIONS:
         raise HTTPException(status_code=400, detail="unsupported body event action")
-
-    triggered_at_ms = now_ms()
-    previous_override = state.body_event_override
-    override_active = bool(
-        previous_override
-        and triggered_at_ms < previous_override.get("expires_at_ms", 0)
-    )
-    override_values = dict(previous_override.get("values") or {}) if override_active else {}
-    current = dict(state.domains.get("body") or {})
-    current.update(override_values)
     field, label = BODY_TEST_ACTIONS[action]
-    if field == "CentralLockState":
-        value = "unlocked" if str(current.get(field, "unlocked")).lower() == "locked" else "locked"
-    else:
-        value = not body_switch(current.get(field, False))
-    override_values[field] = value
-    if action == "hazard":
-        override_values["TurnLeft"] = value
-        override_values["TurnRight"] = value
-
-    group_name, profile = next(
-        (item for item in BODY_SIGNAL_GROUPS.items() if field in item[1]["fields"]),
-        ("door", BODY_SIGNAL_GROUPS["door"]),
+    current = state.domains.get("body") or {}
+    current_on = (
+        str(current.get(field, "unlocked")).lower() == "locked"
+        if field == "CentralLockState"
+        else body_switch(current.get(field, False))
     )
-    effective_body = dict(state.domains.get("body") or {})
-    effective_body.update(override_values)
-    frame_changes = {
-        key: override_values[key]
-        for key in profile["fields"]
-        if key in override_values and (key == field or action == "hazard")
-    }
-    state.body_sequence += 1
-    frame = {
-        "sequence": state.body_sequence,
-        "event": " / ".join(frame_changes.keys()),
-        "can_id": profile["can_id"],
-        "frame_name": profile["frame_name"],
-        "cycle_ms": 0,
-        "send_type": "Web事件触发",
-        "dlc": 8,
-        "data_hex": body_payload_bytes(effective_body, state.body_sequence, group_name),
-        "signal_changes": frame_changes,
-        "vehicle_time_ms": triggered_at_ms,
-        "cloud_receive_time_ms": triggered_at_ms,
-        "latency_ms": 0,
-        "valid": True,
-        "invalid_reason": "",
-        "device_id": str(effective_body.get("device_id", "WEB-CONTROL"))[:64],
-        "interface_path": "Web按钮 → 云端事件覆盖 → 实时画面",
-        "source": "Web车身操作联调",
-        "test": True,
-        "event_trigger": True,
-    }
-    state.body_frame_history.appendleft(frame)
-    persist_body_frame(state.vehicle_id, frame)
-    state.body_event_override = {
-        "values": override_values,
-        "triggered_at_ms": triggered_at_ms,
-        "expires_at_ms": triggered_at_ms + BODY_EVENT_OVERRIDE_MS,
+    state.body_event_sequence = (state.body_event_sequence + 1) & 0xFFFFFFFF
+    if state.body_event_sequence == 0:
+        state.body_event_sequence = 1
+    state.body_event_command = {
+        "sequence": state.body_event_sequence,
         "action": action,
+        "field": field,
         "label": label,
-        "frame": frame,
+        "target": not current_on,
+        "hold_seconds": BODY_EVENT_HOLD_SECONDS,
+        "status": "pending",
+        "requested_at_ms": now_ms(),
+        "dispatched_at_ms": None,
+        "completed_at_ms": None,
+        "error": "",
     }
-    return state.body_snapshot(), [frame], label, value
+    return dict(state.body_event_command)
+
+
+def apply_body_control_ack(state, payload, body, received_at_ms):
+    ack = payload.get("control_ack")
+    command = state.body_event_command
+    if not isinstance(ack, dict) or not command:
+        return
+    try:
+        sequence = int(ack.get("sequence") or 0)
+    except (TypeError, ValueError):
+        return
+    if sequence != command["sequence"]:
+        return
+    result = str(ack.get("result") or "unknown")
+    if result in {"applied", "duplicate"} and body_event_target_matches(
+        body, command["field"], command["target"]
+    ):
+        command["status"] = "succeeded"
+        command["completed_at_ms"] = received_at_ms
+        command["error"] = ""
+    elif result == "restored" and command.get("status") == "succeeded":
+        command["status"] = "restored"
+        command["restored_at_ms"] = received_at_ms
+    elif result in {"rejected", "unknown"}:
+        command["status"] = "failed"
+        command["completed_at_ms"] = received_at_ms
+        command["error"] = "K3拒绝或无法识别控制命令"
 
 
 def login_page():
@@ -1233,11 +1189,11 @@ async def trigger_body_event(vehicle_id: str, request: Request):
     if action not in BODY_TEST_ACTIONS:
         raise HTTPException(status_code=400, detail="unsupported body event action")
     state = registry.get(vehicle_id)
-    body, frames, label, value = record_body_event_override(state, action)
+    command = queue_body_event_command(state, action)
     return {
         "accepted": True, "vehicle_id": state.vehicle_id, "action": action,
-        "label": label, "value": value, "override_ms": BODY_EVENT_OVERRIDE_MS,
-        "body": body, "frames": frames,
+        "label": command["label"], "value": command["target"],
+        "command": command, "body": state.body_snapshot(), "frames": [],
     }
 
 
@@ -1280,17 +1236,29 @@ async def poll_body_transmission(vehicle_id: str, request: Request):
     try:
         last_sequence = max(0, int(payload.get("last_sequence", 0)))
         acknowledged_sequence = max(0, int(payload.get("acknowledged_sequence", 0)))
+        last_event_sequence = max(0, int(payload.get("last_event_sequence", 0)))
+        dispatched_event_sequence = max(0, int(payload.get("dispatched_event_sequence", 0)))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="command sequences must be integers")
     if acknowledged_sequence == state.body_control["sequence"] and acknowledged_sequence > 0:
         state.body_control["status"] = "delivered"
         state.body_control["delivered_at_ms"] = now_ms()
     command = dict(state.body_control)
+    event_command = state.body_event_command
+    if event_command and dispatched_event_sequence == event_command["sequence"]:
+        if event_command["status"] == "pending":
+            event_command["status"] = "executing"
+            event_command["dispatched_at_ms"] = now_ms()
     return {
         "accepted": True,
         "vehicle_id": state.vehicle_id,
         "pending": command["sequence"] > last_sequence,
         "command": command,
+        "event_pending": bool(
+            event_command
+            and event_command["status"] in {"pending", "executing"}
+        ),
+        "event_command": dict(event_command) if event_command else None,
     }
 
 

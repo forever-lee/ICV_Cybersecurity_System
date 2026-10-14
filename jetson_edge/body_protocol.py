@@ -10,15 +10,38 @@ import time
 
 PACKET_SIZE = 16
 TIMESTAMPED_PACKET_SIZE = 25
+CONTROL_ACK_PACKET_SIZE = 32
 PACKET_MAGIC = bytes((0xA5, 0x5A))
 COMMAND_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x02))
 TIME_SYNC_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x03))
+BODY_EVENT_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x04))
 COMMAND_START = 0x01
 COMMAND_STOP = 0x00
 
 DOOR_FIELDS = ("Door_FL", "Door_FR", "Door_RL", "Door_RR")
 LIGHT_FIELDS = ("LowBeam", "HighBeam", "TurnLeft", "TurnRight", "Hazard")
 SWITCH_FIELDS = DOOR_FIELDS + LIGHT_FIELDS
+
+BODY_EVENT_SIGNALS = {
+    "door_fl": (1, "Door_FL"),
+    "door_fr": (2, "Door_FR"),
+    "door_rl": (3, "Door_RL"),
+    "door_rr": (4, "Door_RR"),
+    "central_lock": (5, "CentralLockState"),
+    "low_beam": (6, "LowBeam"),
+    "high_beam": (7, "HighBeam"),
+    "turn_left": (8, "TurnLeft"),
+    "turn_right": (9, "TurnRight"),
+    "hazard": (10, "Hazard"),
+}
+
+CONTROL_ACK_RESULTS = {
+    0: "none",
+    1: "applied",
+    2: "duplicate",
+    3: "rejected",
+    4: "restored",
+}
 
 
 def now_ms():
@@ -137,15 +160,37 @@ def build_time_sync_packet(epoch_ms=None):
     return bytes(packet)
 
 
+def build_body_event_command(sequence, action, target, hold_seconds=5):
+    if action not in BODY_EVENT_SIGNALS:
+        raise ValueError("unsupported body event action")
+    sequence = int(sequence)
+    hold_seconds = int(hold_seconds)
+    if not 0 < sequence <= 0xFFFFFFFF:
+        raise ValueError("sequence must be between 1 and 4294967295")
+    if not 1 <= hold_seconds <= 30:
+        raise ValueError("hold_seconds must be between 1 and 30")
+    signal_id, _ = BODY_EVENT_SIGNALS[action]
+    packet = bytearray(BODY_EVENT_PACKET_MAGIC)
+    packet.extend(sequence.to_bytes(4, byteorder="little", signed=False))
+    packet.append(signal_id)
+    packet.append(1 if normalize_switch(target, action) else 0)
+    packet.append(hold_seconds)
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
 def initial_state():
     return {"source": "S32K344-CAN"}
 
 
 def decode_serial_packet(packet):
-    if len(packet) not in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE):
+    if len(packet) not in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE):
         raise ValueError(
-            "expected {} or {} bytes, got {}".format(
-                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, len(packet)
+            "expected {}, {} or {} bytes, got {}".format(
+                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE, len(packet)
             )
         )
     if packet[:2] != PACKET_MAGIC:
@@ -166,14 +211,15 @@ def decode_serial_packet(packet):
         )
 
     board_sent_at_ms = None
-    if len(packet) == TIMESTAMPED_PACKET_SIZE:
+    if len(packet) in (TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE):
+        checksum_index = 24 if len(packet) == TIMESTAMPED_PACKET_SIZE else 31
         extended_checksum = 0
-        for value in packet[:24]:
+        for value in packet[:checksum_index]:
             extended_checksum ^= value
-        if extended_checksum != packet[24]:
+        if extended_checksum != packet[checksum_index]:
             raise ValueError(
                 "extended checksum mismatch: expected 0x{:02X}, got 0x{:02X}".format(
-                    extended_checksum, packet[24]
+                    extended_checksum, packet[checksum_index]
                 )
             )
         timestamp_value = int.from_bytes(packet[16:24], byteorder="little")
@@ -184,7 +230,7 @@ def decode_serial_packet(packet):
     light_flags = packet[5]
     left_turn = bool(light_flags & 0x04)
     right_turn = bool(light_flags & 0x08)
-    return {
+    decoded = {
         "Door_FL": bool(body_flags & 0x01),
         "Door_FR": bool(body_flags & 0x02),
         "Door_RL": bool(body_flags & 0x04),
@@ -207,6 +253,24 @@ def decode_serial_packet(packet):
         "transmissionEnabled": bool(packet[14] & 0x01),
         "boardSentAtMs": board_sent_at_ms,
     }
+    if len(packet) == CONTROL_ACK_PACKET_SIZE:
+        ack_sequence = int.from_bytes(packet[24:28], byteorder="little")
+        ack_signal_id = packet[28]
+        ack_target = bool(packet[29])
+        ack_result_code = packet[30]
+        action = next(
+            (key for key, value in BODY_EVENT_SIGNALS.items() if value[0] == ack_signal_id),
+            None,
+        )
+        decoded["controlAck"] = {
+            "sequence": ack_sequence,
+            "signal_id": ack_signal_id,
+            "action": action,
+            "target": ack_target,
+            "result_code": ack_result_code,
+            "result": CONTROL_ACK_RESULTS.get(ack_result_code, "unknown"),
+        }
+    return decoded
 
 
 def serial_payload(decoded, serial_port, captured_at_ms=None):
@@ -248,7 +312,18 @@ def body_can_frame_metadata(decoded):
     )
     lock_bit = 1 if decoded.get("CentralLockState") == "locked" else 0
 
-    if 1 <= step <= 4:
+    ack = decoded.get("controlAck") or {}
+    ack_action = ack.get("action") if ack.get("result") in {"applied", "duplicate"} else None
+    if ack_action in {"door_fl", "door_fr", "door_rl", "door_rr"}:
+        can_id, frame_name, cycle_ms, send_type = "0x351", "BodyDoorStatus", 0, "Web事件触发/CAN回读"
+        values = [door_bits, 0, 0, 0, 0, 0, sequence]
+    elif ack_action == "central_lock":
+        can_id, frame_name, cycle_ms, send_type = "0x352", "CentralLockStatus", 0, "Web事件触发/CAN回读"
+        values = [0, lock_bit, 0, 0, 0, 0, sequence]
+    elif ack_action in {"low_beam", "high_beam", "turn_left", "turn_right", "hazard"}:
+        can_id, frame_name, cycle_ms, send_type = "0x353", "BodyLightStatus", 0, "Web事件触发/CAN回读"
+        values = [0, 0, light_bits, 0, 0, 0, sequence]
+    elif 1 <= step <= 4:
         can_id, frame_name, cycle_ms, send_type = "0x351", "BodyDoorStatus", 100, "周期+事件触发"
         values = [door_bits, 0, 0, 0, 0, 0, sequence]
     elif 5 <= step <= 9:
@@ -299,4 +374,6 @@ def ethernet_payload(decoded, board_address, udp_received_at_ms=None):
         ),
     })
     payload["raw_frame"] = body_can_frame_metadata(decoded)
+    if decoded.get("controlAck"):
+        payload["control_ack"] = dict(decoded["controlAck"])
     return payload

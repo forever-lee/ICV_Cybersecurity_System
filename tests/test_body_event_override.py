@@ -21,107 +21,64 @@ def make_real_state(now_ms):
         asyncio.set_event_loop(asyncio.new_event_loop())
     state = server.VehicleState("VHC-EVENT-TEST")
     state.domains["body"] = {
-        "status": "online",
-        "data_mode": "real",
-        "can_status": "normal",
-        "Door_FL": False,
-        "Door_FR": False,
-        "Door_RL": False,
-        "Door_RR": False,
-        "CentralLockState": "unlocked",
-        "LowBeam": False,
-        "HighBeam": False,
-        "TurnLeft": False,
-        "TurnRight": False,
-        "Hazard": False,
-        "updated_at_ms": now_ms,
-        "captured_at_ms": now_ms,
-        "link": {
-            "mcu_status": "online",
-            "edge_status": "online",
-            "upload_status": "online",
-        },
+        "status": "online", "data_mode": "real", "Door_FL": False,
+        "CentralLockState": "unlocked", "LowBeam": False,
+        "TurnLeft": False, "TurnRight": False, "Hazard": False,
+        "link": {"mcu_status": "online", "edge_status": "online", "upload_status": "online"},
     }
     state.body_last_seen_ms = now_ms
     return state
 
 
-def test_web_event_temporarily_overrides_real_periodic_state(monkeypatch, tmp_path):
-    clock = {"now": 100000}
-    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
-    monkeypatch.setattr(server, "persist_body_frame", lambda *_: None)
-    monkeypatch.setattr(server, "BODY_DATABASE_PATH", tmp_path / "body-event-test.db")
-    server.init_body_database()
-    state = make_real_state(clock["now"])
-
-    body, frames, label, value = server.record_body_event_override(state, "door_fl")
-
-    assert label == "左前门"
-    assert value is True
-    assert body["Door_FL"] is True
-    assert body["data_mode"] == "event"
-    assert body["event_override"]["active"] is True
-    assert body["event_override"]["remaining_ms"] == 5000
-    assert frames[0]["send_type"] == "Web事件触发"
-
-    # Real periodic data keeps updating underneath the temporary Web event.
-    clock["now"] = 104999
-    periodic_snapshot, _ = server.record_body_update(state, {
-        "Door_FL": False,
-        "LowBeam": True,
-        "captured_at_ms": clock["now"],
-        "link": {
-            "mcu_status": "online",
-            "edge_status": "online",
-            "upload_status": "online",
-            "udp_received_at_ms": clock["now"],
-        },
-    })
-    assert periodic_snapshot["Door_FL"] is True
-    assert state.domains["body"]["LowBeam"] is True
-
-    # At exactly five seconds the overlay is removed and the latest real data is shown.
-    clock["now"] = 105000
-    restored = state.body_snapshot()
-    assert restored["Door_FL"] is False
-    assert restored["LowBeam"] is True
-    assert restored["data_mode"] == "real"
-    assert restored["event_override"]["active"] is False
+def test_event_is_queued_without_fabricating_telemetry(monkeypatch):
+    monkeypatch.setattr(server, "now_ms", lambda: 100000)
+    state = make_real_state(100000)
+    command = server.queue_body_event_command(state, "door_fl")
+    snapshot = state.body_snapshot()
+    assert command["status"] == "pending"
+    assert command["target"] is True
+    assert snapshot["Door_FL"] is False
+    assert snapshot["event_command"]["status"] == "pending"
+    assert snapshot["frame_history"] == []
 
 
-def test_each_new_event_extends_window_and_keeps_prior_event_values(monkeypatch):
+def test_only_matching_k3_can_ack_completes_command(monkeypatch, tmp_path):
     clock = {"now": 200000}
     monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
     monkeypatch.setattr(server, "persist_body_frame", lambda *_: None)
+    monkeypatch.setattr(server, "BODY_DATABASE_PATH", tmp_path / "body-event.db")
+    server.init_body_database()
     state = make_real_state(clock["now"])
-
-    server.record_body_event_override(state, "door_fr")
-    clock["now"] += 4000
-    body, _, _, _ = server.record_body_event_override(state, "low_beam")
-
-    assert body["Door_FR"] is True
+    command = server.queue_body_event_command(state, "low_beam")
+    clock["now"] += 100
+    body, _ = server.record_body_update(state, {
+        "LowBeam": False, "captured_at_ms": clock["now"],
+        "control_ack": {"sequence": command["sequence"], "result": "applied"},
+    })
+    assert body["event_command"]["status"] == "pending"
+    clock["now"] += 100
+    body, _ = server.record_body_update(state, {
+        "LowBeam": True, "captured_at_ms": clock["now"],
+        "control_ack": {"sequence": command["sequence"], "result": "applied"},
+    })
     assert body["LowBeam"] is True
-    assert body["event_override"]["expires_at_ms"] == 209000
+    assert body["event_command"]["status"] == "succeeded"
 
-    clock["now"] = 208999
-    assert state.body_snapshot()["event_override"]["active"] is True
-    clock["now"] = 209000
-    assert state.body_snapshot()["event_override"]["active"] is False
+    clock["now"] += 5000
+    body, _ = server.record_body_update(state, {
+        "LowBeam": False, "captured_at_ms": clock["now"],
+        "control_ack": {"sequence": command["sequence"], "result": "restored"},
+    })
+    assert body["LowBeam"] is False
+    assert body["event_command"]["status"] == "restored"
 
 
-def test_hazard_event_synchronizes_both_turn_lamps(monkeypatch):
-    monkeypatch.setattr(server, "now_ms", lambda: 300000)
-    monkeypatch.setattr(server, "persist_body_frame", lambda *_: None)
-    state = make_real_state(300000)
-
-    body, frames, _, value = server.record_body_event_override(state, "hazard")
-
-    assert value is True
-    assert body["Hazard"] is True
-    assert body["TurnLeft"] is True
-    assert body["TurnRight"] is True
-    assert frames[0]["signal_changes"] == {
-        "TurnLeft": True,
-        "TurnRight": True,
-        "Hazard": True,
-    }
+def test_pending_command_times_out_without_real_readback(monkeypatch):
+    clock = {"now": 300000}
+    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
+    state = make_real_state(clock["now"])
+    server.queue_body_event_command(state, "hazard")
+    clock["now"] += server.BODY_EVENT_TIMEOUT_MS
+    snapshot = state.body_snapshot()
+    assert snapshot["event_command"]["status"] == "timeout"
+    assert snapshot["Hazard"] is False

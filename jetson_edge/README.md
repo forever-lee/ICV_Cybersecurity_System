@@ -39,6 +39,10 @@
 GPS 默认使用 `/dev/ttyTHS1`，波特率 `38400`。两路摄像头共享同一块 Jetson 的 GPS 数据。
 
 Jetson 的有线网口 `eno1` 固定为 `192.168.4.100/24`。`start_edge.py` 启动时会先 Ping 上表中的两路摄像头、车身板、WiFi 板和蓝牙板，并逐项打印 `[PING OK]` 或 `[PING FAIL]`。设备暂时不可达不会阻止其他组件启动。可设置 `BODY_NETWORK_INTERFACE=eno1` 明确限定车身域网口。
+车身域状态报文使用 UDP 7100，控制和对时使用 UDP 7101。
+网页车身联调命令也经 UDP 7101 下发；K3 在 CAN0 回读后，通过 UDP 7100
+返回带命令序号的确认状态。更新该功能时，需将新版 `body_protocol.py` 和
+`body_edge_agent.py` 一并复制到 Jetson，并重新启动 `start_edge.py`。
 
 ## 安装和运行
 

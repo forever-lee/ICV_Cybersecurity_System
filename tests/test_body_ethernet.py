@@ -33,6 +33,18 @@ def timestamped_body_packet(sent_at_ms):
     return bytes(packet)
 
 
+def acknowledged_body_packet(sent_at_ms, sequence, signal_id, target, result):
+    packet = bytearray(body_packet())
+    packet.extend(int(sent_at_ms).to_bytes(8, byteorder="little"))
+    packet.extend(int(sequence).to_bytes(4, byteorder="little"))
+    packet.extend(bytes((signal_id, int(target), result)))
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
 def test_binary_udp_packet_maps_to_cloud_schema():
     received_at_ms = 1700000000123
     decoded = decode_serial_packet(body_packet())
@@ -97,3 +109,14 @@ def test_reported_can_profile_follows_simulation_step():
     )
     assert light_payload["raw_frame"]["can_id"] == "0x353"
     assert light_payload["raw_frame"]["cycle_ms"] == 50
+
+
+def test_extended_status_exposes_real_can_control_ack():
+    decoded = decode_serial_packet(acknowledged_body_packet(1700000000100, 42, 6, True, 1))
+    payload = ethernet_payload(decoded, ("192.168.4.31", 7100), 1700000000123)
+    assert payload["control_ack"] == {
+        "sequence": 42, "signal_id": 6, "action": "low_beam",
+        "target": True, "result_code": 1, "result": "applied",
+    }
+    assert payload["raw_frame"]["can_id"] == "0x353"
+    assert payload["raw_frame"]["send_type"] == "Web事件触发/CAN回读"
