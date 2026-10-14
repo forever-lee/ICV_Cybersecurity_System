@@ -105,7 +105,11 @@ Ubuntu 蓝牙电脑运行 ble_s32_sender.py
   → 以太网 UDP 5000
   → Jetson bluetooth_edge_agent.py（由 start_edge.py 监管）
   → HTTP POST /api/vehicles/{vehicle_id}/bluetooth
-  → 蓝牙正常/异常报文、延迟与控制状态页面
+  → 蓝牙正常/异常报文页面
+
+Ubuntu 蓝牙电脑只配置 BLE 地址，不配置云端地址或上传 Token，也不与云端
+直接通信。蓝牙页面暂时保留端到端延迟和发送启停位置，当前统一显示“待接入”；
+两个启停按钮保持禁用，不会向后端创建控制命令。
 
 车身板（192.168.4.31）UDP 7100
   → Jetson body_edge_agent.py
@@ -145,10 +149,10 @@ WiFi 链路中的 `192.168.3.x` 仅用于 BMS 报文产生端与 ESP32 热点之
 - `WS /ws/public/live-fmp4/VHC-001`：VHC-001 公开只读视频入口。
 - `WS /ws/metrics/{vehicle_id}`：网页指标入口。
 - `POST /api/vehicles/{vehicle_id}/bluetooth`：BLE 遥测接收接口。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/timing`：登记 Ubuntu 发送时间。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/control`：网页下发发送开关。
-- `GET /api/vehicles/{vehicle_id}/bluetooth/control/next`：Ubuntu 发送端轮询待执行命令。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/control/ack`：Ubuntu 发送端确认执行结果。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/timing`：预留接口，当前发送端不调用。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/control`：预留接口，当前网页不调用。
+- `GET /api/vehicles/{vehicle_id}/bluetooth/control/next`：预留控制接口，当前发送端不轮询。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/control/ack`：预留确认接口，当前发送端不调用。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
 - `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。

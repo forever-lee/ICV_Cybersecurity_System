@@ -18,13 +18,12 @@ python -m pip install -r bluetooth_gateway/requirements.txt
 
 ```bash
 export BLE_ADDRESS='E2:92:FA:3D:0E:40'
-export CLOUD_HTTP_URL='http://后端地址:8001'
-export VEHICLE_ID='VHC-001'
-export VEHICLE_INGEST_TOKEN='与 run_cloud.py 完全一致的 Token'
 python bluetooth_gateway/ble_s32_sender.py
 ```
 
 `BLE_WRITE_UUID` 默认是 `00001001-0000-1000-8000-00805f9b34fb`。
-`BLUETOOTH_SEND_INTERVAL_SECONDS`、`BLUETOOTH_ABNORMAL_EVERY` 和
-`CLOUD_CONTROL_POLL_SECONDS` 可选。发送端使用云端接口登记发送时间并轮询
-网页开关；实际遥测数据仍由 S32K344 经 Jetson 上传。
+`BLUETOOTH_SEND_INTERVAL_SECONDS` 和 `BLUETOOTH_ABNORMAL_EVERY` 可选。
+
+该发送端只通过 BLE 与 nRF52840 通信，不配置云端地址、车辆 Token 或网页
+控制轮询。遥测数据由 S32K344 经 Jetson 上传。网页端到端延迟与发送启停
+按钮目前只保留界面位置，等待完整硬件闭环接入后启用。

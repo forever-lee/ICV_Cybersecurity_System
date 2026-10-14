@@ -1221,51 +1221,29 @@
     updateBluetoothAbnormal(bluetooth);
     updateWirelessTotal(bluetooth, state.latestMetrics.wifi || {});
     if (!latest) {
-      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "—";
+      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "待接入";
       $("bluetoothHistory").innerHTML = '<div class="history-empty">等待蓝牙模块发送数据…</div>'; return;
     }
     $("bluetoothText").textContent = latest.text || "（空报文）";
     $("bluetoothHex").textContent = latest.hex || "—";
     $("bluetoothRssi").textContent = latest.rssi == null ? "—" : `${latest.rssi} dBm`;
     $("bluetoothTime").textContent = formatFrameTime(latest.received_at_ms);
-    const latency = Number(latest.latency_ms);
-    $("bluetoothLatency").textContent = latest.latency_ms != null && Number.isFinite(latency) && latency >= 0
-      ? latency === 0 ? "<1 ms" : `${Math.round(latency)} ms`
-      : "—";
+    $("bluetoothLatency").textContent = "待接入";
     $("bluetoothHistory").innerHTML = renderHistory(bluetooth.history, "BLE-UDP", "等待蓝牙模块发送数据…");
   }
 
-  function updateBluetoothControl(control) {
+  function updateBluetoothControl(_control) {
     const label = $("bluetoothControlStatus");
     const onButton = $("bluetoothOnButton");
     const offButton = $("bluetoothOffButton");
     if (!label || !onButton || !offButton) return;
-    const online = control.agent_status === "online";
-    const pending = Boolean(control.pending);
-    const current = control.state || "unknown";
-    const lastAck = control.last_ack || {};
-    label.className = online ? "online" : "offline";
-    label.title = "";
-    if (pending) {
-      label.className = "pending";
-      label.textContent = `正在下发 ${String(control.pending_command || "").toUpperCase()}…`;
-    } else if (!online) {
-      label.textContent = "控制端未连接";
-    } else if (lastAck.status === "error") {
-      label.className = "error";
-      label.textContent = "执行失败";
-      label.title = lastAck.message || "Ubuntu 蓝牙发送端未能执行指令";
-    } else if (current === "on") {
-      label.textContent = "蓝牙发送已开启";
-    } else if (current === "off") {
-      label.textContent = "蓝牙发送已关闭";
-    } else {
-      label.textContent = "控制端在线";
-    }
-    onButton.classList.toggle("active", current === "on" && !pending);
-    offButton.classList.toggle("active", current === "off" && !pending);
-    onButton.disabled = pending || current === "on";
-    offButton.disabled = pending || current === "off";
+    label.className = "offline";
+    label.textContent = "启停功能待接入";
+    label.title = "等待 Jetson、K3、nRF52840 与 BLE 的完整控制闭环";
+    onButton.classList.remove("active");
+    offButton.classList.remove("active");
+    onButton.disabled = true;
+    offButton.disabled = true;
   }
 
   function updateBluetoothAbnormal(bluetooth) {
@@ -1630,40 +1608,6 @@
   if (bluetoothTestButton) bluetoothTestButton.addEventListener("click", () => createTestData("bluetooth"));
   if (bluetoothAnomalyTestButton) bluetoothAnomalyTestButton.addEventListener("click", () => createTestData("bluetooth", true));
   if (wifiTestButton) wifiTestButton.addEventListener("click", () => createTestData("wifi"));
-
-  async function sendBluetoothControl(command) {
-    const onButton = $("bluetoothOnButton");
-    const offButton = $("bluetoothOffButton");
-    const label = $("bluetoothControlStatus");
-    if (!onButton || !offButton || !label) return;
-    onButton.disabled = true;
-    offButton.disabled = true;
-    label.className = "pending";
-    label.textContent = `正在下发 ${command.toUpperCase()}…`;
-    try {
-      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/bluetooth/control`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ command }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-      const current = state.latestMetrics.bluetooth || {};
-      state.latestMetrics.bluetooth = { ...current, control: data.control };
-      updateBluetoothControl(data.control || {});
-      toast(data.control && data.control.agent_status !== "online"
-        ? `${command.toUpperCase()} 指令已排队，等待 Ubuntu 发送端连接`
-        : `${command.toUpperCase()} 指令已下发，等待 Ubuntu 发送端确认`);
-    } catch (error) {
-      toast(`蓝牙控制失败：${error.message || "请检查云端服务"}`);
-      updateBluetoothControl((state.latestMetrics.bluetooth || {}).control || {});
-    }
-  }
-
-  const bluetoothOnButton = $("bluetoothOnButton");
-  const bluetoothOffButton = $("bluetoothOffButton");
-  if (bluetoothOnButton) bluetoothOnButton.addEventListener("click", () => sendBluetoothControl("on"));
-  if (bluetoothOffButton) bluetoothOffButton.addEventListener("click", () => sendBluetoothControl("off"));
 
   const wifiClearButton = $("wifiClearButton");
   if (wifiClearButton) wifiClearButton.addEventListener("click", async () => {
