@@ -15,6 +15,8 @@ try:
         PACKET_MAGIC,
         PACKET_SIZE,
         TIMESTAMPED_PACKET_SIZE,
+        CONTROL_ACK_PACKET_SIZE,
+        build_body_event_command,
         build_serial_command,
         build_time_sync_packet,
         decode_serial_packet,
@@ -28,6 +30,8 @@ except ImportError:
         PACKET_MAGIC,
         PACKET_SIZE,
         TIMESTAMPED_PACKET_SIZE,
+        CONTROL_ACK_PACKET_SIZE,
+        build_body_event_command,
         build_serial_command,
         build_time_sync_packet,
         decode_serial_packet,
@@ -61,7 +65,8 @@ def forward_to_cloud(payload, cloud_url, vehicle_id, token):
 
 
 def poll_transmission_command(
-    cloud_url, vehicle_id, token, last_sequence, acknowledged_sequence=0
+    cloud_url, vehicle_id, token, last_sequence, acknowledged_sequence=0,
+    last_event_sequence=0, dispatched_event_sequence=0
 ):
     url = "{}/api/vehicles/{}/domains/body/control".format(
         cloud_url.rstrip("/"), vehicle_id
@@ -70,6 +75,8 @@ def poll_transmission_command(
         {
             "last_sequence": int(last_sequence),
             "acknowledged_sequence": int(acknowledged_sequence),
+            "last_event_sequence": int(last_event_sequence),
+            "dispatched_event_sequence": int(dispatched_event_sequence),
         },
         separators=(",", ":"),
     ).encode("utf-8")
@@ -105,6 +112,30 @@ def process_pending_command(
             sequence,
         )
     )
+    return sequence, sequence
+
+
+def process_pending_body_event(result, last_sequence, send_packet):
+    if not result.get("event_pending"):
+        return last_sequence, 0
+    command = result.get("event_command") or {}
+    sequence = int(command.get("sequence") or 0)
+    action = str(command.get("action") or "")
+    # Retransmit the same idempotent command until the cloud observes K3's
+    # CAN0 readback.  This tolerates a lost UDP command or status packet.
+    if sequence < last_sequence:
+        return last_sequence, 0
+    packet = build_body_event_command(
+        sequence,
+        action,
+        command.get("target"),
+        command.get("hold_seconds", 5),
+    )
+    send_packet(packet)
+    print("[{}] 已向K3下发车身事件 {}={} SEQ={}".format(
+        time.strftime("%H:%M:%S"), action,
+        1 if command.get("target") else 0, sequence,
+    ))
     return sequence, sequence
 
 
@@ -145,6 +176,8 @@ def run_udp_maintenance(args, udp_socket, board_control_address):
     acknowledged_sequence = 0
     next_command_poll = 0.0
     next_time_sync = 0.0
+    last_event_sequence = 0
+    dispatched_event_sequence = 0
     while True:
         current_time = time.monotonic()
         if current_time >= next_time_sync:
@@ -159,10 +192,16 @@ def run_udp_maintenance(args, udp_socket, board_control_address):
                 result = poll_transmission_command(
                     args.cloud, args.vehicle_id, args.token,
                     last_command_sequence, acknowledged_sequence,
+                    last_event_sequence, dispatched_event_sequence,
                 )
                 acknowledged_sequence = 0
+                dispatched_event_sequence = 0
                 last_command_sequence, acknowledged_sequence = process_pending_command(
                     result, last_command_sequence,
+                    lambda packet: udp_socket.sendto(packet, board_control_address),
+                )
+                last_event_sequence, dispatched_event_sequence = process_pending_body_event(
+                    result, last_event_sequence,
                     lambda packet: udp_socket.sendto(packet, board_control_address),
                 )
             except (error.URLError, OSError, ValueError) as exc:
@@ -285,7 +324,7 @@ def run_udp(args):
             continue
 
         try:
-            if len(data) in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE) and data[:2] == PACKET_MAGIC:
+            if len(data) in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE) and data[:2] == PACKET_MAGIC:
                 decoded = decode_serial_packet(data)
                 payload = ethernet_payload(decoded, address, received_at_ms)
                 dropped = enqueue_latest(upload_queue, (

@@ -1102,12 +1102,19 @@
       modeElement.textContent = payload.data_mode === "event" ? "事件触发" : payload.data_mode === "real" ? "真实数据" : payload.data_mode === "test" ? "测试数据" : "等待数据";
       modeElement.classList.toggle("live", ["real", "event"].includes(payload.data_mode));
     }
-    const eventOverride = payload.event_override || {};
+    const eventCommand = payload.event_command || {};
     const eventState = root.querySelector("[data-body-event-state]");
     if (eventState) {
-      const remainingSeconds = Math.max(0, Number(eventOverride.remaining_ms || 0) / 1000);
-      eventState.textContent = eventOverride.active ? `事件生效中 · ${remainingSeconds.toFixed(1)}s` : "可点击联调";
-      eventState.classList.toggle("event-active", eventOverride.active === true);
+      const labels = {
+        pending: "命令待Jetson下发",
+        executing: "等待K3 CAN回读",
+        succeeded: "真实CAN执行成功",
+        restored: "已恢复周期触发",
+        failed: "K3执行失败",
+        timeout: "真实CAN回读超时",
+      };
+      eventState.textContent = labels[eventCommand.status] || "可点击联调";
+      eventState.classList.toggle("event-active", ["pending", "executing"].includes(eventCommand.status));
     }
     const actionStates = {
       door_fl: bodySwitchForUi(payload.Door_FL),
@@ -1484,9 +1491,7 @@
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const data = await response.json();
-          state.latestMetrics.domains = { ...(state.latestMetrics.domains || {}), body: data.body };
-          updateDomains(state.latestMetrics.domains);
-          toast(`${data.label}事件已生效，5 秒无新操作后恢复周期数据`);
+          toast(`${data.label}命令已提交，等待K3真实CAN回读`);
         } catch (_) {
           toast("车身报文发送失败，请检查云端服务");
         } finally {
