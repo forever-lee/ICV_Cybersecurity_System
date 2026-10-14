@@ -15,6 +15,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -24,8 +25,8 @@ BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 BLUETOOTH_AGENT_PATH = BASE_DIR / "bluetooth_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-DEFAULT_CLOUD_HTTP_URL = "http://36783a70.r7.nas.cpolar.cn"
-DEFAULT_CLOUD_WS_URL = "ws://36783a70.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_HTTP_URL = "http://3f7b7aec.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://3f7b7aec.r7.nas.cpolar.cn"
 DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
@@ -182,6 +183,66 @@ def check_expected_body_address():
     return True
 
 
+def device_ping_targets():
+    """Return the vehicle-side devices checked before component startup."""
+    camera_urls = (
+        os.getenv("CAMERA_1_RTSP_URL", "rtsp://192.168.4.88:8554/main"),
+        os.getenv("CAMERA_2_RTSP_URL", "rtsp://192.168.4.89:8554/main"),
+    )
+    targets = []
+    for index, camera_url in enumerate(camera_urls, start=1):
+        host = urlsplit(camera_url).hostname
+        if host:
+            targets.append(("摄像头{}".format(index), host))
+    targets.extend((
+        ("车身", os.getenv("BODY_BOARD_HOST", "192.168.4.31").strip()),
+        ("WiFi", os.getenv("WIFI_DEVICE_HOST", "192.168.4.201").strip()),
+        ("蓝牙", os.getenv("BLUETOOTH_DEVICE_HOST", "192.168.4.20").strip()),
+    ))
+    return [(name, host) for name, host in targets if host]
+
+
+def check_device_connectivity():
+    """Ping vehicle devices, print every result, and continue on failures."""
+    targets = device_ping_targets()
+    ping_command = shutil.which("ping")
+    print("=" * 64)
+    print("Jetson 设备网络连通性检查")
+    if not ping_command:
+        print("[PING WARN] 系统中没有 ping 命令，跳过 {} 个设备检查".format(len(targets)))
+        print("=" * 64)
+        return {host: False for _name, host in targets}
+
+    timeout_seconds = max(1, int(float(os.getenv("DEVICE_PING_TIMEOUT_SECONDS", "1"))))
+    results = {}
+    for name, host in targets:
+        command = (
+            [ping_command, "-c", "1", "-W", str(timeout_seconds), host]
+            if os.name == "posix"
+            else [ping_command, "-n", "1", "-w", str(timeout_seconds * 1000), host]
+        )
+        try:
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout_seconds + 1,
+            )
+            reachable = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            reachable = False
+        results[host] = reachable
+        print("[PING {}] {:<8} {}".format("OK" if reachable else "FAIL", name, host))
+
+    reachable_count = sum(1 for reachable in results.values() if reachable)
+    print("[PING SUMMARY] 可达 {}/{}；不可达设备不会阻止其他组件启动".format(
+        reachable_count, len(targets)
+    ))
+    print("=" * 64)
+    return results
+
+
 def acquire_instance_lock():
     if os.name != "posix":
         return None
@@ -309,6 +370,7 @@ def build_components():
 
 def main():
     check_expected_body_address()
+    check_device_connectivity()
     LOG_DIR.mkdir(exist_ok=True)
     lock_handle = acquire_instance_lock()
     pid_path = BASE_DIR / "edge_supervisor.pid"

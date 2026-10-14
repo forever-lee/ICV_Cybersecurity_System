@@ -63,3 +63,39 @@ def test_body_address_check_auto_detects_eno1(monkeypatch, capsys):
     assert start_edge.check_expected_body_address() is True
     assert "eno1 地址正确：192.168.4.100/24" in capsys.readouterr().out
 
+
+def test_device_connectivity_checks_camera_body_wifi_and_bluetooth(monkeypatch, capsys):
+    for name in (
+        "CAMERA_1_RTSP_URL",
+        "CAMERA_2_RTSP_URL",
+        "BODY_BOARD_HOST",
+        "WIFI_DEVICE_HOST",
+        "BLUETOOTH_DEVICE_HOST",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(start_edge.os, "name", "posix")
+    monkeypatch.setattr(start_edge.shutil, "which", lambda name: "/usr/bin/ping")
+    commands = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0 if command[-1] != "192.168.4.20" else 1)
+
+    monkeypatch.setattr(start_edge.subprocess, "run", fake_run)
+
+    results = start_edge.check_device_connectivity()
+
+    assert [command[-1] for command in commands] == [
+        "192.168.4.88",
+        "192.168.4.89",
+        "192.168.4.31",
+        "192.168.4.201",
+        "192.168.4.20",
+    ]
+    assert results["192.168.4.31"] is True
+    assert results["192.168.4.20"] is False
+    output = capsys.readouterr().out
+    assert "[PING OK]" in output
+    assert "[PING FAIL]" in output
+    assert "可达 4/5" in output
+
