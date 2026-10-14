@@ -141,7 +141,7 @@
         <article class="panel body-demo-panel">
           <div class="panel-title">
             <div><p class="eyebrow">LIVE EVENT DEMO</p><h2>车身操作联调</h2></div>
-            <span class="tag live">可点击演示</span>
+            <span class="tag live" data-body-event-state>可点击联调</span>
           </div>
           <div class="body-action-grid">
             <button data-body-action="door_fl"><i>门</i><span>左前门</span><small>开 / 关</small></button>
@@ -1099,9 +1099,31 @@
     if (interfaceElement) interfaceElement.textContent = link.interface_path || "等待接口数据";
     const modeElement = root.querySelector("[data-body-mode]");
     if (modeElement) {
-      modeElement.textContent = payload.data_mode === "real" ? "真实数据" : payload.data_mode === "test" ? "测试数据" : "等待数据";
-      modeElement.classList.toggle("live", payload.data_mode === "real");
+      modeElement.textContent = payload.data_mode === "event" ? "事件触发" : payload.data_mode === "real" ? "真实数据" : payload.data_mode === "test" ? "测试数据" : "等待数据";
+      modeElement.classList.toggle("live", ["real", "event"].includes(payload.data_mode));
     }
+    const eventOverride = payload.event_override || {};
+    const eventState = root.querySelector("[data-body-event-state]");
+    if (eventState) {
+      const remainingSeconds = Math.max(0, Number(eventOverride.remaining_ms || 0) / 1000);
+      eventState.textContent = eventOverride.active ? `事件生效中 · ${remainingSeconds.toFixed(1)}s` : "可点击联调";
+      eventState.classList.toggle("event-active", eventOverride.active === true);
+    }
+    const actionStates = {
+      door_fl: bodySwitchForUi(payload.Door_FL),
+      door_fr: bodySwitchForUi(payload.Door_FR),
+      door_rl: bodySwitchForUi(payload.Door_RL),
+      door_rr: bodySwitchForUi(payload.Door_RR),
+      central_lock: String(payload.CentralLockState || "").toLowerCase() === "locked",
+      low_beam: bodySwitchForUi(payload.LowBeam),
+      high_beam: bodySwitchForUi(payload.HighBeam),
+      turn_left: bodySwitchForUi(payload.TurnLeft),
+      turn_right: bodySwitchForUi(payload.TurnRight),
+      hazard: bodySwitchForUi(payload.Hazard),
+    };
+    root.querySelectorAll("[data-body-action]").forEach((button) => {
+      button.classList.toggle("active", actionStates[button.dataset.bodyAction] === true);
+    });
     const edgeChip = root.querySelector("[data-body-edge-chip]");
     if (edgeChip) {
       const edgeOnline = onlineValues.includes(String(link.edge_status || "").toLowerCase()) && payload.connected;
@@ -1132,6 +1154,12 @@
       const active = value === true || ["open", "opened", "locked", "on"].includes(String(value).toLowerCase());
       return `${labels[key] || key}=${active ? "ON" : "OFF"}`;
     }).join(" · ") || "状态刷新";
+  }
+
+  function bodySwitchForUi(value) {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value === 1;
+    return ["1", "true", "on", "open", "opened", "active"].includes(String(value ?? "").toLowerCase());
   }
 
   function setBodyProtocol(root, name, value) {
@@ -1449,7 +1477,7 @@
         button.disabled = true;
         button.classList.add("loading");
         try {
-          const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/test`, {
+          const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/event`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action }),
@@ -1458,7 +1486,7 @@
           const data = await response.json();
           state.latestMetrics.domains = { ...(state.latestMetrics.domains || {}), body: data.body };
           updateDomains(state.latestMetrics.domains);
-          toast(`${data.label}状态已切换，CAN 报文已上传云端`);
+          toast(`${data.label}事件已生效，5 秒无新操作后恢复周期数据`);
         } catch (_) {
           toast("车身报文发送失败，请检查云端服务");
         } finally {
