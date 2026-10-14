@@ -14,14 +14,18 @@
 
 ## 电脑 A：启动云端与 Web
 
-先设置上传 Token 和网页访问口令，再启动：
+上传 Token、网页访问口令和公网地址已经在 `run_cloud.py` 的“可修改配置”区域中设置好，电脑 A 直接启动即可：
 
 ```powershell
-$env:VEHICLE_INGEST_TOKEN = "请换成长随机字符串"
-$env:DASHBOARD_ACCESS_TOKEN = "请换成另一个访问口令"
-$env:PUBLIC_DASHBOARD_URL = "http://你的cpolar地址"
 D:\Anconda\envs\TM\python.exe run_cloud.py
 ```
+
+以后配置发生变化时，直接修改 [`run_cloud.py`](run_cloud.py) 顶部的以下变量，不需要在每次启动前设置环境变量：
+
+- `PUBLIC_DASHBOARD_URL`：cpolar 映射后的公网地址；
+- `INGEST_TOKEN`：Jetson 上传数据使用的 Token，必须与 `start_edge.py` 中的 `DEFAULT_VEHICLE_INGEST_TOKEN` 一致；
+- `DASHBOARD_ACCESS_TOKEN`：管理大屏访问口令；
+- `HOST`、`PORT`：云端监听地址和端口。
 
 默认监听：
 
@@ -35,7 +39,7 @@ http://0.0.0.0:8001
 curl.exe http://127.0.0.1:8001/healthz
 ```
 
-如使用 cpolar，把 `8001` 映射到公网；Jetson 的 `CLOUD_HTTP_URL` 填电脑 A 的局域网地址或该公网地址。
+当前已使用 cpolar 将电脑 A 的 `8001` 端口映射到源码中的公网地址。映射域名变化时，同时修改 `run_cloud.py` 的 `PUBLIC_DASHBOARD_URL`，以及 `jetson_edge/start_edge.py` 的 `DEFAULT_CLOUD_HTTP_URL` 和 `DEFAULT_CLOUD_WS_URL`。
 
 - 管理大屏：`PUBLIC_DASHBOARD_URL/`
 - VHC-001 免口令只读视频：`PUBLIC_DASHBOARD_URL/public/live/VHC-001`
@@ -49,22 +53,22 @@ cd ~/Desktop/body_1/ICV_Cybersecurity_System/jetson_edge
 python3 start_edge.py
 ```
 
-Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、蓝牙、WiFi 和车身域组件。
+Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；Jetson 只需手动运行 `start_edge.py`。它会统一拉起并监管 `WiFi_Module.py`、`bluetooth_edge_agent.py`、`body_edge_agent.py`、GPS 和两路摄像头上传进程，不需要再单独启动这些子进程。
 
 `start_edge.py` 集中配置的默认云端地址为：
 
 ```text
-CLOUD_HTTP_URL=http://15151e1e.r7.nas.cpolar.cn
-CLOUD_WS_URL=ws://15151e1e.r7.nas.cpolar.cn
+CLOUD_HTTP_URL=http://3f7b7aec.r7.nas.cpolar.cn
+CLOUD_WS_URL=ws://3f7b7aec.r7.nas.cpolar.cn
 VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 ```
 
-所有子进程统一继承这些配置，不需要再修改各自源码。公网域名或 Token 变化时可以直接修改 `start_edge.py` 顶部的默认值，或在启动前通过同名环境变量临时覆盖。
+所有子进程统一继承这些源码默认值，不需要逐个修改子进程，也不需要在启动前临时设置。以后公网域名或 Token 变化时，直接修改 [`jetson_edge/start_edge.py`](jetson_edge/start_edge.py) 顶部的 `DEFAULT_CLOUD_HTTP_URL`、`DEFAULT_CLOUD_WS_URL` 和 `DEFAULT_VEHICLE_INGEST_TOKEN`。
 
 ## 当前数据链路
 
 ```text
-Jetson 摄像头 RTSP/H.265
+摄像头 1（192.168.4.88）/ 摄像头 2（192.168.4.89）RTSP/H.265
   → FFmpeg 零转码 fMP4
   → WebSocket 上传
   → 云端短缓冲
@@ -89,21 +93,21 @@ BMS 报文产生端（电脑 A 或电脑 B，连接 S32K344_WIFI）
   → S32K344 以太网 192.168.4.201
   → 网线 / UDP
   → 交换机
-  → Jetson eth0（图示地址 192.168.4.11）监听 UDP 6001
-  → WiFi_Module.py
+  → Jetson eno1（192.168.4.100）监听 UDP 6001
+  → WiFi_Module.py（由 start_edge.py 自动启动和监管）
   → HTTP POST /api/vehicles/{vehicle_id}/wifi
   → cpolar 公网映射 / 电脑 A 云端 8001
   → WiFi 充电状态、报文历史与 IDS 告警页面
 
 Ubuntu 蓝牙电脑运行 ble_s32_sender.py
   → BLE 写入 nRF52840
-  → UART 转交 S32K344（192.168.4.201）
+  → UART 转交蓝牙板（192.168.4.20）
   → 以太网 UDP 5000
   → Jetson bluetooth_edge_agent.py（由 start_edge.py 监管）
   → HTTP POST /api/vehicles/{vehicle_id}/bluetooth
   → 蓝牙正常/异常报文、延迟与控制状态页面
 
-S32K344 UDP 7100
+车身板（192.168.4.31）UDP 7100
   → Jetson body_edge_agent.py
   → HTTP/HTTPS 上传
   → 电脑 A server.py
@@ -117,7 +121,18 @@ S32K344 UDP 7100
 
 网页不再读取访问者手机定位，仅显示 Jetson 上传的 GNSS/CAN 数据。
 
-WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的无线网段，`192.168.4.x` 是 S32K344、交换机与 Jetson `eth0` 之间的有线网段。图中的 `192.168.4.11` 是示例地址，部署时应以 Jetson 实际的 `eth0` 地址为准。Jetson 收到 UDP 6001 报文后，再通过自身可访问互联网的网络接口将数据上传到云端。
+`192.168.4.x` 是板端设备、摄像头、交换机和 Jetson `eno1` 所在的固定有线网段：
+
+| 设备 | 固定地址 | 用途 |
+| --- | --- | --- |
+| Jetson `eno1` | `192.168.4.100/24` | 接收摄像头 RTSP、车身/蓝牙/WiFi UDP 数据 |
+| 车身板 | `192.168.4.31` | 车身状态 UDP 7100、控制与对时 UDP 7101 |
+| WiFi 板 | `192.168.4.201` | 向 Jetson UDP 6001 转发充电报文 |
+| 蓝牙板 | `192.168.4.20` | 向 Jetson UDP 5000 转发蓝牙报文 |
+| 摄像头 1 | `192.168.4.88` | VHC-001 RTSP 视频流 |
+| 摄像头 2 | `192.168.4.89` | VHC-002 RTSP 视频流 |
+
+WiFi 链路中的 `192.168.3.x` 仅用于 BMS 报文产生端与 ESP32 热点之间的无线连接。Jetson 收到有线侧 UDP 报文后，再通过可访问电脑 A 或互联网的网络接口上传到云端。
 
 ## 核心接口
 
@@ -170,8 +185,8 @@ python -m pip install -r requirements.txt
 | 电脑 A（后端） | `run_cloud.py` | 接收 Jetson 转发的 HTTP 报文并显示网页 |
 | 电脑 B（BMS 模拟端） | `bms_wifi_sender.py` | 连接 ESP32 热点，持续发送正常/异常充电报文 |
 | ESP32 + S32K344 | 已烧录的板端固件 | ESP32 接收 WiFi UDP；S32K344 通过以太网转发 UDP |
-| Jetson | `jetson_edge/WiFi_Module.py` | 监听板端 UDP 6001，并转发到电脑 A 后端 |
-| 交换机 | 无需运行程序 | 连接 S32K344、Jetson `eth0`；电脑 A 可选接入 |
+| Jetson | `jetson_edge/start_edge.py` | 唯一手动启动入口；自动以子进程运行 `WiFi_Module.py` 等全部边缘组件 |
+| 交换机 | 无需运行程序 | 连接板端设备、摄像头和 Jetson `eno1`；电脑 A 可选接入 |
 
 ### 推荐网络拓扑
 
@@ -180,14 +195,14 @@ python -m pip install -r requirements.txt
   → ESP32 192.168.3.1:8080
   → S32K344
   → 交换机 / 192.168.4.x
-  → Jetson eth0（例：192.168.4.100，UDP 6001）
+  → Jetson eno1（192.168.4.100，UDP 6001）
 
 Jetson WiFi（例：192.168.2.207）
   → 电脑 A WiFi（例：192.168.2.136，HTTP 8001）
   → 浏览器页面
 ```
 
-Jetson 必须同时具备两条网络：`eth0` 用于接收板子的 UDP；WiFi 用于把数据上传给电脑 A。示例 IP 只用于当前实验环境，可替换为自己的地址；关键是 Jetson 必须能访问电脑 A 的 `8001` 端口。
+Jetson 必须同时具备两条网络：`eno1` 固定为 `192.168.4.100/24`，用于接收板端 UDP 和摄像头 RTSP；另一条可联网接口用于把数据上传给电脑 A。Jetson 必须能访问电脑 A 的 `8001` 端口。
 
 ### 启动顺序
 
@@ -203,15 +218,14 @@ Jetson 必须同时具备两条网络：`eth0` 用于接收板子的 UDP；WiFi 
    New-NetFirewallRule -DisplayName "Jetson WiFi Forward 8001" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8001 -RemoteAddress 192.168.2.207
    ```
 
-2. **Jetson：启动 UDP 接收与转发。** 先确认 Jetson 可到达板端以太网 IP、以及电脑 A 的后端 IP。将 `192.168.2.136` 替换为电脑 A 当前 WiFi IP：
+2. **Jetson：启动统一边缘端。** 确认 `eno1` 已配置为 `192.168.4.100/24`，然后只运行 `start_edge.py`。映射域名、WebSocket 地址和上传 Token 已写入源码，不需要在启动命令前设置 `CLOUD_HTTP_URL` 或其他环境变量。程序会先 Ping 两路摄像头、车身板、WiFi 板和蓝牙板并打印结果，随后自动启动 `WiFi_Module.py` 等所有子进程：
 
    ```bash
-   ping -c 4 192.168.4.201
-   curl -i http://192.168.2.136:8001/healthz
-   CLOUD_HTTP_URL=http://192.168.2.136:8001 python3 jetson_edge/WiFi_Module.py
+   cd jetson_edge
+   python3 start_edge.py
    ```
 
-   正常启动后会显示 `UDP receiver started, listening on 0.0.0.0:6001`。每次成功转发会显示 `CLOUD : accepted`。
+   `start_edge.py` 会打印每个设备的 `[PING OK]` 或 `[PING FAIL]`，再显示统一启动的组件列表。WiFi 子进程日志位于 `jetson_edge/logs/wifi.log`；成功转发时该日志会记录 `CLOUD : accepted`。
 
 3. **电脑 B：启动 BMS 报文产生器。** 电脑 B 先连接 `S32K344_WIFI` 热点，再进入仓库根目录运行：
 
@@ -223,18 +237,18 @@ Jetson 必须同时具备两条网络：`eth0` 用于接收板子的 UDP；WiFi 
 
 #### 使用 cpolar 公网映射（可选）
 
-上面的局域网直连方式继续保留。若电脑 A 已将本地 `8001` 端口通过 cpolar 映射到公网，Jetson 也可以通过公网域名上传视频、GPS 和 WiFi 数据，不再要求 Jetson WiFi 与电脑 A 位于同一局域网。
+电脑 A 已将本地 `8001` 端口通过 cpolar 映射到公网；Jetson 使用 `start_edge.py` 源码中的默认域名上传视频、GPS、车身、蓝牙和 WiFi 数据，不要求 Jetson 与电脑 A 位于同一局域网。
 
 当前公网域名为：
 
 ```text
-15151e1e.r7.nas.cpolar.cn
+3f7b7aec.r7.nas.cpolar.cn
 ```
 
 公网和本地服务的对应关系为：
 
 ```text
-http://15151e1e.r7.nas.cpolar.cn
+http://3f7b7aec.r7.nas.cpolar.cn
   → cpolar
   → 电脑 A 的 http://127.0.0.1:8001
 ```
@@ -242,27 +256,21 @@ http://15151e1e.r7.nas.cpolar.cn
 Jetson 上的不同上传协议使用同一个公网域名，但 URL 协议不同：
 
 ```text
-视频及 GPS 遥测：ws://15151e1e.r7.nas.cpolar.cn
-WiFi 报文上传：http://15151e1e.r7.nas.cpolar.cn
+视频及 GPS 遥测：ws://3f7b7aec.r7.nas.cpolar.cn
+车身、蓝牙和 WiFi 报文上传：http://3f7b7aec.r7.nas.cpolar.cn
 ```
 
-`jetson_edge/start_edge.py` 已内置以上两个地址。直接运行它会同时监管 GPS、WiFi 和两路视频上传进程：
+`jetson_edge/start_edge.py` 已内置以上两个地址。直接运行它会同时监管车身、蓝牙、WiFi、GPS 和两路视频上传进程：
 
 ```bash
 cd jetson_edge
 python3 start_edge.py
 ```
 
-启动前可在 Jetson 上检查公网入口：
-
-```bash
-curl -i http://15151e1e.r7.nas.cpolar.cn/healthz
-```
-
-公网方式下，Jetson 的 WiFi 只需要能够访问互联网；Jetson `eth0` 与 S32K344 仍需保持在可互通的 `192.168.4.x` 网络中。公网映射只替代“Jetson WiFi → 电脑 A TCP 8001”这一段，不改变“S32K344 → Jetson UDP 6001”链路。
+公网方式下，Jetson 的联网接口只需要能够访问互联网；Jetson `eno1` 仍固定为 `192.168.4.100/24`，并与板端设备、摄像头保持在可互通的 `192.168.4.x` 网络中。公网映射只替代“Jetson → 电脑 A TCP 8001”这一段，不改变板端到 Jetson 的 UDP 链路。
 
 ### 排查顺序
 
-1. Jetson 窗口没有报文：检查 S32K344 到 Jetson 的以太网连接与 `192.168.4.x` 地址。
+1. Jetson 窗口没有报文：先查看 `start_edge.py` 启动时的 Ping 结果，再检查 `eno1=192.168.4.100/24` 和对应板端地址。
 2. Jetson 显示 `Cloud forwarding failed`：先在 Jetson 执行 `curl -i http://电脑A_IP:8001/healthz`，再检查电脑 A 后端和防火墙。
 3. Jetson 显示 `CLOUD : accepted`、页面仍无变化：刷新电脑 A 的网页，确认浏览器打开的是本机 `8001` 服务。

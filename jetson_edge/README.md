@@ -27,17 +27,18 @@
 
 ## 默认设备配置
 
-| 车辆 | 摄像头地址 |
-|---|---|
-| VHC-001 | `rtsp://192.168.4.88:8554/main` |
-| VHC-002 | `rtsp://192.168.4.89:8554/main` |
+| 设备 | 固定地址 | 端口/用途 |
+|---|---|---|
+| Jetson `eno1` | `192.168.4.100/24` | 板端和摄像头有线网络 |
+| 车身板 | `192.168.4.31` | UDP 7100；控制/对时 UDP 7101 |
+| WiFi 板 | `192.168.4.201` | 向 Jetson UDP 6001 转发报文 |
+| 蓝牙板 | `192.168.4.20` | 向 Jetson UDP 5000 转发报文 |
+| 摄像头 1 / VHC-001 | `192.168.4.88` | `rtsp://192.168.4.88:8554/main` |
+| 摄像头 2 / VHC-002 | `192.168.4.89` | `rtsp://192.168.4.89:8554/main` |
 
 GPS 默认使用 `/dev/ttyTHS1`，波特率 `38400`。两路摄像头共享同一块 Jetson 的 GPS 数据。
 
-车身域默认要求 Jetson 的有线网口为 `192.168.4.100/24`、S32K344 为
-`192.168.4.31/24`，状态报文使用 UDP 7100，控制和对时使用 UDP 7101。
-`start_edge.py` 会自动扫描 `eth0`、`eno1` 等所有网口；如需限定接口，可设置
-`BODY_NETWORK_INTERFACE=eno1`。
+Jetson 的有线网口 `eno1` 固定为 `192.168.4.100/24`。`start_edge.py` 启动时会先 Ping 上表中的两路摄像头、车身板、WiFi 板和蓝牙板，并逐项打印 `[PING OK]` 或 `[PING FAIL]`。设备暂时不可达不会阻止其他组件启动。可设置 `BODY_NETWORK_INTERFACE=eno1` 明确限定车身域网口。
 
 ## 安装和运行
 
@@ -47,33 +48,36 @@ python3 -m pip install --user -r requirements_jetson.txt
 python3 start_edge.py
 ```
 
+Jetson 只需手动运行上述 `start_edge.py`。它会自动以子进程启动并监管 `WiFi_Module.py`、`bluetooth_edge_agent.py`、`body_edge_agent.py`、`navigation_gps.py` 和两路摄像头上传进程；不要再分别启动这些脚本。
+
 后台运行：
 
 ```bash
 nohup python3 start_edge.py > edge_supervisor.log 2>&1 &
 ```
 
-日志保存在 `logs/`。正常停止统一进程时，GPS、两个上传进程和 FFmpeg 子进程会一起退出。
+日志保存在 `logs/`。正常停止统一进程时，车身、蓝牙、WiFi、GPS、两个摄像头上传进程和 FFmpeg 子进程会一起退出。
 
-## 可选环境变量
+## 源码默认配置与修改位置
 
-```bash
-export CAMERA_1_RTSP_URL='rtsp://192.168.4.88:8554/main'
-export CAMERA_2_RTSP_URL='rtsp://192.168.4.89:8554/main'
-export GPS_DEVICE='/dev/ttyTHS1'
-export GPS_BAUD='38400'
-python3 start_edge.py
-```
-
-云端地址统一在 `start_edge.py` 中配置，当前默认值为：
+正常启动不需要设置任何环境变量，直接运行 `python3 start_edge.py`。云端地址和上传 Token 统一在 `start_edge.py` 顶部配置，当前源码默认值为：
 
 ```text
-CLOUD_HTTP_URL=http://15151e1e.r7.nas.cpolar.cn
-CLOUD_WS_URL=ws://15151e1e.r7.nas.cpolar.cn
+CLOUD_HTTP_URL=http://3f7b7aec.r7.nas.cpolar.cn
+CLOUD_WS_URL=ws://3f7b7aec.r7.nas.cpolar.cn
 VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 ```
 
-车身、蓝牙、WiFi、GPS 和摄像头子进程都会继承这些变量。需要临时切换服务器或 Token 时仍可在启动前设置同名环境变量；如果只覆盖 HTTP 地址，程序会自动推导 WS/WSS 地址。
+车身、蓝牙、WiFi、GPS 和摄像头子进程都会继承这些源码值。以后 cpolar 域名或 Token 变化时，直接修改 `start_edge.py` 顶部的 `DEFAULT_CLOUD_HTTP_URL`、`DEFAULT_CLOUD_WS_URL` 和 `DEFAULT_VEHICLE_INGEST_TOKEN`；不要在每次启动前临时设置。
+
+板端与摄像头地址的源码默认值位于 `start_edge.py` 的 `device_ping_targets()` 和 `build_components()`：
+
+- `CAMERA_1_RTSP_URL` 默认指向 `rtsp://192.168.4.88:8554/main`；
+- `CAMERA_2_RTSP_URL` 默认指向 `rtsp://192.168.4.89:8554/main`；
+- `BODY_BOARD_HOST` 默认为 `192.168.4.31`；
+- `WIFI_DEVICE_HOST` 默认为 `192.168.4.201`；
+- `BLUETOOTH_DEVICE_HOST` 默认为 `192.168.4.20`；
+- GPS 默认设备和波特率分别为 `/dev/ttyTHS1`、`38400`。
 
 蓝牙域默认监听 `0.0.0.0:5000`，车辆默认为 `VHC-001`。可通过
 `BLUETOOTH_UDP_HOST`、`BLUETOOTH_UDP_PORT` 和 `BLUETOOTH_VEHICLE_ID`
