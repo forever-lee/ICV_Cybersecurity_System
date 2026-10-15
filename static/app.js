@@ -1604,24 +1604,40 @@
 
   function renderBodyTransmissionControl(body) {
     const control = body?.transmission_control || {};
-    const desiredState = control.desired_state
-      || (body?.transmission_enabled === false ? "stopped" : "running");
-    const pending = control.status === "pending";
+    const actualState = typeof body?.transmission_enabled === "boolean"
+      ? body.transmission_enabled ? "running" : "stopped"
+      : "unknown";
+    const desiredState = control.desired_state || actualState;
+    const pending = ["queued", "delivering"].includes(control.status);
     const root = document.querySelector('[data-domain-page="body"]');
     const status = document.querySelector("[data-body-transmission-state]");
     const startButton = document.querySelector('[data-body-transmission="start"]');
     const stopButton = document.querySelector('[data-body-transmission="stop"]');
     if (status) {
-      status.textContent = pending
-        ? desiredState === "running" ? "启动命令待下发" : "停止命令待下发"
-        : desiredState === "running" ? "板端发送中" : "板端已停止";
+      if (control.status === "queued") {
+        status.textContent = desiredState === "running" ? "启动命令待Jetson下发" : "停止命令待Jetson下发";
+      } else if (control.status === "delivering") {
+        status.textContent = "命令已下发，等待K3确认";
+      } else if (["error", "expired"].includes(control.status)) {
+        status.textContent = control.error || "K3执行失败";
+      } else {
+        status.textContent = actualState === "running"
+          ? "板端发送中"
+          : actualState === "stopped" ? "板端已停止" : "等待K3状态";
+      }
       status.classList.toggle("pending", pending);
-      status.classList.toggle("running", !pending && desiredState === "running");
-      status.classList.toggle("stopped", !pending && desiredState === "stopped");
+      status.classList.toggle("running", !pending && actualState === "running");
+      status.classList.toggle("stopped", !pending && actualState === "stopped");
     }
-    if (startButton) startButton.classList.toggle("active", desiredState === "running");
-    if (stopButton) stopButton.classList.toggle("active", desiredState === "stopped");
-    if (root) root.classList.toggle("is-transmission-stopped", desiredState === "stopped");
+    if (startButton) {
+      startButton.classList.toggle("active", actualState === "running");
+      startButton.disabled = pending;
+    }
+    if (stopButton) {
+      stopButton.classList.toggle("active", actualState === "stopped");
+      stopButton.disabled = pending;
+    }
+    if (root) root.classList.toggle("is-transmission-stopped", actualState === "stopped");
   }
 
   function setupBodyTransmissionControls() {
@@ -1640,13 +1656,8 @@
             },
           );
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const data = await response.json();
-          state.latestMetrics.domains = {
-            ...(state.latestMetrics.domains || {}),
-            body: data.body,
-          };
-          updateDomains(state.latestMetrics.domains);
-          toast(action === "start" ? "启动命令已提交，等待板端执行" : "停止命令已提交，等待板端执行");
+          await response.json();
+          toast(action === "start" ? "启动命令已提交，等待K3确认" : "停止命令已提交，等待K3确认");
         } catch (_) {
           toast("板端发送控制失败，请检查云端与串口转发程序");
         } finally {

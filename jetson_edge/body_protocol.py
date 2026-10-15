@@ -11,10 +11,12 @@ import time
 PACKET_SIZE = 16
 TIMESTAMPED_PACKET_SIZE = 25
 CONTROL_ACK_PACKET_SIZE = 32
+TRANSMISSION_ACK_PACKET_SIZE = 40
 PACKET_MAGIC = bytes((0xA5, 0x5A))
 COMMAND_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x02))
 TIME_SYNC_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x03))
 BODY_EVENT_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x04))
+TRANSMISSION_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x05))
 COMMAND_START = 0x01
 COMMAND_STOP = 0x00
 
@@ -41,6 +43,19 @@ CONTROL_ACK_RESULTS = {
     2: "duplicate",
     3: "rejected",
     4: "restored",
+}
+
+TRANSMISSION_ACK_RESULTS = {
+    0: "none",
+    1: "applied",
+    2: "duplicate",
+    3: "error",
+}
+
+TRANSMISSION_ACK_ERRORS = {
+    0: "none",
+    1: "sequence_action_conflict",
+    2: "invalid_command",
 }
 
 
@@ -148,6 +163,23 @@ def build_serial_command(action):
     return bytes(packet)
 
 
+def build_transmission_command(sequence, action):
+    if action not in {"start", "stop"}:
+        raise ValueError("action must be start or stop")
+    sequence = int(sequence)
+    if not 0 < sequence <= 0xFFFFFFFF:
+        raise ValueError("sequence must be between 1 and 4294967295")
+    packet = bytearray(TRANSMISSION_PACKET_MAGIC)
+    packet.extend(sequence.to_bytes(4, byteorder="little", signed=False))
+    packet.append(COMMAND_START if action == "start" else COMMAND_STOP)
+    packet.extend((0, 0))
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
 def build_time_sync_packet(epoch_ms=None):
     if epoch_ms is None:
         epoch_ms = now_ms()
@@ -187,10 +219,15 @@ def initial_state():
 
 
 def decode_serial_packet(packet):
-    if len(packet) not in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE):
+    supported_sizes = (
+        PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE,
+    )
+    if len(packet) not in supported_sizes:
         raise ValueError(
-            "expected {}, {} or {} bytes, got {}".format(
-                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE, len(packet)
+            "expected {}, {}, {} or {} bytes, got {}".format(
+                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
+                TRANSMISSION_ACK_PACKET_SIZE, len(packet)
             )
         )
     if packet[:2] != PACKET_MAGIC:
@@ -211,8 +248,15 @@ def decode_serial_packet(packet):
         )
 
     board_sent_at_ms = None
-    if len(packet) in (TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE):
-        checksum_index = 24 if len(packet) == TIMESTAMPED_PACKET_SIZE else 31
+    if len(packet) in (
+        TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE,
+    ):
+        checksum_index = {
+            TIMESTAMPED_PACKET_SIZE: 24,
+            CONTROL_ACK_PACKET_SIZE: 31,
+            TRANSMISSION_ACK_PACKET_SIZE: 39,
+        }[len(packet)]
         extended_checksum = 0
         for value in packet[:checksum_index]:
             extended_checksum ^= value
@@ -253,7 +297,7 @@ def decode_serial_packet(packet):
         "transmissionEnabled": bool(packet[14] & 0x01),
         "boardSentAtMs": board_sent_at_ms,
     }
-    if len(packet) == CONTROL_ACK_PACKET_SIZE:
+    if len(packet) in (CONTROL_ACK_PACKET_SIZE, TRANSMISSION_ACK_PACKET_SIZE):
         ack_sequence = int.from_bytes(packet[24:28], byteorder="little")
         ack_signal_id = packet[28]
         ack_target = bool(packet[29])
@@ -269,6 +313,20 @@ def decode_serial_packet(packet):
             "target": ack_target,
             "result_code": ack_result_code,
             "result": CONTROL_ACK_RESULTS.get(ack_result_code, "unknown"),
+        }
+    if len(packet) == TRANSMISSION_ACK_PACKET_SIZE:
+        tx_sequence = int.from_bytes(packet[32:36], byteorder="little")
+        tx_action_code = packet[36]
+        tx_result_code = packet[37]
+        tx_error_code = packet[38]
+        decoded["transmissionAck"] = {
+            "sequence": tx_sequence,
+            "action": "start" if tx_action_code == COMMAND_START else "stop",
+            "action_code": tx_action_code,
+            "result_code": tx_result_code,
+            "result": TRANSMISSION_ACK_RESULTS.get(tx_result_code, "unknown"),
+            "error_code": tx_error_code,
+            "error": TRANSMISSION_ACK_ERRORS.get(tx_error_code, "unknown"),
         }
     return decoded
 
@@ -376,4 +434,6 @@ def ethernet_payload(decoded, board_address, udp_received_at_ms=None):
     payload["raw_frame"] = body_can_frame_metadata(decoded)
     if decoded.get("controlAck"):
         payload["control_ack"] = dict(decoded["controlAck"])
+    if decoded.get("transmissionAck"):
+        payload["transmission_ack"] = dict(decoded["transmissionAck"])
     return payload

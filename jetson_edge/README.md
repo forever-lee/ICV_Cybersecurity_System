@@ -81,6 +81,7 @@ VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 - `CAMERA_1_RTSP_URL` 默认指向 `rtsp://192.168.4.88:8554/main`；
 - `CAMERA_2_RTSP_URL` 默认指向 `rtsp://192.168.4.89:8554/main`；
 - `BODY_BOARD_HOST` 默认为 `192.168.4.31`；
+- 启动/停止发送采用 K3 真实确认闭环：默认每 `2` 秒重发一次、最多 `3` 次、`10` 秒超时。可用 `BODY_CONTROL_RETRY_INTERVAL`、`BODY_CONTROL_MAX_ATTEMPTS`、`BODY_CONTROL_TIMEOUT` 覆盖；
 - `WIFI_DEVICE_HOST` 默认为 `192.168.4.201`；
 - `BLUETOOTH_DEVICE_HOST` 默认为 `192.168.4.20`；
 - GPS 默认设备和波特率分别为 `/dev/ttyTHS1`、`38400`。
