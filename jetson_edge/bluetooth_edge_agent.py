@@ -13,6 +13,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+try:
+    from .bluetooth_control_protocol import make_command, parse_ack
+    from .bluetooth_time_sync import ClockSynchronizer, parse_response, parse_timed_telemetry
+except ImportError:  # Direct execution from jetson_edge/.
+    from bluetooth_control_protocol import make_command, parse_ack
+    from bluetooth_time_sync import ClockSynchronizer, parse_response, parse_timed_telemetry
+
 
 DEDUP_WINDOW_SECONDS = 10.0
 S32_SOURCE_TIME_PATTERN = re.compile(r"(?:^|;)TS=(\d{13})(?=;|$)")
@@ -48,6 +55,9 @@ def clean_text(value):
 def canonical_telemetry_text(text):
     """Accept only complete S32K344 telemetry, not bridge diagnostics or hex dumps."""
     text = clean_text(text)
+    timed = parse_timed_telemetry(text)
+    if timed is not None:
+        return timed["text"]
     compact = S32_COMPACT_TIME_PATTERN.fullmatch(text)
     if compact:
         text = compact.group(1)
@@ -63,8 +73,14 @@ def canonical_telemetry_text(text):
     return None
 
 
-def is_recent_duplicate(cache, source, text, timestamp):
-    key = (source, canonical_telemetry_text(text))
+def is_recent_duplicate(cache, source, text, timestamp, sender_sequence=None,
+                        source_tick_us=None):
+    # A HELLO label can repeat after a sender restart.  Retry detection must
+    # use the identity of the timed frame, not only its display text.
+    identity = ((sender_sequence, source_tick_us)
+                if sender_sequence is not None and source_tick_us is not None
+                else canonical_telemetry_text(text))
+    key = (source, identity)
     previous = cache.get(key)
     cache[key] = timestamp
     if len(cache) > 512:
@@ -88,26 +104,144 @@ def decode_datagram(data, address, source_prefix="S32K344-ETH"):
 
     if isinstance(envelope, dict):
         text = clean_text(envelope.get("text", envelope.get("data", "")))
-        if not canonical_telemetry_text(text):
+        base = canonical_telemetry_text(text)
+        if not base:
             return []
-        payload = dict(envelope)
-        payload["text"] = text
-        payload.setdefault("source", source)
-        payload.setdefault("byte_count", len(text.encode("utf-8")))
+        payload = {key: value for key, value in envelope.items() if key not in {
+            "udp_received_at_ms", "sync_rtt_ms",
+            "clock_offset_ms", "latency_quality", "sender_sequence",
+            "source_tick_us", "sync_id", "source", "hex",
+        }}
+        payload["text"] = base
+        timed = parse_timed_telemetry(text)
+        if timed:
+            payload.update({key: timed[key] for key in
+                            ("sender_sequence", "source_tick_us", "sync_id")})
+        payload["source"] = source
+        payload["byte_count"] = len(base.encode("utf-8"))
         return [payload]
 
     payloads = []
     for frame in decoded.replace("\r", "\n").split("#"):
         for line in frame.splitlines():
             text = clean_text(line)
-            if not canonical_telemetry_text(text):
+            base = canonical_telemetry_text(text)
+            if not base:
                 continue
-            payloads.append({
-                "text": text,
+            payload = {
+                "text": base,
                 "source": source,
-                "byte_count": len(text.encode("utf-8")),
-            })
+                "byte_count": len(base.encode("utf-8")),
+            }
+            timed = parse_timed_telemetry(text)
+            if timed:
+                payload.update({key: timed[key] for key in
+                                ("sender_sequence", "source_tick_us", "sync_id")})
+            payloads.append(payload)
     return payloads
+
+
+def decode_ack_datagram(data, address, device_host):
+    """Accept only a complete, CRC-valid K344 ACK from the configured board."""
+    if address[0] != device_host or not data.startswith(b"BTACK|"):
+        raise ValueError("ACK source or type is invalid")
+    frame = data.decode("ascii")
+    # The existing K344 UART gateway strips '#' before forwarding a frame.
+    if not frame.endswith("#"):
+        frame += "#"
+    return parse_ack(frame), frame
+
+
+def decode_sync_datagram(data, address, device_host):
+    if address[0] != device_host or not data.startswith(b"BTSYNC|"):
+        raise ValueError("sync source or type is invalid")
+    frame = data.decode("ascii")
+    if not frame.endswith("#"):
+        frame += "#"
+    return parse_response(frame)
+
+
+class SyncWorker(threading.Thread):
+    """Send periodic hardware time probes without stopping while BLE TX is off."""
+
+    def __init__(self, udp_socket, destination, synchronizer, stop_event, interval_seconds):
+        super().__init__(name="bluetooth-clock-sync", daemon=True)
+        self.udp_socket = udp_socket
+        self.destination = destination
+        self.synchronizer = synchronizer
+        self.stop_event = stop_event
+        self.interval_seconds = interval_seconds
+
+    def run(self):
+        while not self.stop_event.is_set():
+            t1_ms = time.time_ns() // 1000000
+            t1_mono_ms = time.monotonic_ns() / 1000000
+            frame = self.synchronizer.begin(t1_ms, t1_mono_ms)
+            try:
+                self.udp_socket.sendto(frame.encode("ascii"), self.destination)
+                print("[蓝牙对时请求已下发] {}".format(self.destination[0]), flush=True)
+            except OSError as exc:
+                self.synchronizer.cancel()
+                if not self.stop_event.is_set():
+                    print("[蓝牙对时 UDP 下发失败] {}".format(exc), flush=True)
+            self.stop_event.wait(self.interval_seconds)
+
+
+class CloudClockMonitor(threading.Thread):
+    """Estimate cloud minus Jetson clock offset without blocking telemetry upload."""
+
+    def __init__(self, cloud_url, stop_event, timeout_seconds, interval_seconds=10):
+        super().__init__(name="bluetooth-cloud-clock", daemon=True)
+        self.url = cloud_url.rstrip("/") + "/healthz"
+        self.stop_event = stop_event
+        self.timeout_seconds = timeout_seconds
+        self.interval_seconds = interval_seconds
+        self.lock = threading.Lock()
+        self.samples = []
+
+    def accept(self, cloud_ms, start_epoch_ms, end_epoch_ms,
+               start_mono_ms, end_mono_ms):
+        rtt_ms = end_mono_ms - start_mono_ms
+        if (not isinstance(cloud_ms, (int, float)) or isinstance(cloud_ms, bool) or
+                not 0 <= rtt_ms <= 100 or
+                abs((end_epoch_ms - start_epoch_ms) - rtt_ms) > 50):
+            return False
+        sample = {"offset_ms": cloud_ms - (start_epoch_ms + end_epoch_ms) / 2,
+                  "rtt_ms": rtt_ms, "sampled_mono_ms": end_mono_ms}
+        with self.lock:
+            self.samples = [item for item in self.samples
+                            if end_mono_ms - item["sampled_mono_ms"] <= 30000]
+            self.samples.append(sample)
+            self.samples = self.samples[-8:]
+        return True
+
+    def latest(self, received_mono_ms):
+        with self.lock:
+            candidates = [item for item in self.samples
+                          if 0 <= received_mono_ms - item["sampled_mono_ms"] <= 30000]
+            if not candidates:
+                return None
+            sample = min(candidates, key=lambda item: item["rtt_ms"])
+            return {"cloud_clock_offset_ms": round(sample["offset_ms"], 2),
+                    "cloud_clock_rtt_ms": round(sample["rtt_ms"], 2),
+                    "cloud_clock_age_ms": round(
+                        received_mono_ms - sample["sampled_mono_ms"], 2)}
+
+    def run(self):
+        while not self.stop_event.is_set():
+            start_epoch_ms = time.time_ns() / 1000000
+            start_mono_ms = time.monotonic_ns() / 1000000
+            try:
+                with urlopen(self.url, timeout=self.timeout_seconds) as response:
+                    cloud_ms = json.load(response).get("time_ms")
+                end_epoch_ms = time.time_ns() / 1000000
+                end_mono_ms = time.monotonic_ns() / 1000000
+                self.accept(cloud_ms, start_epoch_ms, end_epoch_ms,
+                            start_mono_ms, end_mono_ms)
+            except (HTTPError, URLError, OSError, ValueError, AttributeError, TypeError):
+                # Clock calibration is optional; never interrupt packet forwarding.
+                pass
+            self.stop_event.wait(self.interval_seconds)
 
 
 class CloudUploader(threading.Thread):
@@ -158,6 +292,133 @@ class CloudUploader(threading.Thread):
             self.pending.task_done()
 
 
+class ControlWorker(threading.Thread):
+    """Poll cloud and wait for the laptop's real BLE ACK before final success."""
+
+    RETRY_DELAYS = (0.5, 1.0, 2.0, 2.0, 2.0)
+
+    def __init__(self, endpoint, token, udp_socket, device_host, control_port,
+                 received_acks, stop_event, poll_seconds, timeout_seconds,
+                 http_timeout_seconds):
+        super().__init__(name="bluetooth-control", daemon=True)
+        self.endpoint = endpoint
+        self.token = token
+        self.udp_socket = udp_socket
+        self.destination = (device_host, control_port)
+        self.received_acks = received_acks
+        self.stop_event = stop_event
+        self.poll_seconds = poll_seconds
+        self.timeout_seconds = timeout_seconds
+        self.http_timeout_seconds = http_timeout_seconds
+
+    def request(self, method, suffix, payload=None):
+        body = None if payload is None else json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        request = Request(
+            self.endpoint + suffix,
+            data=body,
+            headers={"Authorization": "Bearer {}".format(self.token),
+                     "Content-Type": "application/json; charset=utf-8"},
+            method=method,
+        )
+        with urlopen(request, timeout=self.http_timeout_seconds) as response:
+            return json.load(response)
+
+    def run(self):
+        current = None
+        final_payload = None
+        while not self.stop_event.is_set():
+            try:
+                cloud = self.request("GET", "/next")
+                command = cloud.get("command")
+            except (HTTPError, URLError, OSError, ValueError) as exc:
+                print("[蓝牙控制云端暂不可用] {}".format(exc), flush=True)
+                self.stop_event.wait(self.poll_seconds)
+                continue
+
+            if final_payload is not None:
+                try:
+                    self.request("POST", "/ack", final_payload)
+                    final_payload = None
+                    current = None
+                except HTTPError as exc:
+                    if exc.code == 409:
+                        final_payload = None
+                        current = None
+                    else:
+                        print("[蓝牙控制结果待重传] HTTP {}".format(exc.code), flush=True)
+                except (URLError, OSError, ValueError) as exc:
+                    print("[蓝牙控制结果待重传] {}".format(exc), flush=True)
+                self.stop_event.wait(self.poll_seconds)
+                continue
+
+            if not isinstance(command, dict):
+                current = None
+                self.stop_event.wait(self.poll_seconds)
+                continue
+
+            identity = (command.get("id"), command.get("nonce"))
+            if current is None or current["identity"] != identity:
+                try:
+                    frame = make_command(
+                        command["id"], command["command"],
+                        command["created_at_ms"], command["nonce"]
+                    ).encode("ascii")
+                except (KeyError, TypeError, ValueError) as exc:
+                    print("[蓝牙控制命令无效] {}".format(exc), flush=True)
+                    self.stop_event.wait(self.poll_seconds)
+                    continue
+                current = {"identity": identity, "action": command["command"],
+                           "frame": frame, "started": time.monotonic(),
+                           "next_send": 0.0, "attempt": 0}
+
+            while True:
+                try:
+                    ack, raw_frame, device_ack_ms = self.received_acks.get_nowait()
+                except queue.Empty:
+                    break
+                if (ack["id"], ack["nonce"]) != current["identity"]:
+                    continue
+                if ack["status"] == "applied" and ack["state"] != current["action"]:
+                    continue
+                final_payload = {
+                    "id": ack["id"], "nonce": ack["nonce"],
+                    "status": ack["status"], "device_ack": raw_frame,
+                    "device_ack_at_ms": device_ack_ms,
+                    "message": "发送端确认" if ack["status"] == "applied" else "发送端拒绝",
+                }
+                break
+            if final_payload is not None:
+                continue
+
+            now = time.monotonic()
+            if now - current["started"] >= self.timeout_seconds:
+                final_payload = {"id": current["identity"][0],
+                                 "nonce": current["identity"][1],
+                                 "status": "expired",
+                                 "message": "未收到发送电脑的 BLE ACK"}
+                continue
+            if now >= current["next_send"]:
+                try:
+                    self.udp_socket.sendto(current["frame"], self.destination)
+                    if current["attempt"] == 0:
+                        try:
+                            self.request("POST", "/ack", {
+                                "id": current["identity"][0],
+                                "nonce": current["identity"][1],
+                                "status": "delivering",
+                            })
+                        except (HTTPError, URLError, OSError, ValueError):
+                            pass
+                except OSError as exc:
+                    print("[蓝牙控制 UDP 下发失败] {}".format(exc), flush=True)
+                delay = self.RETRY_DELAYS[min(current["attempt"], len(self.RETRY_DELAYS) - 1)]
+                current["attempt"] += 1
+                current["next_send"] = now + delay
+            self.stop_event.wait(self.poll_seconds)
+
+
 def main():
     cloud_url = required_environment("CLOUD_HTTP_URL").rstrip("/")
     vehicle_id = required_environment("VEHICLE_ID")
@@ -167,6 +428,20 @@ def main():
     queue_size = integer_environment("BLUETOOTH_QUEUE_SIZE", 1000, 1, 100000)
     timeout_seconds = float(os.getenv("BLUETOOTH_HTTP_TIMEOUT_SECONDS", "5"))
     source_prefix = os.getenv("BLUETOOTH_SOURCE_PREFIX", "S32K344-ETH").strip() or "S32K344-ETH"
+    device_host = os.getenv("BLUETOOTH_DEVICE_HOST", "192.168.4.20").strip()
+    control_port = integer_environment("BLUETOOTH_CONTROL_PORT", 5001)
+    poll_seconds = max(0.1, float(os.getenv("BLUETOOTH_CONTROL_POLL_SECONDS", "0.5")))
+    control_timeout_seconds = max(1.0, float(
+        os.getenv("BLUETOOTH_CONTROL_TIMEOUT_SECONDS", "10")
+    ))
+    sync_interval_seconds = max(1.0, float(os.getenv("BLUETOOTH_TIME_SYNC_INTERVAL_SECONDS", "5")))
+    synchronizer = ClockSynchronizer(
+        max_age_seconds=max(1.0, float(os.getenv("BLUETOOTH_TIME_SYNC_MAX_AGE_SECONDS", "30"))),
+        max_rtt_ms=max(1.0, float(os.getenv("BLUETOOTH_TIME_SYNC_MAX_RTT_MS", "500"))),
+        request_timeout_seconds=min(sync_interval_seconds, max(0.1, float(
+            os.getenv("BLUETOOTH_TIME_SYNC_REQUEST_TIMEOUT_SECONDS", "2")))),
+        max_offset_jump_ms=max(1.0, float(os.getenv("BLUETOOTH_TIME_SYNC_MAX_OFFSET_JUMP_MS", "100"))),
+    )
     endpoint = "{}/api/vehicles/{}/bluetooth".format(cloud_url, quote(vehicle_id, safe=""))
 
     stop_event = threading.Event()
@@ -186,6 +461,18 @@ def main():
     udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     udp_socket.bind((udp_host, udp_port))
     udp_socket.settimeout(1.0)
+    received_acks = queue.Queue(maxsize=32)
+    control = ControlWorker(
+        endpoint + "/control", token, udp_socket, device_host, control_port,
+        received_acks, stop_event, poll_seconds, control_timeout_seconds,
+        timeout_seconds,
+    )
+    control.start()
+    sync_worker = SyncWorker(udp_socket, (device_host, control_port), synchronizer,
+                             stop_event, sync_interval_seconds)
+    sync_worker.start()
+    cloud_clock = CloudClockMonitor(cloud_url, stop_event, timeout_seconds)
+    cloud_clock.start()
     print(
         "蓝牙边缘代理已启动：UDP {}:{} -> {}，车辆 {}".format(
             udp_host, udp_port, cloud_url, vehicle_id
@@ -196,15 +483,61 @@ def main():
         while not stop_event.is_set():
             try:
                 data, address = udp_socket.recvfrom(65535)
+                received_epoch_ms = time.time_ns() // 1000000
+                received_mono_ms = time.monotonic_ns() / 1000000
             except socket.timeout:
                 continue
             except OSError:
                 if stop_event.is_set():
                     break
                 raise
-            for payload in decode_datagram(data, address, source_prefix):
+            if data.startswith(b"BTACK|"):
+                try:
+                    ack, frame = decode_ack_datagram(data, address, device_host)
+                    received_acks.put_nowait((ack, frame, int(time.time() * 1000)))
+                except (UnicodeError, ValueError, queue.Full):
+                    print("[蓝牙控制 ACK 已拒绝] 格式或校验错误", flush=True)
+                continue
+            if data.startswith(b"BTSYNC|"):
+                try:
+                    response = decode_sync_datagram(data, address, device_host)
+                    sample, reason = synchronizer.accept_detailed(
+                        response, received_epoch_ms, received_mono_ms)
+                    if sample is not None:
+                        print("[蓝牙对时成功] sync_id={} RTT={:.2f} ms".format(
+                            sample["sync_id"], sample["rtt_ms"]), flush=True)
+                    else:
+                        print("[蓝牙对时响应未采用] {}".format(reason), flush=True)
+                except (UnicodeError, ValueError) as exc:
+                    print("[蓝牙对时响应已拒绝] {}；{} 字节：{}".format(
+                        exc, len(data), data[:160].decode("ascii", "backslashreplace")), flush=True)
+                continue
+            payloads = decode_datagram(data, address, source_prefix)
+            if not payloads and address[0] == device_host and data.startswith(b"S32K344_"):
+                print("[蓝牙报文已拒绝] 格式或 CRC 错误；{} 字节：{}".format(
+                    len(data), data[:120].decode("ascii", "backslashreplace")), flush=True)
+            for payload in payloads:
+                if (address[0] == device_host and "source_tick_us" in payload and
+                        "sync_id" in payload):
+                    mapping = synchronizer.map_tick(
+                        payload["source_tick_us"], payload["sync_id"],
+                        received_epoch_ms, received_mono_ms)
+                    if mapping is not None:
+                        payload.update(mapping)
+                        cloud_mapping = cloud_clock.latest(received_mono_ms)
+                        if cloud_mapping is not None:
+                            payload.update(cloud_mapping)
+                        print("[蓝牙报文已对时] SEQ={} 报文ID={} 映射ID={} 至Jetson={:.1f} ms".format(
+                            payload.get("sender_sequence"), payload["sync_id"],
+                            mapping["mapping_sync_id"],
+                            received_epoch_ms - mapping["source_time_ms"]), flush=True)
+                    else:
+                        print("[蓝牙报文未对时] SEQ={} 报文ID={} TICK_US={}".format(
+                            payload.get("sender_sequence"), payload["sync_id"],
+                            payload["source_tick_us"]), flush=True)
                 if is_recent_duplicate(
-                    recent_frames, payload["source"], payload["text"], time.monotonic()
+                    recent_frames, payload["source"], payload["text"], time.monotonic(),
+                    payload.get("sender_sequence"), payload.get("source_tick_us")
                 ):
                     continue
                 try:
@@ -220,6 +553,9 @@ def main():
     finally:
         stop_event.set()
         udp_socket.close()
+        control.join(timeout=timeout_seconds + 2)
+        sync_worker.join(timeout=2)
+        cloud_clock.join(timeout=2)
         uploader.join(timeout=timeout_seconds + 2)
     return 0
 

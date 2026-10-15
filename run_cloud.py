@@ -20,6 +20,9 @@ DASHBOARD_ACCESS_TOKEN = "view_GJEhQFY45cXFdZ2NA2MVex8m"
 # 超过多少秒没有收到车端数据，判定车辆离线。
 OFFLINE_AFTER_SECONDS = 20
 
+# 蓝牙网页启停必须经 Jetson/K344/BLE 硬件链路取得发送端 ACK。
+BLUETOOTH_CONTROL_MODE = "hardware"
+
 # 透传模式以实时性为主，只保留约 4 个 1 秒片段；落后超过窗口时
 # 直接回到最新关键帧，避免运行越久延迟越高。可用环境变量覆盖。
 FMP4_BUFFER_SEGMENTS = int(os.getenv("FMP4_BUFFER_SEGMENTS", "4"))
@@ -37,6 +40,7 @@ AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "")
 os.environ["VEHICLE_INGEST_TOKEN"] = INGEST_TOKEN
 os.environ["DASHBOARD_ACCESS_TOKEN"] = DASHBOARD_ACCESS_TOKEN
 os.environ["OFFLINE_AFTER_SECONDS"] = str(OFFLINE_AFTER_SECONDS)
+os.environ["BLUETOOTH_CONTROL_MODE"] = BLUETOOTH_CONTROL_MODE
 os.environ["FMP4_BUFFER_SEGMENTS"] = str(FMP4_BUFFER_SEGMENTS)
 os.environ["AMAP_JS_KEY"] = AMAP_JS_KEY
 os.environ["AMAP_SECURITY_JS_CODE"] = AMAP_SECURITY_JS_CODE

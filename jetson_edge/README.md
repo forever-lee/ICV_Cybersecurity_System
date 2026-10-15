@@ -17,6 +17,8 @@
 - `body_protocol.py`：车身域二进制协议编解码。
 - `WiFi_Module.py`：WiFi 充电遥测接收和云端转发。
 - `bluetooth_edge_agent.py`：监听 S32K344 的 UDP 5000 报文，校验、去重并可靠上传云端。
+- `bluetooth_control_protocol.py`：蓝牙网页启停帧与 ACK 的 CRC 协议。
+- `bluetooth_time_sync.py`：蓝牙四时间戳对时协议和短时单调时钟映射。
 - `run_vehicle_jetson.py`：单路摄像头环境检查与参数组装。
 - `h264_vehicle_agent.py`：RTSP/fMP4 采流上传实现（同时支持 H.264/H.265）。
 - `stream_protocol.py`：边缘端与云端二进制协议。
@@ -86,6 +88,27 @@ VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 蓝牙域默认监听 `0.0.0.0:5000`，车辆默认为 `VHC-001`。可通过
 `BLUETOOTH_UDP_HOST`、`BLUETOOTH_UDP_PORT` 和 `BLUETOOTH_VEHICLE_ID`
 覆盖。日志位于 `logs/bluetooth.log`。
+
+蓝牙网页启停由云端保存命令；Jetson 蓝牙代理轮询后通过 UDP 5001 下发至
+`192.168.4.20`，并在 UDP 5000 等待发送笔记本沿 BLE Write、K344 回传的
+`BTACK`。只有真实设备 ACK 经 Jetson 上传云端，网页才显示执行成功。
+`sendto()` 成功不等于执行成功。其他域仍由 `start_edge.py` 正常监管。
+
+蓝牙对时也使用 UDP 5001 下行、UDP 5000 上行，但独立于网页启停命令；
+即使业务发送处于 OFF，也每 5 秒下发 `BTSYNC`。`logs/bluetooth.log` 出现
+`[蓝牙对时成功]` 后，带匹配 `SYNC_ID` 的业务报文才能换算成发送电脑的发送
+时间。RTT 最大 500 ms，映射最多保留 30 秒；不满足条件时云端不显示延迟。
+当前对时使用不超过 40 字节的 CRC 校验紧凑帧，降低 BLE 分包导致的往返耗时；
+旧版帧仍能解析。更换此版本时，发送电脑的 `ble_s32_sender.py` 也要同步更新并
+重启；已支持 `BTSYNC|` 透传的 K344 固件无需仅为紧凑帧重新烧录。
+Jetson 蓝牙代理会独立使用云端 `/healthz` 测量两机时钟偏差，避免系统时钟
+有小幅偏差时把“至 Jetson”误认为“端到端”；校时失败只影响端到端显示，
+不阻断报文转发。两台主机仍应保持各自的 NTP 同步。可选环境变量：
+`BLUETOOTH_TIME_SYNC_INTERVAL_SECONDS`、`BLUETOOTH_TIME_SYNC_MAX_AGE_SECONDS`、
+`BLUETOOTH_TIME_SYNC_MAX_RTT_MS`、`BLUETOOTH_TIME_SYNC_REQUEST_TIMEOUT_SECONDS`、
+`BLUETOOTH_TIME_SYNC_MAX_OFFSET_JUMP_MS`。复制代码到 Ubuntu 时，务必同时更新
+`bluetooth_edge_agent.py`、`bluetooth_time_sync.py` 和 `start_edge.py`，再重启
+统一边缘进程；S32K344 也须烧录支持 `BTSYNC` 转发的新固件。
 
 设置 `BODY_ENABLED=0`、`BLUETOOTH_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
 `CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。

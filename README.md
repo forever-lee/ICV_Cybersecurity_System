@@ -1,6 +1,6 @@
 # V-SHIELD 云端服务
 
-电脑 A 运行云端服务和 Web 页面；Ubuntu 蓝牙电脑运行 `ble_s32_sender.py`；Jetson 统一运行视频、导航、蓝牙、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
+电脑 A 同时运行云端服务、Web 页面和 `ble_s32_sender.py`；Jetson 统一运行视频、导航、蓝牙、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
 
 ## 云端文件
 
@@ -99,7 +99,7 @@ BMS 报文产生端（电脑 A 或电脑 B，连接 S32K344_WIFI）
   → cpolar 公网映射 / 电脑 A 云端 8001
   → WiFi 充电状态、报文历史与 IDS 告警页面
 
-Ubuntu 蓝牙电脑运行 ble_s32_sender.py
+电脑 A 的笔记本运行 bluetooth_gateway/ble_s32_sender.py
   → BLE 写入 nRF52840
   → UART 转交蓝牙板（192.168.4.20）
   → 以太网 UDP 5000
@@ -107,9 +107,12 @@ Ubuntu 蓝牙电脑运行 ble_s32_sender.py
   → HTTP POST /api/vehicles/{vehicle_id}/bluetooth
   → 蓝牙正常/异常报文页面
 
-Ubuntu 蓝牙电脑只配置 BLE 地址，不配置云端地址或上传 Token，也不与云端
-直接通信。蓝牙页面暂时保留端到端延迟和发送启停位置，当前统一显示“待接入”；
-两个启停按钮保持禁用，不会向后端创建控制命令。
+蓝牙网页启停命令经云端 → Jetson → UDP 5001 → S32K344 → UART → nRF52840
+→ BLE Notify 到发送进程；执行后 ACK 沿 BLE Write → UDP 5000 → Jetson
+返回云端。发送进程不直接访问云端。也可在 CMD 输入 `on`/`off` 仅控制本机；
+该本机操作不充当网页命令 ACK。蓝牙端到端延迟须在四时间戳硬件同步成功后
+才显示估算值；否则仍显示“待时间同步”。详见
+[`bluetooth_gateway/README.md`](bluetooth_gateway/README.md)。
 
 车身板（192.168.4.31）UDP 7100
   → Jetson body_edge_agent.py
@@ -158,10 +161,9 @@ WiFi 链路中的 `192.168.3.x` 仅用于 BMS 报文产生端与 ESP32 热点之
 - `WS /ws/public/live-fmp4/VHC-001`：VHC-001 公开只读视频入口。
 - `WS /ws/metrics/{vehicle_id}`：网页指标入口。
 - `POST /api/vehicles/{vehicle_id}/bluetooth`：BLE 遥测接收接口。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/timing`：预留接口，当前发送端不调用。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/control`：预留接口，当前网页不调用。
-- `GET /api/vehicles/{vehicle_id}/bluetooth/control/next`：预留控制接口，当前发送端不轮询。
-- `POST /api/vehicles/{vehicle_id}/bluetooth/control/ack`：预留确认接口，当前发送端不调用。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/timing`：已停用，发送端不通过 HTTP 直传时间。
+- `POST /api/vehicles/{vehicle_id}/bluetooth/control`：网页提交蓝牙发送启停命令。
+- `/api/vehicles/{vehicle_id}/bluetooth/control/{next,ack}`：Jetson 轮询硬件命令并上报发送端真实 ACK。
 - `POST /api/vehicles/{vehicle_id}/wifi`：WiFi 遥测接收接口。
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
 - `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。

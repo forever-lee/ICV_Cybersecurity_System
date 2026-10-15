@@ -1256,29 +1256,82 @@
     updateBluetoothAbnormal(bluetooth);
     updateWirelessTotal(bluetooth, state.latestMetrics.wifi || {});
     if (!latest) {
-      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "待接入";
+      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "待时间同步";
       $("bluetoothHistory").innerHTML = '<div class="history-empty">等待蓝牙模块发送数据…</div>'; return;
     }
     $("bluetoothText").textContent = latest.text || "（空报文）";
     $("bluetoothHex").textContent = latest.hex || "—";
     $("bluetoothRssi").textContent = latest.rssi == null ? "—" : `${latest.rssi} dBm`;
     $("bluetoothTime").textContent = formatFrameTime(latest.received_at_ms);
-    $("bluetoothLatency").textContent = "待接入";
+    const latency = Number(latest.latency_ms);
+    const synced = latest.latency_quality === "synced" && latest.latency_ms != null && Number.isFinite(latency);
+    const edgeLatency = Number(latest.source_to_jetson_ms);
+    const edgeTimed = latest.latency_quality === "invalid_time" &&
+      latest.source_to_jetson_ms != null && Number.isFinite(edgeLatency);
+    $("bluetoothLatency").textContent = synced
+      ? `${latency.toFixed(1)} ms（端到端）`
+      : edgeTimed ? `${edgeLatency.toFixed(1)} ms（至 Jetson）` : "待时间同步";
+    $("bluetoothLatency").title = synced
+      ? `发送电脑写入 BLE 前 → 云端接收（估算）；蓝牙对时往返 ${Number(latest.sync_rtt_ms).toFixed(1)} ms，Jetson/云端校时往返 ${Number(latest.cloud_clock_rtt_ms).toFixed(1)} ms`
+      : edgeTimed
+        ? latest.latency_reason === "awaiting_cloud_clock"
+          ? "发送电脑 → Jetson 已完成硬件对时；正在测量 Jetson 与云端的时钟偏差"
+          : "发送电脑 → Jetson 已完成硬件对时；云端校时结果或上传耗时异常，暂不能报告端到端延迟"
+        : "等待硬件往返对时；请检查 Jetson、S32K344、nRF52840 与发送电脑的同步链路";
     $("bluetoothHistory").innerHTML = renderHistory(bluetooth.history, "BLE-UDP", "等待蓝牙模块发送数据…");
   }
 
-  function updateBluetoothControl(_control) {
+  function updateBluetoothControl(control) {
     const label = $("bluetoothControlStatus");
     const onButton = $("bluetoothOnButton");
     const offButton = $("bluetoothOffButton");
     if (!label || !onButton || !offButton) return;
-    label.className = "offline";
-    label.textContent = "启停功能待接入";
-    label.title = "等待 Jetson、K3、nRF52840 与 BLE 的完整控制闭环";
-    onButton.classList.remove("active");
-    offButton.classList.remove("active");
+    const online = control.agent_status === "online";
+    const localSender = control.mode === "local_sender";
+    const pending = Boolean(control.pending);
+    const result = control.last_ack || {};
+    const status = control.status || "idle";
+    label.className = pending ? "pending" : status === "error" || status === "expired" ? "error" : online ? "online" : "offline";
+    if (pending) label.textContent = localSender ? "等待笔记本 CMD 执行命令" :
+      status === "delivering" ? "命令传输中，等待设备确认" : "命令排队中";
+      else if (localSender && !online) label.textContent = "笔记本发送程序已离线";
+      else if (status === "applied") label.textContent = `${localSender ? "笔记本发送进程已" : "设备已确认"}${control.state === "on" ? "打开发送" : "关闭发送"}`;
+    else if (status === "expired") label.textContent = localSender ? "命令超时，笔记本发送程序未确认" : "命令超时，未收到设备确认";
+    else if (status === "error") label.textContent = localSender ? "笔记本控制失败" : "设备拒绝或控制失败";
+    else if (localSender && online) label.textContent = `笔记本发送程序在线（${control.state === "on" ? "发送中" : control.state === "off" ? "已暂停" : "状态待确认"}${control.ble_connected ? "，BLE 已连接" : "，BLE 未连接"}）`;
+    else label.textContent = online ? "边缘端在线，可发送命令" : localSender ? "等待笔记本发送程序连接" : "等待边缘端连接";
+    label.title = result.message || label.textContent;
+    // state is the last device-confirmed state, never the newly requested state.
+    onButton.classList.toggle("active", control.state === "on");
+    offButton.classList.toggle("active", control.state === "off");
+    onButton.disabled = !online || pending;
+    offButton.disabled = !online || pending;
+      onButton.title = online ? "让笔记本恢复发送蓝牙业务报文" : label.textContent;
+      offButton.title = online ? "让笔记本暂停发送蓝牙业务报文" : label.textContent;
+  }
+
+  async function sendBluetoothControl(command) {
+    const control = state.latestMetrics.bluetooth?.control || {};
+    if (control.agent_status !== "online" || control.pending) return;
+    const onButton = $("bluetoothOnButton");
+    const offButton = $("bluetoothOffButton");
     onButton.disabled = true;
     offButton.disabled = true;
+    try {
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/bluetooth/control`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      const bluetooth = state.latestMetrics.bluetooth || {};
+      state.latestMetrics.bluetooth = { ...bluetooth, control: data.control };
+      updateBluetoothControl(data.control);
+      toast(control.mode === "local_sender" ? "命令已提交，等待笔记本 CMD 执行" : "蓝牙命令已提交，等待设备确认");
+    } catch (_) {
+      updateBluetoothControl(control);
+      toast("蓝牙命令提交失败，请检查云端连接");
+    }
   }
 
   function updateBluetoothAbnormal(bluetooth) {
@@ -1292,7 +1345,7 @@
     panel.classList.toggle("active", count > 0);
     history.innerHTML = records.map((record) => `
       <div class="abnormal-row">
-        <div class="abnormal-meta"><b>#${escapeHtml(record.sequence)} · ${escapeHtml(formatFrameTime(record.received_at_ms))}</b>${escapeHtml(record.abnormal_reason || "设备上报异常")} · ${escapeHtml(record.source || "BLE-UDP")}</div>
+        <div class="abnormal-meta"><b>#${escapeHtml(record.sequence)} · ${escapeHtml(formatFrameTime(record.received_at_ms))}</b>${record.sender_sequence == null ? "" : `发送 SEQ ${escapeHtml(record.sender_sequence)} · `}${escapeHtml(record.abnormal_reason || "设备上报异常")} · ${escapeHtml(record.source || "BLE-UDP")}</div>
         <code title="${escapeHtml(record.text || "")}">${escapeHtml(record.text || "（空报文）")}</code>
         <div class="abnormal-hex" title="${escapeHtml(record.hex || "")}"><span>HEX</span>${escapeHtml(record.hex || "—")}</div>
       </div>`).join("") || '<div class="abnormal-empty">尚未检测到异常报文</div>';
@@ -1435,9 +1488,9 @@
       const anomaly = record.ids_verdict === "anomaly";
       return `
       <div class="history-row ${record.test ? "test" : ""} ${anomaly ? "anomaly" : ""}">
-        <span>#${escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
+        <span title="云端接收编号；正常与异常报文共用此编号">#${escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
         <span class="history-source">${escapeHtml(record.source || source)}</span>
-        <code title="${escapeHtml(record.hex || "")}">${anomaly ? '<b class="history-alert-badge">异常</b>' : ""}${escapeHtml(record.text || "（空报文）")}</code>
+        <code title="${escapeHtml(record.hex || "")}">${record.sender_sequence == null ? "" : `<b title="发送端报文序号">SEQ ${escapeHtml(record.sender_sequence)} · </b>`}${anomaly ? '<b class="history-alert-badge">异常</b>' : ""}${escapeHtml(record.text || "（空报文）")}</code>
         <span class="history-size">${escapeHtml(record.byte_count || 0)} B</span>
       </div>`;
     }).join("") || `<div class="history-empty">${emptyText}</div>`;
@@ -1640,6 +1693,8 @@
   const wifiTestButton = $("wifiTestButton");
   if (bluetoothTestButton) bluetoothTestButton.addEventListener("click", () => createTestData("bluetooth"));
   if (bluetoothAnomalyTestButton) bluetoothAnomalyTestButton.addEventListener("click", () => createTestData("bluetooth", true));
+  $("bluetoothOnButton")?.addEventListener("click", () => sendBluetoothControl("on"));
+  $("bluetoothOffButton")?.addEventListener("click", () => sendBluetoothControl("off"));
   if (wifiTestButton) wifiTestButton.addEventListener("click", () => createTestData("wifi"));
 
   const wifiClearButton = $("wifiClearButton");

@@ -5,6 +5,7 @@ import asyncio
 import base64
 import binascii
 import importlib.util
+import ipaddress
 import json
 import logging
 import math
@@ -35,6 +36,7 @@ from stream_protocol import (
     unpack_frame,
 )
 from wifi_ids import detect_wifi_intrusion, parse_charging_packet
+from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -48,6 +50,10 @@ BLUETOOTH_OFFLINE_AFTER_SECONDS = float(os.getenv("BLUETOOTH_OFFLINE_AFTER_SECON
 BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS = float(
     os.getenv("BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS", "5")
 )
+BLUETOOTH_CONTROL_EXPIRY_SECONDS = max(10.0, float(
+    os.getenv("BLUETOOTH_CONTROL_EXPIRY_SECONDS", "15")
+))
+BLUETOOTH_CONTROL_MODE = os.getenv("BLUETOOTH_CONTROL_MODE", "hardware").strip().lower()
 MAX_BLUETOOTH_TEXT_BYTES = int(os.getenv("MAX_BLUETOOTH_TEXT_BYTES", "2048"))
 WIFI_OFFLINE_AFTER_SECONDS = float(os.getenv("WIFI_OFFLINE_AFTER_SECONDS", "10"))
 MAX_WIFI_TEXT_BYTES = int(os.getenv("MAX_WIFI_TEXT_BYTES", "4096"))
@@ -196,12 +202,15 @@ class VehicleState:
         self.bluetooth_abnormal_history = deque(maxlen=60)
         self.bluetooth_abnormal_fingerprints = set()
         self.bluetooth_abnormal_fingerprint_order = deque()
-        self.bluetooth_send_times = {}
         self.bluetooth_control_sequence = 0
         self.bluetooth_control_last_seen_ms = 0
         self.bluetooth_control_state = "unknown"
         self.bluetooth_control_pending = None
         self.bluetooth_control_last_ack = None
+        self.bluetooth_control_mode = BLUETOOTH_CONTROL_MODE
+        self.bluetooth_local_session = None
+        self.bluetooth_local_revision = -1
+        self.bluetooth_local_ble_connected = False
         self.wifi_sequence = 0
         self.wifi_last_seen_ms = 0
         self.wifi_latest = None
@@ -309,6 +318,7 @@ class VehicleState:
         }
 
     def bluetooth_control_snapshot(self):
+        self.expire_bluetooth_control()
         agent_online = bool(
             self.bluetooth_control_last_seen_ms
             and now_ms() - self.bluetooth_control_last_seen_ms
@@ -316,14 +326,31 @@ class VehicleState:
         )
         pending = self.bluetooth_control_pending
         return {
+            "mode": self.bluetooth_control_mode,
             "agent_status": "online" if agent_online else "offline",
             "last_seen_ms": self.bluetooth_control_last_seen_ms,
             "state": self.bluetooth_control_state,
+            "status": pending.get("status") if pending else (
+                self.bluetooth_control_last_ack.get("status")
+                if self.bluetooth_control_last_ack else "idle"
+            ),
             "pending": bool(pending),
             "pending_command": pending.get("command") if pending else None,
             "pending_id": pending.get("id") if pending else None,
+            "expires_at_ms": pending.get("expires_at_ms") if pending else None,
             "last_ack": self.bluetooth_control_last_ack,
+            "ble_connected": self.bluetooth_local_ble_connected if self.bluetooth_control_mode == "local_sender" else None,
         }
+
+    def expire_bluetooth_control(self):
+        pending = self.bluetooth_control_pending
+        if pending and now_ms() >= pending["expires_at_ms"]:
+            self.bluetooth_control_last_ack = {
+                "id": pending["id"], "command": pending["command"],
+                "status": "expired", "message": "未收到发送端确认",
+                "acknowledged_at_ms": now_ms(),
+            }
+            self.bluetooth_control_pending = None
 
     def wifi_snapshot(self):
         online = bool(
@@ -410,6 +437,16 @@ def bearer_token(headers):
 
 def token_matches(actual, expected):
     return bool(actual and expected and secrets.compare_digest(str(actual), str(expected)))
+
+
+def require_local_bluetooth_sender(request):
+    """The sender and cloud run on one laptop; never expose this IPC over LAN."""
+    try:
+        address = ipaddress.ip_address(request.client.host)
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(status_code=403, detail="local sender only")
+    if not address.is_loopback:
+        raise HTTPException(status_code=403, detail="local sender only")
 
 
 def comparison_algorithm_candidates():
@@ -942,6 +979,7 @@ async def security_headers(request: Request, call_next):
     bluetooth_control_poll = (
         request.method == "GET" and request.url.path.endswith("/bluetooth/control/next")
     )
+    bluetooth_local_ipc = "/bluetooth/local/" in request.url.path and request.method in {"GET", "POST"}
     wifi_ingest = request.method == "POST" and request.url.path.endswith("/wifi")
     navigation_ingest = request.method == "POST" and request.url.path.endswith("/navigation")
     if (
@@ -950,6 +988,7 @@ async def security_headers(request: Request, call_next):
         and not domain_ingest
         and not bluetooth_ingest
         and not bluetooth_control_poll
+        and not bluetooth_local_ipc
         and not wifi_ingest
         and not navigation_ingest
     ):
@@ -1371,40 +1410,93 @@ def record_bluetooth_packet(state, payload, is_test=False):
     rssi = bluetooth_number(payload.get("rssi"), -127, 20)
     if rssi is None:
         rssi = bluetooth_text_number(text, ("RSSI",), -127, 20)
-    latency_ms = bluetooth_number(
-        payload.get("latency_ms", payload.get("delay_ms")), 0, 600000
-    )
-    if latency_ms is None:
-        latency_ms = bluetooth_text_number(text, ("LATENCY", "DELAY"), 0, 600000)
     source_time_ms = bluetooth_number(
         payload.get("source_time_ms", embedded_source_time_ms), 1, 9999999999999
     )
     source_tick_ms = bluetooth_number(
         payload.get("source_tick_ms", embedded_source_tick_ms), 0, (1 << 18) - 1
     )
-    clock_unsynced = False
-    registered_send_time_ms = state.bluetooth_send_times.pop(text, None)
-    if latency_ms is None and registered_send_time_ms is not None:
-        delta_ms = state.bluetooth_last_seen_ms - registered_send_time_ms
-        if delta_ms >= 0:
-            latency_ms = delta_ms
-    if latency_ms is None and source_time_ms is not None:
-        delta_ms = state.bluetooth_last_seen_ms - source_time_ms
-        if delta_ms >= -100:
-            latency_ms = max(0, delta_ms)
+    udp_received_at_ms = bluetooth_number(payload.get("udp_received_at_ms"), 1, 9999999999999)
+    sync_rtt_ms = bluetooth_number(payload.get("sync_rtt_ms"), 0, 500)
+    clock_offset_ms = bluetooth_number(payload.get("clock_offset_ms"), -1e15, 1e15)
+    sync_id = bluetooth_number(payload.get("sync_id"), 1, (1 << 32) - 1)
+    sender_sequence = bluetooth_number(payload.get("sender_sequence"), 0, (1 << 32) - 1)
+    source_tick_us = bluetooth_number(payload.get("source_tick_us"), 1, (1 << 64) - 1)
+    cloud_clock_offset_ms = bluetooth_number(
+        payload.get("cloud_clock_offset_ms"), -1000000, 1000000
+    )
+    cloud_clock_rtt_ms = bluetooth_number(payload.get("cloud_clock_rtt_ms"), 0, 100)
+    cloud_clock_age_ms = bluetooth_number(payload.get("cloud_clock_age_ms"), 0, 30000)
+    clock_unsynced = True
+    latency_ms = None
+    latency_quality = "awaiting_sync"
+    latency_reason = "awaiting_sync"
+    is_synthetic = bool(is_test or payload.get("test"))
+    mapped = (
+        not is_synthetic and source.startswith("S32K344-ETH@") and
+        payload.get("latency_quality") == "synced" and
+        all(value is not None for value in (
+            source_time_ms, udp_received_at_ms, sync_rtt_ms, clock_offset_ms,
+            sync_id, sender_sequence, source_tick_us
+        ))
+    )
+    if mapped:
+        source_to_jetson_ms = udp_received_at_ms - source_time_ms
+        cloud_clock_valid = all(value is not None for value in (
+            cloud_clock_offset_ms, cloud_clock_rtt_ms, cloud_clock_age_ms
+        ))
+        # Both sender timestamps are in Jetson's clock domain. Convert them to
+        # the cloud clock domain using a fresh, independent /healthz probe.
+        jetson_to_cloud_ms = (
+            state.bluetooth_last_seen_ms - udp_received_at_ms - cloud_clock_offset_ms
+            if cloud_clock_valid else None
+        )
+        elapsed_ms = (
+            state.bluetooth_last_seen_ms - source_time_ms - cloud_clock_offset_ms
+            if cloud_clock_valid else None
+        )
+        if (0 <= source_to_jetson_ms <= 60000 and
+                cloud_clock_valid and 0 <= jetson_to_cloud_ms <= 60000 and
+                0 <= elapsed_ms <= 60000):
+            latency_ms = round(elapsed_ms, 2)
+            latency_quality = "synced"
+            latency_reason = None
+            clock_unsynced = False
         else:
-            clock_unsynced = True
-    if latency_ms is None and source_tick_ms is not None:
-        latency_ms = (
-            (state.bluetooth_last_seen_ms & ((1 << 18) - 1)) - int(source_tick_ms)
-        ) & ((1 << 18) - 1)
+            latency_quality = "invalid_time"
+            latency_reason = (
+                "awaiting_cloud_clock" if not cloud_clock_valid
+                else "cloud_clock_skew_or_upload_delay"
+                if 0 <= source_to_jetson_ms <= 60000
+                else "edge_clock_mapping_invalid"
+            )
+    else:
+        source_to_jetson_ms = None
+        jetson_to_cloud_ms = None
 
     record = {
         "sequence": state.bluetooth_sequence,
         "received_at_ms": state.bluetooth_last_seen_ms,
         "source_time_ms": source_time_ms,
         "source_tick_ms": source_tick_ms,
+        # Frame identity is valid even when the clock mapping is unavailable.
+        "source_tick_us": source_tick_us,
+        "sender_sequence": sender_sequence,
+        "sync_id": sync_id,
+        "sync_rtt_ms": sync_rtt_ms if mapped else None,
+        "clock_offset_ms": clock_offset_ms if mapped else None,
+        "cloud_clock_offset_ms": cloud_clock_offset_ms if mapped else None,
+        "cloud_clock_rtt_ms": cloud_clock_rtt_ms if mapped else None,
+        "cloud_clock_age_ms": cloud_clock_age_ms if mapped else None,
+        "udp_received_at_ms": udp_received_at_ms if mapped else None,
+        "source_to_jetson_ms": (
+            round(source_to_jetson_ms, 2)
+            if mapped and 0 <= source_to_jetson_ms <= 60000 else None
+        ),
+        "jetson_to_cloud_ms": round(jetson_to_cloud_ms, 2) if latency_ms is not None else None,
         "latency_ms": latency_ms,
+        "latency_quality": latency_quality,
+        "latency_reason": latency_reason,
         "clock_unsynced": clock_unsynced,
         "source": source,
         "text": text,
@@ -1412,13 +1504,15 @@ def record_bluetooth_packet(state, payload, is_test=False):
         "byte_count": len(encoded) if timing_removed else int(payload.get("byte_count", len(encoded))),
         "rssi": rssi,
         "parsed": parsed,
-        "test": bool(is_test or payload.get("test")),
+        "test": is_synthetic,
         "abnormal": bool(abnormal_reason),
         "abnormal_reason": abnormal_reason,
         "abnormal_duplicate": False,
     }
     if abnormal_reason:
-        fingerprint = hex_text or text.strip().lower()
+        fingerprint = ((source, sender_sequence, source_tick_us)
+                       if sender_sequence is not None and source_tick_us is not None
+                       else (source, hex_text or text.strip().lower()))
         if fingerprint in state.bluetooth_abnormal_fingerprints:
             record["abnormal_duplicate"] = True
         else:
@@ -1438,27 +1532,7 @@ def record_bluetooth_packet(state, payload, is_test=False):
 
 @app.post("/api/vehicles/{vehicle_id}/bluetooth/timing")
 async def register_bluetooth_send_time(vehicle_id: str, request: Request):
-    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
-        raise HTTPException(status_code=401, detail="invalid ingest token")
-    try:
-        payload = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="invalid JSON payload")
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="timing payload must be an object")
-    text = str(payload.get("text", "")).strip().rstrip("#")
-    text, _, _, _ = normalize_s32_bluetooth_text(text)
-    if not is_valid_s32_bluetooth_text(text):
-        raise HTTPException(status_code=400, detail="invalid S32K344 frame text")
-    sent_at_ms = bluetooth_number(payload.get("sent_at_ms"), 1, 9999999999999)
-    if sent_at_ms is None or abs(now_ms() - sent_at_ms) > 600000:
-        raise HTTPException(status_code=400, detail="invalid send timestamp")
-    state = registry.get(vehicle_id)
-    state.bluetooth_send_times[text] = int(sent_at_ms)
-    cutoff = now_ms() - 30000
-    for key in [key for key, value in state.bluetooth_send_times.items() if value < cutoff]:
-        state.bluetooth_send_times.pop(key, None)
-    return {"accepted": True, "vehicle_id": state.vehicle_id, "text": text}
+    raise HTTPException(status_code=410, detail="Bluetooth timing bypass has been retired")
 
 
 @app.post("/api/vehicles/{vehicle_id}/bluetooth")
@@ -1522,13 +1596,126 @@ async def queue_bluetooth_control(vehicle_id: str, request: Request):
     if command not in {"on", "off"}:
         raise HTTPException(status_code=400, detail="command must be on or off")
     state = registry.get(vehicle_id)
+    state.expire_bluetooth_control()
+    if (state.bluetooth_control_mode == "local_sender" and
+            (not state.bluetooth_control_last_seen_ms or
+             now_ms() - state.bluetooth_control_last_seen_ms >=
+             BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS * 1000)):
+        raise HTTPException(status_code=503, detail="笔记本发送程序未连接")
+    if state.bluetooth_control_pending:
+        previous = state.bluetooth_control_pending
+        state.bluetooth_control_last_ack = {
+            "id": previous["id"], "command": previous["command"],
+            "status": "superseded", "message": "已被新命令替代",
+            "acknowledged_at_ms": now_ms(),
+        }
     state.bluetooth_control_sequence += 1
+    created_at_ms = now_ms()
     state.bluetooth_control_pending = {
         "id": state.bluetooth_control_sequence,
         "command": command,
-        "created_at_ms": now_ms(),
+        "nonce": secrets.token_hex(8).upper(),
+        "created_at_ms": created_at_ms,
+        "expires_at_ms": created_at_ms + int(BLUETOOTH_CONTROL_EXPIRY_SECONDS * 1000),
+        "status": "queued",
     }
     return {"accepted": True, "vehicle_id": state.vehicle_id, "control": state.bluetooth_control_snapshot()}
+
+
+@app.post("/api/vehicles/{vehicle_id}/bluetooth/local/status")
+async def report_local_bluetooth_status(vehicle_id: str, request: Request):
+    require_local_bluetooth_sender(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="status payload must be an object")
+    session = str(payload.get("session", ""))
+    desired = str(payload.get("state", "")).lower()
+    try:
+        revision = int(payload.get("revision"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid revision")
+    if not re.fullmatch(r"[0-9a-f]{32}", session) or desired not in {"on", "off"} or revision < 0:
+        raise HTTPException(status_code=400, detail="invalid sender status")
+    state = registry.get(vehicle_id)
+    if state.bluetooth_control_mode != "local_sender":
+        raise HTTPException(status_code=409, detail="local sender mode is disabled")
+    seen = state.bluetooth_control_last_seen_ms
+    if (state.bluetooth_local_session not in {None, session} and seen and
+            now_ms() - seen < BLUETOOTH_CONTROL_OFFLINE_AFTER_SECONDS * 1000):
+        raise HTTPException(status_code=409, detail="another local sender is active")
+    if state.bluetooth_local_session != session:
+        state.bluetooth_local_session = session
+        state.bluetooth_local_revision = -1
+    state.bluetooth_control_last_seen_ms = now_ms()
+    state.bluetooth_local_ble_connected = payload.get("ble_connected") is True
+    if revision > state.bluetooth_local_revision:
+        state.bluetooth_local_revision = revision
+        if payload.get("source") == "cmd":
+            state.bluetooth_control_state = desired
+            state.bluetooth_control_pending = None
+            state.bluetooth_control_last_ack = {
+                "id": None, "command": desired, "status": "applied",
+                "message": "笔记本 CMD 已{}发送".format("打开" if desired == "on" else "关闭"),
+                "source": "cmd", "acknowledged_at_ms": now_ms(),
+            }
+        elif not state.bluetooth_control_pending:
+            state.bluetooth_control_state = desired
+    return {"accepted": True, "control": state.bluetooth_control_snapshot()}
+
+
+@app.get("/api/vehicles/{vehicle_id}/bluetooth/local/next")
+async def next_local_bluetooth_control(vehicle_id: str, request: Request):
+    require_local_bluetooth_sender(request)
+    state = registry.get(vehicle_id)
+    if (state.bluetooth_control_mode != "local_sender" or
+            request.query_params.get("session") != state.bluetooth_local_session or
+            not state.bluetooth_local_session):
+        raise HTTPException(status_code=409, detail="local sender is not registered")
+    state.bluetooth_control_last_seen_ms = now_ms()
+    state.expire_bluetooth_control()
+    return {"vehicle_id": state.vehicle_id, "command": state.bluetooth_control_pending}
+
+
+@app.post("/api/vehicles/{vehicle_id}/bluetooth/local/ack")
+async def acknowledge_local_bluetooth_control(vehicle_id: str, request: Request):
+    require_local_bluetooth_sender(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="ack payload must be an object")
+    state = registry.get(vehicle_id)
+    if (state.bluetooth_control_mode != "local_sender" or
+            payload.get("session") != state.bluetooth_local_session or
+            not state.bluetooth_local_session):
+        raise HTTPException(status_code=409, detail="local sender is not registered")
+    state.expire_bluetooth_control()
+    pending = state.bluetooth_control_pending
+    try:
+        command_id = int(payload.get("id"))
+        revision = int(payload.get("revision"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="invalid command id or revision")
+    if (not pending or command_id != pending["id"] or
+            str(payload.get("nonce", "")).upper() != pending["nonce"] or
+            str(payload.get("state", "")).lower() != pending["command"]):
+        raise HTTPException(status_code=409, detail="command no longer matches")
+    if revision < state.bluetooth_local_revision:
+        raise HTTPException(status_code=409, detail="stale sender state")
+    state.bluetooth_local_revision = revision
+    state.bluetooth_control_last_seen_ms = now_ms()
+    state.bluetooth_control_state = pending["command"]
+    state.bluetooth_control_last_ack = {
+        "id": command_id, "command": pending["command"], "status": "applied",
+        "message": "笔记本发送进程已执行", "source": "local_sender",
+        "acknowledged_at_ms": now_ms(),
+    }
+    state.bluetooth_control_pending = None
+    return {"accepted": True, "control": state.bluetooth_control_snapshot()}
 
 
 @app.get("/api/vehicles/{vehicle_id}/bluetooth/control/next")
@@ -1536,7 +1723,10 @@ async def next_bluetooth_control(vehicle_id: str, request: Request):
     if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
         raise HTTPException(status_code=401, detail="invalid ingest token")
     state = registry.get(vehicle_id)
+    if state.bluetooth_control_mode == "local_sender":
+        return {"vehicle_id": state.vehicle_id, "server_time_ms": now_ms(), "command": None}
     state.bluetooth_control_last_seen_ms = now_ms()
+    state.expire_bluetooth_control()
     return {"vehicle_id": state.vehicle_id, "server_time_ms": now_ms(), "command": state.bluetooth_control_pending}
 
 
@@ -1551,7 +1741,10 @@ async def acknowledge_bluetooth_control(vehicle_id: str, request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="ack payload must be an object")
     state = registry.get(vehicle_id)
+    if state.bluetooth_control_mode == "local_sender":
+        raise HTTPException(status_code=409, detail="蓝牙控制由本机发送程序处理")
     state.bluetooth_control_last_seen_ms = now_ms()
+    state.expire_bluetooth_control()
     pending = state.bluetooth_control_pending
     try:
         command_id = int(payload.get("id"))
@@ -1559,15 +1752,36 @@ async def acknowledge_bluetooth_control(vehicle_id: str, request: Request):
         raise HTTPException(status_code=400, detail="invalid command id")
     if not pending or command_id != pending.get("id"):
         raise HTTPException(status_code=409, detail="command is no longer pending")
+    nonce = str(payload.get("nonce", "")).upper()
+    if nonce != pending["nonce"]:
+        raise HTTPException(status_code=409, detail="command nonce mismatch")
     status = str(payload.get("status", "error")).strip().lower()
-    if status not in {"applied", "error"}:
-        raise HTTPException(status_code=400, detail="status must be applied or error")
+    if status not in {"delivering", "applied", "error", "expired"}:
+        raise HTTPException(status_code=400, detail="invalid control status")
+    if status == "delivering":
+        pending["status"] = "delivering"
+        return {"accepted": True, "vehicle_id": state.vehicle_id,
+                "control": state.bluetooth_control_snapshot()}
+    raw_device_ack = str(payload.get("device_ack", ""))
+    device_ack = None
+    if raw_device_ack:
+        try:
+            device_ack = parse_bluetooth_device_ack(raw_device_ack)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="invalid device ACK: {}".format(exc))
+        if (device_ack["id"] != command_id or device_ack["nonce"] != nonce
+                or device_ack["status"] != status
+                or (status == "applied" and device_ack["state"] != pending["command"])):
+            raise HTTPException(status_code=409, detail="device ACK does not match pending command")
+    if status == "applied" and device_ack is None:
+        raise HTTPException(status_code=400, detail="applied requires device ACK")
     ack = {
         "id": command_id,
         "command": pending["command"],
         "status": status,
         "message": str(payload.get("message", ""))[:200],
-        "serial_port": str(payload.get("serial_port", ""))[:40],
+        "device_ack": raw_device_ack or None,
+        "device_ack_at_ms": payload.get("device_ack_at_ms") if device_ack else None,
         "acknowledged_at_ms": now_ms(),
     }
     state.bluetooth_control_last_ack = ack
