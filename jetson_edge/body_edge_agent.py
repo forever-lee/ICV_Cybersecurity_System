@@ -16,8 +16,10 @@ try:
         PACKET_SIZE,
         TIMESTAMPED_PACKET_SIZE,
         CONTROL_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE,
         build_body_event_command,
         build_serial_command,
+        build_transmission_command,
         build_time_sync_packet,
         decode_serial_packet,
         ethernet_payload,
@@ -31,8 +33,10 @@ except ImportError:
         PACKET_SIZE,
         TIMESTAMPED_PACKET_SIZE,
         CONTROL_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE,
         build_body_event_command,
         build_serial_command,
+        build_transmission_command,
         build_time_sync_packet,
         decode_serial_packet,
         ethernet_payload,
@@ -65,7 +69,7 @@ def forward_to_cloud(payload, cloud_url, vehicle_id, token):
 
 
 def poll_transmission_command(
-    cloud_url, vehicle_id, token, last_sequence, acknowledged_sequence=0,
+    cloud_url, vehicle_id, token, last_sequence, dispatched_sequence=0,
     last_event_sequence=0, dispatched_event_sequence=0
 ):
     url = "{}/api/vehicles/{}/domains/body/control".format(
@@ -74,7 +78,7 @@ def poll_transmission_command(
     body = json.dumps(
         {
             "last_sequence": int(last_sequence),
-            "acknowledged_sequence": int(acknowledged_sequence),
+            "dispatched_sequence": int(dispatched_sequence),
             "last_event_sequence": int(last_event_sequence),
             "dispatched_event_sequence": int(dispatched_event_sequence),
         },
@@ -95,7 +99,7 @@ def poll_transmission_command(
 
 
 def process_pending_command(
-    result, last_sequence, send_packet
+    result, last_sequence, send_packet, sequenced=True
 ):
     if not result.get("pending"):
         return last_sequence, 0
@@ -104,7 +108,10 @@ def process_pending_command(
     action = str(command.get("action") or "")
     if sequence <= last_sequence or action not in {"start", "stop"}:
         return last_sequence, 0
-    send_packet(build_serial_command(action))
+    send_packet(
+        build_transmission_command(sequence, action)
+        if sequenced else build_serial_command(action)
+    )
     print(
         "[{}] 已向开发板下发{}命令 SEQ={}".format(
             time.strftime("%H:%M:%S"),
@@ -112,7 +119,82 @@ def process_pending_command(
             sequence,
         )
     )
-    return sequence, sequence
+    return sequence, 0 if sequenced else sequence
+
+
+def service_transmission_command(result, runtime, send_packet, args, current_time=None):
+    """Retry one idempotent K3 command until a real board ACK or timeout."""
+    if current_time is None:
+        current_time = time.monotonic()
+    command = result.get("command") or {}
+    if not result.get("pending"):
+        with runtime["lock"]:
+            runtime["pending"] = None
+        return 0
+    sequence = int(command.get("sequence") or 0)
+    action = str(command.get("action") or "")
+    if not 0 < sequence <= 0xFFFFFFFF or action not in {"start", "stop"}:
+        raise ValueError("invalid transmission command from cloud")
+
+    with runtime["lock"]:
+        pending = runtime.get("pending")
+        if not pending or pending["sequence"] != sequence:
+            pending = {
+                "sequence": sequence,
+                "action": action,
+                "first_seen": current_time,
+                "last_sent": None,
+                "attempts": 0,
+                "confirmed": False,
+            }
+            runtime["pending"] = pending
+        elapsed = current_time - pending["first_seen"]
+        due = (
+            pending["last_sent"] is None
+            or current_time - pending["last_sent"] >= args.control_retry_interval
+        )
+        if elapsed >= args.control_timeout or pending["attempts"] >= args.control_max_attempts:
+            return 0
+        if not due:
+            return 0
+        packet = build_transmission_command(sequence, action)
+        send_packet(packet)
+        pending["last_sent"] = current_time
+        pending["attempts"] += 1
+        attempt = pending["attempts"]
+
+    print("[{}] 已向K3下发{}命令 SEQ={}（第{}/{}次）".format(
+        time.strftime("%H:%M:%S"),
+        "启动发送" if action == "start" else "停止发送",
+        sequence, attempt, args.control_max_attempts,
+    ))
+    return sequence
+
+
+def validate_transmission_ack(decoded, runtime):
+    """Accept only an ACK whose sequence/action/result matches real K3 state."""
+    ack = decoded.get("transmissionAck")
+    if not isinstance(ack, dict) or int(ack.get("sequence") or 0) <= 0:
+        return None
+    action = ack.get("action")
+    action_code = ack.get("action_code")
+    result = ack.get("result")
+    actual_enabled = bool(decoded.get("transmissionEnabled"))
+    state_matches = actual_enabled == (action == "start")
+    if action not in {"start", "stop"} or action_code not in {0, 1}:
+        return None
+    if result in {"applied", "duplicate"} and not state_matches:
+        return None
+    if result not in {"applied", "duplicate", "error"}:
+        return None
+
+    with runtime["lock"]:
+        pending = runtime.get("pending")
+        if pending and pending["sequence"] == ack["sequence"]:
+            if pending["action"] != action:
+                return None
+            pending["confirmed"] = True
+    return ack
 
 
 def process_pending_body_event(result, last_sequence, send_packet):
@@ -170,10 +252,10 @@ def run_udp_uploader(args, upload_queue):
             upload_queue.task_done()
 
 
-def run_udp_maintenance(args, udp_socket, board_control_address):
+def run_udp_maintenance(args, udp_socket, board_control_address, control_runtime):
     """Keep cloud control polling and board time sync off the receive path."""
     last_command_sequence = 0
-    acknowledged_sequence = 0
+    dispatched_sequence = 0
     next_command_poll = 0.0
     next_time_sync = 0.0
     last_event_sequence = 0
@@ -191,15 +273,19 @@ def run_udp_maintenance(args, udp_socket, board_control_address):
             try:
                 result = poll_transmission_command(
                     args.cloud, args.vehicle_id, args.token,
-                    last_command_sequence, acknowledged_sequence,
+                    last_command_sequence, dispatched_sequence,
                     last_event_sequence, dispatched_event_sequence,
                 )
-                acknowledged_sequence = 0
+                dispatched_sequence = 0
                 dispatched_event_sequence = 0
-                last_command_sequence, acknowledged_sequence = process_pending_command(
-                    result, last_command_sequence,
+                dispatched = service_transmission_command(
+                    result, control_runtime,
                     lambda packet: udp_socket.sendto(packet, board_control_address),
+                    args, current_time,
                 )
+                if dispatched:
+                    last_command_sequence = max(last_command_sequence, dispatched)
+                    dispatched_sequence = dispatched
                 last_event_sequence, dispatched_event_sequence = process_pending_body_event(
                     result, last_event_sequence,
                     lambda packet: udp_socket.sendto(packet, board_control_address),
@@ -237,6 +323,7 @@ def run_serial(args):
                             last_command_sequence, acknowledged_sequence = process_pending_command(
                                 result, last_command_sequence,
                                 lambda packet: (connection.write(packet), connection.flush()),
+                                sequenced=False,
                             )
                         except (error.URLError, OSError, ValueError) as exc:
                             print("[{}] 控制命令轮询失败：{}".format(time.strftime("%H:%M:%S"), exc))
@@ -288,6 +375,7 @@ def run_udp(args):
     udp_socket.settimeout(0.2)
     board_control_address = (args.board_host, args.control_port)
     upload_queue = queue.Queue(maxsize=UPLOAD_QUEUE_SIZE)
+    control_runtime = {"lock": threading.Lock(), "pending": None}
     threading.Thread(
         target=run_udp_uploader,
         args=(args, upload_queue),
@@ -296,7 +384,7 @@ def run_udp(args):
     ).start()
     threading.Thread(
         target=run_udp_maintenance,
-        args=(args, udp_socket, board_control_address),
+        args=(args, udp_socket, board_control_address, control_runtime),
         name="body-edge-maintenance",
         daemon=True,
     ).start()
@@ -324,8 +412,18 @@ def run_udp(args):
             continue
 
         try:
-            if len(data) in (PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE) and data[:2] == PACKET_MAGIC:
+            if len(data) in (
+                PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
+                TRANSMISSION_ACK_PACKET_SIZE,
+            ) and data[:2] == PACKET_MAGIC:
                 decoded = decode_serial_packet(data)
+                if decoded.get("transmissionAck") and not validate_transmission_ack(
+                    decoded, control_runtime
+                ):
+                    print("[{}] 已忽略不一致的K3发送控制确认".format(
+                        time.strftime("%H:%M:%S")
+                    ))
+                    decoded.pop("transmissionAck", None)
                 payload = ethernet_payload(decoded, address, received_at_ms)
                 dropped = enqueue_latest(upload_queue, (
                     payload,
@@ -364,6 +462,9 @@ def parse_args(argv=None):
     parser.add_argument("--serial-port", default=os.getenv("BODY_SERIAL_PORT", "/dev/ttyUSB0"))
     parser.add_argument("--baudrate", type=int, default=int(os.getenv("BODY_SERIAL_BAUDRATE", "115200")))
     parser.add_argument("--reconnect-delay", type=float, default=2.0)
+    parser.add_argument("--control-timeout", type=float, default=float(os.getenv("BODY_CONTROL_TIMEOUT", "10")))
+    parser.add_argument("--control-retry-interval", type=float, default=float(os.getenv("BODY_CONTROL_RETRY_INTERVAL", "2")))
+    parser.add_argument("--control-max-attempts", type=int, default=int(os.getenv("BODY_CONTROL_MAX_ATTEMPTS", "3")))
     parser.add_argument("--cloud", default=os.getenv("CLOUD_HTTP_URL", "").rstrip("/"))
     parser.add_argument("--vehicle-id", default=os.getenv("VEHICLE_ID", "VHC-001"))
     args = parser.parse_args(argv)

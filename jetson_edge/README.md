@@ -67,6 +67,8 @@ export GPS_BAUD='38400'
 python3 start_edge.py
 ```
 
+车身启动/停止发送采用 K3 真实确认闭环：默认每 `2` 秒重发一次、最多 `3` 次、`10` 秒超时。可用 `BODY_CONTROL_RETRY_INTERVAL`、`BODY_CONTROL_MAX_ATTEMPTS`、`BODY_CONTROL_TIMEOUT` 覆盖。
+
 设置 `BODY_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
 `CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。
 

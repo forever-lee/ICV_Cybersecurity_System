@@ -49,6 +49,7 @@ FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
 BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
 BODY_EVENT_HOLD_SECONDS = 5
 BODY_EVENT_TIMEOUT_MS = 8000
+BODY_CONTROL_TIMEOUT_MS = int(os.getenv("BODY_CONTROL_TIMEOUT_MS", "10000"))
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 
 logging.basicConfig(
@@ -177,14 +178,16 @@ class VehicleState:
         # idempotency key and accidentally turn a new action into a duplicate.
         self.body_event_sequence = now_ms() & 0xFFFFFFFF
         self.body_event_command = None
-        self.body_control_sequence = 0
+        self.body_control_sequence = now_ms() & 0xFFFFFFFF
         self.body_control = {
             "sequence": 0,
             "action": "start",
             "desired_state": "running",
             "status": "idle",
             "requested_at_ms": None,
-            "delivered_at_ms": None,
+            "dispatched_at_ms": None,
+            "acknowledged_at_ms": None,
+            "error": "",
         }
         self.navigation = None
 
@@ -278,6 +281,13 @@ class VehicleState:
                 command["status"] = "timeout"
                 command["completed_at_ms"] = snapshot_at_ms
                 command["error"] = "K3真实CAN回读超时"
+        control = self.body_control
+        if control.get("status") in {"queued", "delivering"}:
+            requested_at_ms = int(control.get("requested_at_ms") or 0)
+            if requested_at_ms and snapshot_at_ms - requested_at_ms >= BODY_CONTROL_TIMEOUT_MS:
+                control["status"] = "expired"
+                control["completed_at_ms"] = snapshot_at_ms
+                control["error"] = "等待K3真实状态确认超时"
         body["event_command"] = dict(command) if command else None
         alerts = list(self.body_alerts)
         if self.body_last_seen_ms and not online:
@@ -291,7 +301,7 @@ class VehicleState:
         frame_history = list(self.body_frame_history)
         body["latest_frame"] = frame_history[0] if frame_history else None
         body["frame_history"] = frame_history[:8]
-        body["transmission_control"] = dict(self.body_control)
+        body["transmission_control"] = dict(control)
         return body
 
 
@@ -581,7 +591,8 @@ def record_body_update(state, payload, is_test=False):
         body.pop(transient, None)
     state.domains["body"] = body
     state.body_last_seen_ms = received_at_ms
-    apply_body_control_ack(state, payload, body, received_at_ms)
+    apply_body_event_ack(state, payload, body, received_at_ms)
+    apply_body_transmission_ack(state, payload, body, received_at_ms)
 
     alerts = body_alerts(body, body["signal_validity"], body["signal_invalid_reasons"], received_at_ms)
     state.body_alerts.clear()
@@ -669,7 +680,7 @@ def queue_body_event_command(state, action):
     return dict(state.body_event_command)
 
 
-def apply_body_control_ack(state, payload, body, received_at_ms):
+def apply_body_event_ack(state, payload, body, received_at_ms):
     ack = payload.get("control_ack")
     command = state.body_event_command
     if not isinstance(ack, dict) or not command:
@@ -694,6 +705,40 @@ def apply_body_control_ack(state, payload, body, received_at_ms):
         command["status"] = "failed"
         command["completed_at_ms"] = received_at_ms
         command["error"] = "K3拒绝或无法识别控制命令"
+
+
+def apply_body_transmission_ack(state, payload, body, received_at_ms):
+    ack = payload.get("transmission_ack")
+    command = state.body_control
+    if not isinstance(ack, dict) or command.get("status") not in {"queued", "delivering"}:
+        return
+    try:
+        sequence = int(ack.get("sequence") or 0)
+    except (TypeError, ValueError):
+        return
+    if sequence != command.get("sequence") or ack.get("action") != command.get("action"):
+        return
+
+    result = str(ack.get("result") or "unknown")
+    if result == "error":
+        command["status"] = "error"
+        command["completed_at_ms"] = received_at_ms
+        command["error"] = "K3拒绝控制命令：{}".format(ack.get("error") or "unknown")
+        return
+    if result not in {"applied", "duplicate"}:
+        return
+
+    target_enabled = command["action"] == "start"
+    if bool(body.get("transmission_enabled")) != target_enabled:
+        command["status"] = "error"
+        command["completed_at_ms"] = received_at_ms
+        command["error"] = "K3确认状态与控制目标不一致"
+        return
+    command["status"] = "applied"
+    command["acknowledged_at_ms"] = received_at_ms
+    command["completed_at_ms"] = received_at_ms
+    command["actual_state"] = "running" if target_enabled else "stopped"
+    command["error"] = ""
 
 
 def login_page():
@@ -888,14 +933,20 @@ async def set_body_transmission(vehicle_id: str, request: Request):
     if action not in {"start", "stop"}:
         raise HTTPException(status_code=400, detail="action must be start or stop")
     state = registry.get(vehicle_id)
-    state.body_control_sequence += 1
+    state.body_control_sequence = (state.body_control_sequence + 1) & 0xFFFFFFFF
+    if state.body_control_sequence == 0:
+        state.body_control_sequence = 1
     state.body_control = {
         "sequence": state.body_control_sequence,
         "action": action,
         "desired_state": "running" if action == "start" else "stopped",
-        "status": "pending",
+        "status": "queued",
         "requested_at_ms": now_ms(),
-        "delivered_at_ms": None,
+        "dispatched_at_ms": None,
+        "acknowledged_at_ms": None,
+        "completed_at_ms": None,
+        "actual_state": None,
+        "error": "",
     }
     return {
         "accepted": True,
@@ -916,14 +967,19 @@ async def poll_body_transmission(vehicle_id: str, request: Request):
     state = registry.get(vehicle_id)
     try:
         last_sequence = max(0, int(payload.get("last_sequence", 0)))
-        acknowledged_sequence = max(0, int(payload.get("acknowledged_sequence", 0)))
+        dispatched_sequence = max(0, int(payload.get("dispatched_sequence", 0)))
         last_event_sequence = max(0, int(payload.get("last_event_sequence", 0)))
         dispatched_event_sequence = max(0, int(payload.get("dispatched_event_sequence", 0)))
     except (TypeError, ValueError):
         raise HTTPException(status_code=400, detail="command sequences must be integers")
-    if acknowledged_sequence == state.body_control["sequence"] and acknowledged_sequence > 0:
-        state.body_control["status"] = "delivered"
-        state.body_control["delivered_at_ms"] = now_ms()
+    state.body_snapshot()
+    if (
+        dispatched_sequence == state.body_control["sequence"]
+        and dispatched_sequence > 0
+        and state.body_control["status"] == "queued"
+    ):
+        state.body_control["status"] = "delivering"
+        state.body_control["dispatched_at_ms"] = now_ms()
     command = dict(state.body_control)
     event_command = state.body_event_command
     if event_command and dispatched_event_sequence == event_command["sequence"]:
@@ -933,7 +989,7 @@ async def poll_body_transmission(vehicle_id: str, request: Request):
     return {
         "accepted": True,
         "vehicle_id": state.vehicle_id,
-        "pending": command["sequence"] > last_sequence,
+        "pending": command["status"] in {"queued", "delivering"},
         "command": command,
         "event_pending": bool(
             event_command
