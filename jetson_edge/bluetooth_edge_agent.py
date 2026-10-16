@@ -429,6 +429,11 @@ def main():
     timeout_seconds = float(os.getenv("BLUETOOTH_HTTP_TIMEOUT_SECONDS", "5"))
     source_prefix = os.getenv("BLUETOOTH_SOURCE_PREFIX", "S32K344-ETH").strip() or "S32K344-ETH"
     device_host = os.getenv("BLUETOOTH_DEVICE_HOST", "192.168.4.20").strip()
+    network_interface = os.getenv("BLUETOOTH_NETWORK_INTERFACE", "eno1").strip() or "eno1"
+    jetson_address = os.getenv("BLUETOOTH_JETSON_ADDRESS", "192.168.4.100").strip()
+    diagnostic_interval = max(1.0, float(
+        os.getenv("BLUETOOTH_DIAGNOSTIC_INTERVAL_SECONDS", "5")
+    ))
     control_port = integer_environment("BLUETOOTH_CONTROL_PORT", 5001)
     poll_seconds = max(0.1, float(os.getenv("BLUETOOTH_CONTROL_POLL_SECONDS", "0.5")))
     control_timeout_seconds = max(1.0, float(
@@ -479,6 +484,22 @@ def main():
         ),
         flush=True,
     )
+    print(
+        "[BT LINK] S32K344 {} -> cable/UDP -> switch -> Jetson {} {}:{}".format(
+            device_host, network_interface, jetson_address, udp_port
+        ),
+        flush=True,
+    )
+    print(
+        "[BT CONTROL] Jetson {} {} -> UDP -> S32K344 {}:{}".format(
+            network_interface, jetson_address, device_host, control_port
+        ),
+        flush=True,
+    )
+    started_at = time.monotonic()
+    last_packet_at = None
+    next_diagnostic_at = started_at + diagnostic_interval
+    packet_count = 0
     try:
         while not stop_event.is_set():
             try:
@@ -486,11 +507,51 @@ def main():
                 received_epoch_ms = time.time_ns() // 1000000
                 received_mono_ms = time.monotonic_ns() / 1000000
             except socket.timeout:
+                current_time = time.monotonic()
+                if current_time >= next_diagnostic_at:
+                    if last_packet_at is None:
+                        print(
+                            "[BT RX WAIT] {:.0f}s内未收到UDP报文；检查 {} -> {} {}:{}".format(
+                                current_time - started_at, device_host,
+                                network_interface, jetson_address, udp_port,
+                            ),
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            "[BT RX WAIT] {:.0f}s内无新报文；累计收到 {} 个UDP报文".format(
+                                current_time - last_packet_at, packet_count
+                            ),
+                            flush=True,
+                        )
+                    next_diagnostic_at = current_time + diagnostic_interval
                 continue
             except OSError:
                 if stop_event.is_set():
                     break
                 raise
+            packet_count += 1
+            last_packet_at = time.monotonic()
+            next_diagnostic_at = last_packet_at + diagnostic_interval
+            packet_kind = (
+                "BTACK" if data.startswith(b"BTACK|") else
+                "BTSYNC" if data.startswith(b"BTSYNC|") else
+                "BTDATA" if data.startswith(b"S32K344_") else "UNKNOWN"
+            )
+            print(
+                "[BT RX OK] packet={} type={} source={}:{} bytes={} received_at={}".format(
+                    packet_count, packet_kind, address[0], address[1], len(data),
+                    time.strftime("%H:%M:%S"),
+                ),
+                flush=True,
+            )
+            if address[0] != device_host:
+                print(
+                    "[BT RX WARN] 非目标来源 {}:{}；期望 S32K344 {}".format(
+                        address[0], address[1], device_host
+                    ),
+                    flush=True,
+                )
             if data.startswith(b"BTACK|"):
                 try:
                     ack, frame = decode_ack_datagram(data, address, device_host)

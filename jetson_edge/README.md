@@ -86,6 +86,44 @@ VEHICLE_INGEST_TOKEN=vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0
 - `BLUETOOTH_DEVICE_HOST` 默认为 `192.168.4.20`；
 - GPS 默认设备和波特率分别为 `/dev/ttyTHS1`、`38400`。
 
+WiFi 子进程默认按以下链路监听数据：
+
+```text
+S32K344 192.168.4.201
+  → 网线 / UDP
+  → 交换机
+  → Jetson eno1 192.168.4.100:6001
+```
+
+`logs/wifi.log` 会输出 `[WiFi LINK]`、`[WiFi RX WAIT]`、`[WiFi RX OK]`
+和 `[WiFi RX WARN]`，用于判断 UDP 6001 是否收到报文以及来源 IP 是否为
+`192.168.4.201`。默认每 5 秒输出一次无报文提示，可通过
+`WIFI_DIAGNOSTIC_INTERVAL_SECONDS` 调整；网卡和 Jetson 地址可通过
+`WIFI_NETWORK_INTERFACE`、`WIFI_JETSON_ADDRESS` 覆盖。查看实时日志：
+
+```bash
+tail -f logs/wifi.log
+```
+
+车身域和蓝牙域也会输出同类链路诊断。`start_edge.py` 启动时直接在终端打印
+`[BODY LINK]`、`[BODY CTRL]`、`[BT LINK]`、`[BT CTRL]` 以及对应日志查看命令；
+子进程在 `logs/body.log`、`logs/bluetooth.log` 中周期输出：
+
+- `[BODY RX WAIT]`、`[BT RX WAIT]`：指定时间内没有收到 UDP 报文；
+- `[BODY RX OK]`、`[BT RX OK]`：已收到报文，并显示来源、长度、时间和累计序号；
+- `[BODY RX WARN]`、`[BT RX WARN]`：报文来源不是配置的 K3 地址。
+
+默认每 5 秒输出一次等待提示，可分别通过 `BODY_DIAGNOSTIC_INTERVAL_SECONDS`、
+`BLUETOOTH_DIAGNOSTIC_INTERVAL_SECONDS` 调整。默认链路为：
+
+```text
+车身：192.168.4.31 -> Jetson eno1 192.168.4.100:7100
+控制：Jetson eno1 192.168.4.100 -> 192.168.4.31:7101
+
+蓝牙：192.168.4.20 -> Jetson eno1 192.168.4.100:5000
+控制/对时：Jetson eno1 192.168.4.100 -> 192.168.4.20:5001
+```
+
 蓝牙域默认监听 `0.0.0.0:5000`，车辆默认为 `VHC-001`。可通过
 `BLUETOOTH_UDP_HOST`、`BLUETOOTH_UDP_PORT` 和 `BLUETOOTH_VEHICLE_ID`
 覆盖。日志位于 `logs/bluetooth.log`。

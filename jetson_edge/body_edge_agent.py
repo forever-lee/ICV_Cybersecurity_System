@@ -389,25 +389,67 @@ def run_udp(args):
         daemon=True,
     ).start()
     print("车身域 UDP 数据适配器已启动：{}:{}".format(args.host, args.port))
+    print(
+        "[BODY LINK] S32K344 {} -> cable/UDP -> switch -> Jetson {} {}:{}".format(
+            args.board_host, args.network_interface, args.jetson_address, args.port
+        )
+    )
+    print(
+        "[BODY CONTROL] Jetson {} {} -> UDP -> S32K344 {}:{}".format(
+            args.network_interface, args.jetson_address,
+            args.board_host, args.control_port,
+        )
+    )
     print("只接收开发板：{}；控制接口：{}:{}".format(
         args.board_host, args.board_host, args.control_port
     ))
     print("云端接口：{}/api/vehicles/{}/domains/body".format(args.cloud, args.vehicle_id))
+
+    started_at = time.monotonic()
+    last_packet_at = None
+    next_diagnostic_at = started_at + args.diagnostic_interval
+    packet_count = 0
 
     while True:
         try:
             data, address = udp_socket.recvfrom(8192)
             received_at_ms = now_ms()
         except socket.timeout:
+            current_time = time.monotonic()
+            if current_time >= next_diagnostic_at:
+                if last_packet_at is None:
+                    print(
+                        "[BODY RX WAIT] {}s内未收到UDP报文；检查 {} -> {} {}:{}".format(
+                            int(current_time - started_at), args.board_host,
+                            args.network_interface, args.jetson_address, args.port,
+                        )
+                    )
+                else:
+                    print(
+                        "[BODY RX WAIT] {}s内无新报文；累计收到 {} 个UDP报文".format(
+                            int(current_time - last_packet_at), packet_count
+                        )
+                    )
+                next_diagnostic_at = current_time + args.diagnostic_interval
             continue
         except OSError as exc:
             print("[{}] UDP 接收失败：{}".format(time.strftime("%H:%M:%S"), exc))
             time.sleep(1)
             continue
 
+        packet_count += 1
+        last_packet_at = time.monotonic()
+        next_diagnostic_at = last_packet_at + args.diagnostic_interval
+        print(
+            "[BODY RX OK] packet={} source={}:{} bytes={} received_at={}".format(
+                packet_count, address[0], address[1], len(data),
+                time.strftime("%H:%M:%S"),
+            )
+        )
+
         if address[0] != args.board_host:
-            print("[{}] 已忽略非目标板端数据：{}:{}".format(
-                time.strftime("%H:%M:%S"), address[0], address[1]
+            print("[BODY RX WARN] 已忽略非目标板端数据：{}:{}；期望 {}".format(
+                address[0], address[1], args.board_host
             ))
             continue
 
@@ -465,6 +507,9 @@ def parse_args(argv=None):
     parser.add_argument("--control-timeout", type=float, default=float(os.getenv("BODY_CONTROL_TIMEOUT", "10")))
     parser.add_argument("--control-retry-interval", type=float, default=float(os.getenv("BODY_CONTROL_RETRY_INTERVAL", "2")))
     parser.add_argument("--control-max-attempts", type=int, default=int(os.getenv("BODY_CONTROL_MAX_ATTEMPTS", "3")))
+    parser.add_argument("--network-interface", default=os.getenv("BODY_NETWORK_INTERFACE", "eno1"))
+    parser.add_argument("--jetson-address", default=os.getenv("BODY_JETSON_ADDRESS", "192.168.4.100"))
+    parser.add_argument("--diagnostic-interval", type=float, default=float(os.getenv("BODY_DIAGNOSTIC_INTERVAL_SECONDS", "5")))
     parser.add_argument("--cloud", default=os.getenv("CLOUD_HTTP_URL", "").rstrip("/"))
     parser.add_argument("--vehicle-id", default=os.getenv("VEHICLE_ID", "VHC-001"))
     args = parser.parse_args(argv)
@@ -473,6 +518,7 @@ def parse_args(argv=None):
         parser.error("请设置 CLOUD_HTTP_URL")
     if not args.token:
         parser.error("请设置 VEHICLE_INGEST_TOKEN")
+    args.diagnostic_interval = max(1.0, args.diagnostic_interval)
     return args
 
 

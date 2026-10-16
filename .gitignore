@@ -35,3 +35,6 @@ navigation_live.json.tmp
 # OS
 .DS_Store
 Thumbs.db
+
+#doc
+doc/

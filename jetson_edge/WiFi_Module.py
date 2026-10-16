@@ -14,6 +14,12 @@ from urllib import error, request
 # 可直接修改，也可通过同名环境变量覆盖。
 UDP_IP = os.getenv("WIFI_UDP_HOST", "0.0.0.0")
 UDP_PORT = int(os.getenv("WIFI_UDP_PORT", "6001"))
+WIFI_DEVICE_HOST = os.getenv("WIFI_DEVICE_HOST", "192.168.4.201").strip()
+WIFI_NETWORK_INTERFACE = os.getenv("WIFI_NETWORK_INTERFACE", "eno1").strip()
+WIFI_JETSON_ADDRESS = os.getenv("WIFI_JETSON_ADDRESS", "192.168.4.100").strip()
+WIFI_DIAGNOSTIC_INTERVAL_SECONDS = max(
+    1.0, float(os.getenv("WIFI_DIAGNOSTIC_INTERVAL_SECONDS", "5"))
+)
 CLOUD_HTTP_URL = os.getenv("CLOUD_HTTP_URL", "http://127.0.0.1:8001").rstrip("/")
 VEHICLE_ID = os.getenv("VEHICLE_ID", "VHC-001")
 # 必须与 run_cloud.py 中的 INGEST_TOKEN 一致。
@@ -122,9 +128,28 @@ def run_receiver(host, port):
     sock.bind((host, port))
     sock.settimeout(1.0)
     print("UDP receiver started, listening on {}:{}".format(host, port))
+    print(
+        "[WiFi LINK] S32K344 Ethernet {} -> cable/UDP -> switch -> "
+        "Jetson {} {}:{}".format(
+            WIFI_DEVICE_HOST,
+            WIFI_NETWORK_INTERFACE,
+            WIFI_JETSON_ADDRESS,
+            port,
+        )
+    )
+    print(
+        "[WiFi RX CHECK] Listening on all interfaces; expected source IP: {}".format(
+            WIFI_DEVICE_HOST
+        )
+    )
     print("Forwarding WiFi data to {} (vehicle {})".format(CLOUD_HTTP_URL, VEHICLE_ID))
     print("Latency source: Computer B packet TS (no Jetson-to-ESP32 time sync)")
     print("Waiting for data...")
+
+    started_at = time.monotonic()
+    last_packet_at = None
+    next_diagnostic_at = started_at + WIFI_DIAGNOSTIC_INTERVAL_SECONDS
+    packet_count = 0
 
     try:
         while True:
@@ -132,10 +157,51 @@ def run_receiver(host, port):
                 data, addr = sock.recvfrom(4096)
                 udp_received_at_ms = now_ms()
             except socket.timeout:
+                current_time = time.monotonic()
+                if current_time >= next_diagnostic_at:
+                    if last_packet_at is None:
+                        print(
+                            "[WiFi RX WAIT] No UDP packet received for {:.0f}s; "
+                            "check {} -> {} {}:{}".format(
+                                current_time - started_at,
+                                WIFI_DEVICE_HOST,
+                                WIFI_NETWORK_INTERFACE,
+                                WIFI_JETSON_ADDRESS,
+                                port,
+                            )
+                        )
+                    else:
+                        print(
+                            "[WiFi RX WAIT] No new UDP packet for {:.0f}s; "
+                            "received total={}".format(
+                                current_time - last_packet_at,
+                                packet_count,
+                            )
+                        )
+                    next_diagnostic_at = current_time + WIFI_DIAGNOSTIC_INTERVAL_SECONDS
                 continue
+            packet_count += 1
+            last_packet_at = time.monotonic()
+            next_diagnostic_at = last_packet_at + WIFI_DIAGNOSTIC_INTERVAL_SECONDS
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             text = data.decode("utf-8", errors="replace").strip()
+            print(
+                "[WiFi RX OK] packet={} source={}:{} bytes={} received_at={}".format(
+                    packet_count,
+                    addr[0],
+                    addr[1],
+                    len(data),
+                    timestamp,
+                )
+            )
+            if WIFI_DEVICE_HOST and addr[0] != WIFI_DEVICE_HOST:
+                print(
+                    "[WiFi RX WARN] Unexpected source IP {}; expected S32K344 {}".format(
+                        addr[0], WIFI_DEVICE_HOST
+                    )
+                )
             if text.startswith("SYNC,TS="):
+                print("[WiFi RX SYNC] Synchronization packet received; telemetry upload skipped")
                 continue
             line = "[{}] From {}:{}  Data: {}".format(timestamp, addr[0], addr[1], text)
             print(line)

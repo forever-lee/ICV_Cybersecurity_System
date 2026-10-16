@@ -243,6 +243,45 @@ def check_device_connectivity():
     return results
 
 
+def print_domain_link_diagnostics():
+    """Print expected body/Bluetooth packet paths in the supervisor terminal."""
+    interface = os.getenv("BODY_NETWORK_INTERFACE", "eno1").strip() or "eno1"
+    jetson_address = os.getenv("BODY_JETSON_ADDRESS", "192.168.4.100").strip()
+    print("=" * 64)
+    print("Jetson 车身域/蓝牙域链路诊断")
+    if enabled("BODY_ENABLED"):
+        body_host = os.getenv("BODY_BOARD_HOST", "192.168.4.31").strip()
+        body_rx_port = os.getenv("BODY_UDP_PORT", "7100").strip()
+        body_tx_port = os.getenv("BODY_CONTROL_PORT", "7101").strip()
+        print("[BODY LINK] {} -> UDP -> {} {}:{}".format(
+            body_host, interface, jetson_address, body_rx_port
+        ))
+        print("[BODY CTRL] {} {} -> UDP -> {}:{}".format(
+            interface, jetson_address, body_host, body_tx_port
+        ))
+        print("[BODY LOG] tail -f {}".format(LOG_DIR / "body.log"))
+    if enabled("BLUETOOTH_ENABLED"):
+        bluetooth_interface = os.getenv(
+            "BLUETOOTH_NETWORK_INTERFACE", interface
+        ).strip() or interface
+        bluetooth_address = os.getenv(
+            "BLUETOOTH_JETSON_ADDRESS", jetson_address
+        ).strip()
+        bluetooth_host = os.getenv("BLUETOOTH_DEVICE_HOST", "192.168.4.20").strip()
+        bluetooth_rx_port = os.getenv("BLUETOOTH_UDP_PORT", "5000").strip()
+        bluetooth_tx_port = os.getenv("BLUETOOTH_CONTROL_PORT", "5001").strip()
+        print("[BT LINK] {} -> UDP -> {} {}:{}".format(
+            bluetooth_host, bluetooth_interface, bluetooth_address,
+            bluetooth_rx_port,
+        ))
+        print("[BT CTRL] {} {} -> UDP -> {}:{}".format(
+            bluetooth_interface, bluetooth_address, bluetooth_host,
+            bluetooth_tx_port,
+        ))
+        print("[BT LOG] tail -f {}".format(LOG_DIR / "bluetooth.log"))
+    print("=" * 64)
+
+
 def acquire_instance_lock():
     if os.name != "posix":
         return None
@@ -292,6 +331,9 @@ def build_components():
                 "--control-timeout", os.getenv("BODY_CONTROL_TIMEOUT", "10"),
                 "--control-retry-interval", os.getenv("BODY_CONTROL_RETRY_INTERVAL", "2"),
                 "--control-max-attempts", os.getenv("BODY_CONTROL_MAX_ATTEMPTS", "3"),
+                "--network-interface", os.getenv("BODY_NETWORK_INTERFACE", "eno1"),
+                "--jetson-address", os.getenv("BODY_JETSON_ADDRESS", "192.168.4.100"),
+                "--diagnostic-interval", os.getenv("BODY_DIAGNOSTIC_INTERVAL_SECONDS", "5"),
                 "--serial-port", os.getenv("BODY_SERIAL_PORT", "/dev/ttyUSB0"),
                 "--baudrate", os.getenv("BODY_SERIAL_BAUDRATE", "115200"),
                 "--cloud", cloud_http_url,
@@ -318,6 +360,12 @@ def build_components():
         wifi_environment.update({
             "WIFI_UDP_HOST": os.getenv("WIFI_UDP_HOST", "0.0.0.0"),
             "WIFI_UDP_PORT": os.getenv("WIFI_UDP_PORT", "6001"),
+            "WIFI_DEVICE_HOST": os.getenv("WIFI_DEVICE_HOST", "192.168.4.201"),
+            "WIFI_NETWORK_INTERFACE": os.getenv("WIFI_NETWORK_INTERFACE", "eno1"),
+            "WIFI_JETSON_ADDRESS": os.getenv("WIFI_JETSON_ADDRESS", "192.168.4.100"),
+            "WIFI_DIAGNOSTIC_INTERVAL_SECONDS": os.getenv(
+                "WIFI_DIAGNOSTIC_INTERVAL_SECONDS", "5"
+            ),
             "VEHICLE_ID": os.getenv(
                 "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
             ),
@@ -339,6 +387,11 @@ def build_components():
             "BLUETOOTH_UDP_HOST": os.getenv("BLUETOOTH_UDP_HOST", "0.0.0.0"),
             "BLUETOOTH_UDP_PORT": os.getenv("BLUETOOTH_UDP_PORT", "5000"),
             "BLUETOOTH_DEVICE_HOST": os.getenv("BLUETOOTH_DEVICE_HOST", "192.168.4.20"),
+            "BLUETOOTH_NETWORK_INTERFACE": os.getenv("BLUETOOTH_NETWORK_INTERFACE", "eno1"),
+            "BLUETOOTH_JETSON_ADDRESS": os.getenv("BLUETOOTH_JETSON_ADDRESS", "192.168.4.100"),
+            "BLUETOOTH_DIAGNOSTIC_INTERVAL_SECONDS": os.getenv(
+                "BLUETOOTH_DIAGNOSTIC_INTERVAL_SECONDS", "5"
+            ),
             "BLUETOOTH_CONTROL_PORT": os.getenv("BLUETOOTH_CONTROL_PORT", "5001"),
             "BLUETOOTH_CONTROL_POLL_SECONDS": os.getenv("BLUETOOTH_CONTROL_POLL_SECONDS", "0.5"),
             "BLUETOOTH_CONTROL_TIMEOUT_SECONDS": os.getenv("BLUETOOTH_CONTROL_TIMEOUT_SECONDS", "10"),
@@ -388,6 +441,7 @@ def main():
     pid_path = BASE_DIR / "edge_supervisor.pid"
     pid_path.write_text(str(os.getpid()), encoding="ascii")
     components = build_components()
+    print_domain_link_diagnostics()
     stopping = False
 
     def request_stop(_signum, _frame):
