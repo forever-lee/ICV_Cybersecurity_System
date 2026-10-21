@@ -4,6 +4,7 @@ import argparse
 import os
 import random
 import socket
+import struct
 import subprocess
 import time
 
@@ -49,8 +50,13 @@ def send_report(sock, host, port, text, attack):
 
 
 def build_report(kind, sequence, soc, state):
-    return "CHG,{},SEQ={:04d},SOC={:.1f},STATE={},TS={}".format(
-        kind, sequence, soc, state, timestamp_ms()
+    # Demonstration envelope: a 0x74-style payload carried as hex over UART/UDP.
+    # SEQ, STATE and TS are application metadata, not GB/T CAN fields.
+    soc_raw = max(0, min(1000, int(round(soc * 10))))
+    remaining = max(0, (ROUND_SECONDS - sequence + 59) // 60)
+    data = struct.pack("<BHH", 0x74, soc_raw, remaining).hex().upper()
+    return "GBT74,{},SEQ={:04d},DATA={},STATE={},TS={}".format(
+        kind, sequence, data, state, timestamp_ms()
     )
 
 

@@ -1366,7 +1366,7 @@
       $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiSeq").textContent = "—"; $("wifiState").textContent = "—"; $("wifiTime").textContent = "—"; $("wifiLatency").textContent = "—";
       $("wifiHistory").innerHTML = '<div class="history-empty">等待 WiFi 充电报文…</div>'; return;
     }
-    const charge = parseChargingPacket(latest.text || "");
+    const charge = latest.parsed_charge || parseChargingPacket(latest.text || "");
     $("wifiText").textContent = latest.text || "（空报文）";
     $("wifiHex").textContent = latest.hex || "—";
     $("wifiSeq").textContent = charge.sequence === null ? "—" : String(charge.sequence).padStart(4, "0");
@@ -1443,7 +1443,7 @@
 
   function updateChargingSimulation(wifi) {
     const latest = wifi.latest;
-    const charge = latest ? parseChargingPacket(latest.text || "") : { soc: null, sequence: null, state: "" };
+    const charge = latest ? (latest.parsed_charge || parseChargingPacket(latest.text || "")) : { soc: null, sequence: null, state: "" };
     const hasSoc = Number.isFinite(charge.soc);
     const stateText = charge.state === "FULL" ? "充电完成" : charge.state === "CHARGING" ? "充电中" : latest ? "报文待识别" : "等待启动";
     const socText = hasSoc ? `${charge.soc.toFixed(1)}%` : "--%";

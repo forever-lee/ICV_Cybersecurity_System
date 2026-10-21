@@ -1,6 +1,7 @@
 """Rule-based IDS for simulated WiFi charging telemetry."""
 
 import re
+import struct
 
 
 CHARGE_PACKET_PATTERN = re.compile(
@@ -8,10 +9,27 @@ CHARGE_PACKET_PATTERN = re.compile(
     r"(?:,TS=(\d{10,16}))?$",
     re.IGNORECASE,
 )
+GBT74_PACKET_PATTERN = re.compile(
+    r"^GBT74,(START|DATA),SEQ=(\d+),DATA=([0-9A-F]{10}),STATE=(CHARGING|FULL)"
+    r"(?:,TS=(\d{10,16}))?$", re.IGNORECASE,
+)
 
 
 def parse_charging_packet(text):
-    match = CHARGE_PACKET_PATTERN.fullmatch(str(text).strip())
+    packet = str(text).strip()
+    gbt = GBT74_PACKET_PATTERN.fullmatch(packet)
+    if gbt:
+        pgi, soc_raw, remaining = struct.unpack("<BHH", bytes.fromhex(gbt.group(3)))
+        if pgi != 0x74 or soc_raw > 1000 or remaining > 65000:
+            return None
+        return {
+            "kind": gbt.group(1).upper(), "sequence": int(gbt.group(2)),
+            "soc": soc_raw / 10.0, "state": gbt.group(4).upper(),
+            "sender_time_ms": int(gbt.group(5)) if gbt.group(5) else None,
+            "protocol": "GBT74-demo", "pgi": "0x74",
+            "payload_hex": gbt.group(3).upper(), "remaining_minutes": remaining,
+        }
+    match = CHARGE_PACKET_PATTERN.fullmatch(packet)
     if not match:
         return None
     return {
