@@ -240,11 +240,15 @@ class VehicleState:
             "error": "",
         }
         self.navigation = None
+        self.navigation_session_id = None
+        self.navigation_session_started_at_ms = 0
+        self.navigation_history = []
+        self.navigation_last_key = None
 
     def online(self):
         return (self.connected or self.fmp4_connected) and (time.monotonic() - self.last_seen_monotonic) < OFFLINE_AFTER_SECONDS
 
-    def snapshot(self):
+    def snapshot(self, include_navigation_history=False):
         data = dict(self.metrics)
         domains = dict(self.domains)
         domains["body"] = self.body_snapshot()
@@ -261,10 +265,50 @@ class VehicleState:
                 "bluetooth": self.bluetooth_snapshot(),
                 "wifi": self.wifi_snapshot(),
                 "navigation": self.navigation_snapshot(),
+                "navigation_session_id": self.navigation_session_id,
+                "navigation_history_count": len(self.navigation_history),
             }
         )
+        if include_navigation_history:
+            data["navigation_history"] = list(self.navigation_history)
         data["cockpit_stream"] = self.cockpit_stream_snapshot(data["status"])
         return data
+
+    def begin_navigation_session(self, session_id, started_at_ms=0):
+        session_id = str(session_id or "").strip()[:64]
+        if not session_id:
+            return False
+        try:
+            started_at_ms = int(started_at_ms or 0)
+        except (TypeError, ValueError):
+            started_at_ms = 0
+        if session_id == self.navigation_session_id:
+            return False
+        self.navigation_session_id = session_id
+        self.navigation_session_started_at_ms = max(0, started_at_ms)
+        self.navigation = None
+        self.navigation_history = []
+        self.navigation_last_key = None
+        return True
+
+    def record_navigation(self, payload, session_id=None, session_started_at_ms=0):
+        self.begin_navigation_session(session_id, session_started_at_ms)
+        navigation = normalize_navigation(payload)
+        if (
+            self.navigation_session_started_at_ms
+            and navigation["captured_at_ms"] < self.navigation_session_started_at_ms
+        ):
+            return False
+        self.navigation = navigation
+        point_key = (
+            navigation["captured_at_ms"],
+            navigation["longitude"],
+            navigation["latitude"],
+        )
+        if point_key != self.navigation_last_key:
+            self.navigation_history.append(dict(navigation))
+            self.navigation_last_key = point_key
+        return True
 
     def cockpit_stream_snapshot(self, status):
         """Expose the existing video relay metrics to the cockpit test page."""
@@ -1236,7 +1280,11 @@ async def update_navigation(vehicle_id: str, request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="invalid JSON payload")
     state = registry.get(vehicle_id)
-    state.navigation = normalize_navigation(payload)
+    state.record_navigation(
+        payload,
+        payload.get("edge_session_id"),
+        payload.get("edge_session_started_at_ms", 0),
+    )
     return {"accepted": True, "vehicle_id": state.vehicle_id, "navigation": state.navigation}
 
 
@@ -2076,6 +2124,9 @@ def handle_fmp4_telemetry(state, text):
         return
     if not isinstance(payload, dict) or payload.get("type") != "fmp4_telemetry":
         return
+    session_id = payload.get("edge_session_id")
+    session_started_at_ms = payload.get("edge_session_started_at_ms", 0)
+    state.begin_navigation_session(session_id, session_started_at_ms)
     safe_keys = {
         "transport", "codec", "encoder", "pipeline", "width", "height", "encoded_fps", "fps",
         "bitrate_kbps", "upload_kbps", "sent_fragments", "segment_seconds",
@@ -2093,7 +2144,7 @@ def handle_fmp4_telemetry(state, text):
     navigation = payload.get("navigation")
     if isinstance(navigation, dict):
         try:
-            state.navigation = normalize_navigation(navigation)
+            state.record_navigation(navigation, session_id, session_started_at_ms)
         except HTTPException:
             state.invalid_frames += 1
     state.history.append({
@@ -2232,7 +2283,11 @@ def handle_telemetry(state, text):
     navigation = payload.get("navigation")
     if isinstance(navigation, dict):
         try:
-            state.navigation = normalize_navigation(navigation)
+            state.record_navigation(
+                navigation,
+                payload.get("edge_session_id"),
+                payload.get("edge_session_started_at_ms", 0),
+            )
         except HTTPException:
             state.invalid_frames += 1
     domains = payload.get("domains")
@@ -2379,9 +2434,15 @@ async def metrics_socket(websocket: WebSocket, vehicle_id: str):
         return
     state = registry.get(vehicle_id)
     await websocket.accept()
+    include_navigation_history = True
+    sent_navigation_session_id = None
     try:
         while websocket.client_state == WebSocketState.CONNECTED:
-            await websocket.send_json(state.snapshot())
+            if state.navigation_session_id != sent_navigation_session_id:
+                include_navigation_history = True
+            await websocket.send_json(state.snapshot(include_navigation_history))
+            sent_navigation_session_id = state.navigation_session_id
+            include_navigation_history = False
             await asyncio.sleep(1)
     except Exception:
         pass

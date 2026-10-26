@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -296,12 +297,16 @@ def acquire_instance_lock():
     return handle
 
 
-def build_components():
+def build_components(edge_session_id=None, edge_session_started_at_ms=None):
     cloud_http_url, cloud_ws_url, ingest_token = required_environment()
+    edge_session_id = edge_session_id or uuid.uuid4().hex
+    edge_session_started_at_ms = edge_session_started_at_ms or int(time.time() * 1000)
     common_cloud_environment = {
         "CLOUD_HTTP_URL": cloud_http_url,
         "CLOUD_WS_URL": cloud_ws_url,
         "VEHICLE_INGEST_TOKEN": ingest_token,
+        "EDGE_SESSION_ID": edge_session_id,
+        "EDGE_SESSION_STARTED_AT_MS": str(edge_session_started_at_ms),
     }
     common_vehicle_environment = dict(common_cloud_environment)
     common_vehicle_environment.update({
@@ -440,7 +445,10 @@ def main():
     lock_handle = acquire_instance_lock()
     pid_path = BASE_DIR / "edge_supervisor.pid"
     pid_path.write_text(str(os.getpid()), encoding="ascii")
-    components = build_components()
+    edge_session_id = uuid.uuid4().hex
+    edge_session_started_at_ms = int(time.time() * 1000)
+    components = build_components(edge_session_id, edge_session_started_at_ms)
+    print("Edge session: {}".format(edge_session_id))
     print_domain_link_diagnostics()
     stopping = False
 

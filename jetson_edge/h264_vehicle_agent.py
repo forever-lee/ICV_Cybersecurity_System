@@ -29,6 +29,11 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("h264-vehicle-agent")
 _FFMPEG_RTSP_TIMEOUT_CACHE = {}
+EDGE_SESSION_ID = os.getenv("EDGE_SESSION_ID", "").strip()
+try:
+    EDGE_SESSION_STARTED_AT_MS = int(os.getenv("EDGE_SESSION_STARTED_AT_MS", "0") or 0)
+except ValueError:
+    EDGE_SESSION_STARTED_AT_MS = 0
 
 
 def read_navigation_file(path):
@@ -766,6 +771,8 @@ async def upload_loop(shared, args):
                         elapsed = max(0.001, now - stats_at)
                         telemetry = {
                             "type": "fmp4_telemetry",
+                            "edge_session_id": EDGE_SESSION_ID,
+                            "edge_session_started_at_ms": EDGE_SESSION_STARTED_AT_MS,
                             "transport": "WebSocket / {} fMP4".format(
                                 "H.265" if args.rtsp_codec == "h265" else "H.264"
                             ),

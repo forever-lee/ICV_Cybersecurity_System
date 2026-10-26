@@ -59,8 +59,12 @@
     lastPresentedCaptureAt: 0, lastPlaybackWallAt: 0, playbackLatency: 0,
     playbackStarted: false, bufferingStartedAt: 0,
     amap: null, vehicleMap: null, vehicleMarker: null, routeLine: null,
-    routePoints: [], pendingNavigation: null, navigationUpdateId: 0,
-    navigationSourceKind: null,
+    routePoints: [], routeNavigationPoints: [], pendingNavigation: null, navigationUpdateId: 0,
+    navigationSourceKind: null, lastNavigationPointKey: null,
+    navigationTrackingActive: false,
+    navigationSessionId: null, pendingNavigationHistory: null,
+    navigationHistoryRenderId: 0, navigationHistoryLoading: false,
+    pendingLiveNavigationPoints: [],
     mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
     mediaMime: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
@@ -391,7 +395,12 @@
       });
       state.vehicleMap.addControl(new window.AMap.Scale());
       $("mapPlaceholder").classList.add("hidden");
-      if (state.pendingNavigation) renderNavigationOnMap(state.pendingNavigation);
+      if (state.pendingNavigationHistory) {
+        const pending = state.pendingNavigationHistory;
+        renderNavigationHistory(pending.history, pending.sessionId);
+      } else if (state.pendingNavigation) {
+        renderNavigationOnMap(state.pendingNavigation);
+      }
     } catch (_) {
       setMapPlaceholder(
         "高德地图加载失败",
@@ -416,10 +425,190 @@
     });
   }
 
+  function squaredSegmentDistance(point, start, end) {
+    let x = start.x;
+    let y = start.y;
+    let dx = end.x - x;
+    let dy = end.y - y;
+    if (dx !== 0 || dy !== 0) {
+      const ratio = ((point.x - x) * dx + (point.y - y) * dy) / (dx * dx + dy * dy);
+      if (ratio > 1) {
+        x = end.x;
+        y = end.y;
+      } else if (ratio > 0) {
+        x += dx * ratio;
+        y += dy * ratio;
+      }
+    }
+    dx = point.x - x;
+    dy = point.y - y;
+    return dx * dx + dy * dy;
+  }
+
+  function navigationSegmentDeviationMeters(point, start, end) {
+    const latitudeScale = Math.cos(Number(point.latitude) * Math.PI / 180) * 111320;
+    const project = (navigation) => ({
+      x: Number(navigation.longitude) * latitudeScale,
+      y: Number(navigation.latitude) * 110540,
+    });
+    return Math.sqrt(squaredSegmentDistance(project(point), project(start), project(end)));
+  }
+
+  function simplifyNavigationHistory(history, toleranceMeters = 2, maxPoints = 1200) {
+    const valid = (Array.isArray(history) ? history : []).filter((point) => (
+      Number.isFinite(Number(point.latitude)) && Number.isFinite(Number(point.longitude))
+    ));
+    const unique = valid.filter((point, index) => index === 0
+      || Number(point.longitude) !== Number(valid[index - 1].longitude)
+      || Number(point.latitude) !== Number(valid[index - 1].latitude));
+    if (unique.length <= 2) return unique;
+
+    const latitudeScale = Math.cos(Number(unique[0].latitude) * Math.PI / 180) * 111320;
+    const projected = unique.map((point) => ({
+      point,
+      x: Number(point.longitude) * latitudeScale,
+      y: Number(point.latitude) * 110540,
+    }));
+
+    function simplifyAtTolerance(tolerance) {
+      const keep = new Uint8Array(projected.length);
+      keep[0] = 1;
+      keep[projected.length - 1] = 1;
+      const stack = [[0, projected.length - 1]];
+      const squaredTolerance = tolerance * tolerance;
+      while (stack.length) {
+        const [first, last] = stack.pop();
+        let farthestIndex = 0;
+        let farthestDistance = squaredTolerance;
+        for (let index = first + 1; index < last; index += 1) {
+          const distance = squaredSegmentDistance(projected[index], projected[first], projected[last]);
+          if (distance > farthestDistance) {
+            farthestDistance = distance;
+            farthestIndex = index;
+          }
+        }
+        if (farthestIndex) {
+          keep[farthestIndex] = 1;
+          stack.push([first, farthestIndex], [farthestIndex, last]);
+        }
+      }
+      return projected.filter((_point, index) => keep[index]).map((entry) => entry.point);
+    }
+
+    let tolerance = toleranceMeters;
+    let simplified = simplifyAtTolerance(tolerance);
+    while (simplified.length > maxPoints && tolerance < 2048) {
+      tolerance *= 2;
+      simplified = simplifyAtTolerance(tolerance);
+    }
+    if (simplified.length <= maxPoints) return simplified;
+    const sampled = [simplified[0]];
+    const step = (simplified.length - 1) / (maxPoints - 1);
+    for (let index = 1; index < maxPoints - 1; index += 1) {
+      sampled.push(simplified[Math.round(index * step)]);
+    }
+    sampled.push(simplified[simplified.length - 1]);
+    return sampled;
+  }
+
+  async function convertNavigationHistory(history) {
+    const positions = new Array(history.length);
+    const pending = [];
+    history.forEach((navigation, index) => {
+      const raw = [Number(navigation.longitude), Number(navigation.latitude)];
+      if (navigation.coordinate_system === "GCJ02") positions[index] = raw;
+      else pending.push({ index, raw });
+    });
+    const batches = [];
+    for (let offset = 0; offset < pending.length; offset += 40) {
+      batches.push(pending.slice(offset, offset + 40));
+    }
+    await Promise.all(batches.map((batch) => new Promise((resolve) => {
+      state.amap.convertFrom(batch.map((entry) => entry.raw), "gps", (status, result) => {
+        const converted = status === "complete" && result && result.info === "ok"
+          ? result.locations : null;
+        batch.forEach((entry, index) => {
+          positions[entry.index] = converted && converted[index] ? converted[index] : entry.raw;
+        });
+        resolve();
+      });
+    })));
+    return positions;
+  }
+
+  async function renderNavigationHistory(history, sessionId) {
+    state.pendingNavigationHistory = { history, sessionId };
+    if (!state.vehicleMap || !state.amap) return;
+    const simplified = simplifyNavigationHistory(history);
+    if (!simplified.length) {
+      state.pendingNavigationHistory = null;
+      return;
+    }
+    const renderId = ++state.navigationHistoryRenderId;
+    const updateId = ++state.navigationUpdateId;
+    state.navigationHistoryLoading = true;
+    state.pendingLiveNavigationPoints = [];
+    const positions = await convertNavigationHistory(simplified);
+    if (renderId !== state.navigationHistoryRenderId || updateId !== state.navigationUpdateId) return;
+
+    if (state.vehicleMarker) state.vehicleMap.remove(state.vehicleMarker);
+    if (state.routeLine) state.vehicleMap.remove(state.routeLine);
+    const latestNavigation = simplified[simplified.length - 1];
+    const latestPosition = positions[positions.length - 1];
+    const markerContent = document.createElement("div");
+    markerContent.className = "vehicle-map-marker";
+    markerContent.innerHTML = '<i class="vehicle-heading"></i>';
+    state.vehicleMarker = new state.amap.Marker({
+      position: latestPosition,
+      content: markerContent,
+      offset: new state.amap.Pixel(-13, -13),
+      zIndex: 120,
+    });
+    state.routeLine = new state.amap.Polyline({
+      path: positions,
+      strokeColor: "#20d6e7",
+      strokeWeight: 4,
+      strokeOpacity: 0.72,
+      lineJoin: "round",
+      showDir: true,
+    });
+    state.vehicleMap.add([state.routeLine, state.vehicleMarker]);
+    state.vehicleMap.setZoomAndCenter(17, latestPosition);
+    markerContent.querySelector(".vehicle-heading").style.transform =
+      `rotate(${Number(latestNavigation.heading_deg || 0)}deg)`;
+    state.routePoints = positions;
+    state.routeNavigationPoints = simplified;
+    state.lastNavigationPointKey = [
+      Number(latestNavigation.longitude), Number(latestNavigation.latitude),
+    ].join(":");
+    state.navigationSessionId = sessionId;
+    state.navigationSourceKind = "edge";
+    state.navigationTrackingActive = true;
+    state.pendingNavigationHistory = null;
+    state.navigationHistoryLoading = false;
+    const pendingLivePoints = state.pendingLiveNavigationPoints;
+    state.pendingLiveNavigationPoints = [];
+    pendingLivePoints.forEach((navigation) => renderNavigationOnMap(navigation));
+    if (!pendingLivePoints.length && state.latestMetrics.navigation) {
+      renderNavigationOnMap(state.latestMetrics.navigation);
+    }
+  }
+
   function renderNavigationOnMap(navigation) {
     state.pendingNavigation = navigation;
     if (!state.vehicleMap || !state.amap) return;
-    const updateId = ++state.navigationUpdateId;
+    if (state.navigationHistoryLoading) {
+      const lastPending = state.pendingLiveNavigationPoints[state.pendingLiveNavigationPoints.length - 1];
+      if (!lastPending || lastPending.captured_at_ms !== navigation.captured_at_ms) {
+        state.pendingLiveNavigationPoints.push(navigation);
+      }
+      return;
+    }
+    const pointKey = [
+      Number(navigation.longitude),
+      Number(navigation.latitude),
+    ].join(":");
+    const updateId = state.navigationUpdateId;
     navigationPosition(navigation, (position) => {
       if (updateId !== state.navigationUpdateId) return;
       if (!state.vehicleMarker) {
@@ -448,9 +637,25 @@
       }
       const heading = state.vehicleMarker.getContent().querySelector(".vehicle-heading");
       heading.style.transform = `rotate(${Number(navigation.heading_deg || 0)}deg)`;
-      state.routePoints.push(position);
-      state.routePoints = state.routePoints.slice(-80);
-      state.routeLine.setPath(state.routePoints);
+      if (pointKey !== state.lastNavigationPointKey) {
+        const rawPoints = state.routeNavigationPoints;
+        const canReplaceLast = rawPoints.length >= 2
+          && navigationSegmentDeviationMeters(
+            rawPoints[rawPoints.length - 1], rawPoints[rawPoints.length - 2], navigation,
+          ) <= 2;
+        if (canReplaceLast) {
+          rawPoints[rawPoints.length - 1] = navigation;
+          state.routePoints[state.routePoints.length - 1] = position;
+        } else {
+          rawPoints.push(navigation);
+          state.routePoints.push(position);
+        }
+        state.lastNavigationPointKey = pointKey;
+        state.routeLine.setPath(state.routePoints);
+        if (rawPoints.length > 1500) {
+          renderNavigationHistory(rawPoints.slice(), state.navigationSessionId);
+        }
+      }
     });
   }
 
@@ -510,7 +715,10 @@
     $("navigationStatus").textContent = online ? "边缘端定位在线" : "定位数据已过期";
     $("navigationHeadingStatus").classList.toggle("active", online);
     $("navigationHeadingStatus").textContent = online ? "实时定位" : "定位已过期";
-    renderNavigationOnMap(navigation);
+    if (online) {
+      state.navigationTrackingActive = true;
+      renderNavigationOnMap(navigation);
+    }
   }
 
   function preferredNavigation() {
@@ -523,8 +731,16 @@
 
   function resetNavigationView() {
     state.pendingNavigation = null;
+    state.pendingNavigationHistory = null;
     state.navigationUpdateId += 1;
+    state.navigationHistoryRenderId += 1;
+    state.navigationHistoryLoading = false;
+    state.pendingLiveNavigationPoints = [];
     state.routePoints = [];
+    state.routeNavigationPoints = [];
+    state.lastNavigationPointKey = null;
+    state.navigationTrackingActive = false;
+    state.navigationSessionId = null;
     if (state.vehicleMap) {
       if (state.vehicleMarker) state.vehicleMap.remove(state.vehicleMarker);
       if (state.routeLine) state.vehicleMap.remove(state.routeLine);
@@ -946,7 +1162,19 @@
     state.rateHistory = state.rateHistory.slice(-40);
     updateFpsBars(fps);
     updateDomains(metrics.domains || {});
-    applyPreferredNavigation();
+    if (online) {
+      const sessionId = metrics.navigation_session_id || "legacy";
+      if (sessionId !== state.navigationSessionId) {
+        resetNavigationView();
+        state.navigationSessionId = sessionId;
+      }
+      if (Array.isArray(metrics.navigation_history)) {
+        renderNavigationHistory(metrics.navigation_history, sessionId);
+      }
+      applyPreferredNavigation();
+    } else if (state.navigationTrackingActive) {
+      resetNavigationView();
+    }
     updateBluetooth(metrics.bluetooth || {});
     updateWifi(metrics.wifi || {});
     $("lastRefresh").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });

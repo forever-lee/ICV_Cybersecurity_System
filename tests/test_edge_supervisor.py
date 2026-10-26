@@ -17,6 +17,22 @@ def test_supervisor_uses_central_cloud_defaults(monkeypatch):
             component.environment["VEHICLE_INGEST_TOKEN"]
             == start_edge.DEFAULT_VEHICLE_INGEST_TOKEN
         )
+        assert component.environment["EDGE_SESSION_ID"]
+        assert int(component.environment["EDGE_SESSION_STARTED_AT_MS"]) > 0
+
+
+def test_supervisor_shares_explicit_edge_session_with_all_components(monkeypatch):
+    components = start_edge.build_components("edge-session-test", 1234567890)
+
+    assert components
+    assert all(
+        component.environment["EDGE_SESSION_ID"] == "edge-session-test"
+        for component in components
+    )
+    assert all(
+        component.environment["EDGE_SESSION_STARTED_AT_MS"] == "1234567890"
+        for component in components
+    )
 
 
 def test_supervisor_allows_ingest_token_override(monkeypatch):

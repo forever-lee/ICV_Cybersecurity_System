@@ -8,14 +8,14 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "http://3f7b7aec.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "http://5c4abf48.r7.nas.cpolar.cn"
 
 # 必须与 jetson_edge 中配置的 VEHICLE_INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
 INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 # 公网页面的独立访问口令，不要与车端上传令牌混用。
-DASHBOARD_ACCESS_TOKEN = "view_GJEhQFY45cXFdZ2NA2MVex8m"
+DASHBOARD_ACCESS_TOKEN = "autocan4023"
 
 # 超过多少秒没有收到车端数据，判定车辆离线。
 OFFLINE_AFTER_SECONDS = 20
