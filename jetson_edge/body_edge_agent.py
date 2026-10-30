@@ -17,6 +17,7 @@ try:
         TIMESTAMPED_PACKET_SIZE,
         CONTROL_ACK_PACKET_SIZE,
         TRANSMISSION_ACK_PACKET_SIZE,
+        RAW_CAN_PACKET_SIZE,
         build_body_event_command,
         build_serial_command,
         build_transmission_command,
@@ -34,6 +35,7 @@ except ImportError:
         TIMESTAMPED_PACKET_SIZE,
         CONTROL_ACK_PACKET_SIZE,
         TRANSMISSION_ACK_PACKET_SIZE,
+        RAW_CAN_PACKET_SIZE,
         build_body_event_command,
         build_serial_command,
         build_transmission_command,
@@ -414,7 +416,7 @@ def run_udp(args):
         try:
             if len(data) in (
                 PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
-                TRANSMISSION_ACK_PACKET_SIZE,
+                TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE,
             ) and data[:2] == PACKET_MAGIC:
                 decoded = decode_serial_packet(data)
                 if decoded.get("transmissionAck") and not validate_transmission_ack(
@@ -425,12 +427,18 @@ def run_udp(args):
                     ))
                     decoded.pop("transmissionAck", None)
                 payload = ethernet_payload(decoded, address, received_at_ms)
-                dropped = enqueue_latest(upload_queue, (
-                    payload,
-                    "UDP SEQ={} CAN_RX={}".format(
+                raw_can = decoded.get("rawCanFrame") or {}
+                if raw_can:
+                    upload_label = "UDP SEQ={} CAN_RX={} CAN_ID=0x{:X} Payload={}".format(
+                        decoded["packetSequence"], decoded["canRxCount"],
+                        int(raw_can["can_id"]),
+                        " ".join("{:02X}".format(value) for value in raw_can["data"]),
+                    )
+                else:
+                    upload_label = "UDP SEQ={} CAN_RX={}".format(
                         decoded["packetSequence"], decoded["canRxCount"]
-                    ),
-                ))
+                    )
+                dropped = enqueue_latest(upload_queue, (payload, upload_label))
                 if dropped:
                     print("[{}] 公网上传较慢，已丢弃一条过期报文".format(
                         time.strftime("%H:%M:%S")

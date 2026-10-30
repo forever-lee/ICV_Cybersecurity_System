@@ -45,6 +45,24 @@ def acknowledged_body_packet(sent_at_ms, sequence, signal_id, target, result):
     return bytes(packet)
 
 
+def raw_can_body_packet(can_id, data):
+    packet = bytearray(acknowledged_body_packet(1700000000100, 0, 0, False, 0))
+    packet.extend(bytes(8))
+    legacy_checksum = 0
+    for value in packet[:39]:
+        legacy_checksum ^= value
+    packet[39] = legacy_checksum
+    packet.extend(int(can_id).to_bytes(4, byteorder="little"))
+    packet.append(len(data))
+    packet.extend(bytes(data))
+    packet.extend(bytes(8 - len(data)))
+    checksum = 0
+    for value in packet:
+        checksum ^= value
+    packet.append(checksum)
+    return bytes(packet)
+
+
 def test_binary_udp_packet_maps_to_cloud_schema():
     received_at_ms = 1700000000123
     decoded = decode_serial_packet(body_packet())
@@ -120,3 +138,53 @@ def test_extended_status_exposes_real_can_control_ack():
     }
     assert payload["raw_frame"]["can_id"] == "0x353"
     assert payload["raw_frame"]["send_type"] == "Web事件触发/CAN回读"
+
+
+def test_raw_can_packet_is_preferred_over_reconstructed_metadata():
+    packet = raw_can_body_packet(0x351, bytes.fromhex("01 00 00 00 00 00 05 06"))
+    decoded = decode_serial_packet(packet)
+    payload = ethernet_payload(decoded, ("192.168.4.31", 7100), 1700000000123)
+    assert len(packet) == 54
+    assert decoded["rawCanFrame"]["can_id"] == 0x351
+    assert decoded["rawCanFrame"]["dlc"] == 8
+    assert payload["raw_frame"] == {
+        "can_id": "0x351", "dlc": 8,
+        "data_hex": "01 00 00 00 00 00 05 06",
+        "frame_name": "BodyDoorStatus", "cycle_ms": 100,
+        "send_type": "CANoe周期报文",
+    }
+
+
+def test_restored_event_ack_returns_raw_frames_to_periodic_classification():
+    decoded = decode_serial_packet(
+        raw_can_body_packet(0x180, bytes.fromhex("00 0F 00 01 00 00 05 0B"))
+    )
+    decoded["controlAck"] = {
+        "sequence": 42, "signal_id": 1, "action": "door_fl",
+        "target": True, "result_code": 4, "result": "restored",
+    }
+    payload = ethernet_payload(decoded, ("192.168.4.31", 7100), 1700000000123)
+    assert payload["raw_frame"]["can_id"] == "0x180"
+    assert payload["raw_frame"]["send_type"] == "K3周期报文"
+    assert payload["raw_frame"]["cycle_ms"] == 100
+
+
+def test_raw_can_packet_rejects_invalid_dlc_and_checksum():
+    packet = bytearray(raw_can_body_packet(0x351, bytes.fromhex("01 00 00 00 00 00 05 06")))
+    packet[44] = 9
+    packet[53] = 0
+    for value in packet[:53]:
+        packet[53] ^= value
+    try:
+        decode_serial_packet(bytes(packet))
+        assert False, "invalid DLC must be rejected"
+    except ValueError as exc:
+        assert "DLC" in str(exc)
+
+    packet = bytearray(raw_can_body_packet(0x351, bytes.fromhex("01 00 00 00 00 00 05 06")))
+    packet[53] ^= 0xFF
+    try:
+        decode_serial_packet(bytes(packet))
+        assert False, "invalid checksum must be rejected"
+    except ValueError as exc:
+        assert "checksum" in str(exc)

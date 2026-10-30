@@ -170,6 +170,31 @@
         </article>
       </div>
 
+      <article class="panel body-intrusion-panel">
+        <div class="panel-title">
+          <div><p class="eyebrow">CANOE TAMPER ATTACK</p><h2>CANoe 报文篡改攻击</h2></div>
+          <span class="tag danger" data-body-canoe-agent>等待 CANoe 代理</span>
+        </div>
+        <div class="body-intrusion-content">
+          <div class="body-intrusion-copy">
+            <b>左前门状态篡改闭环</b>
+            <small>CANoe 将合法 0x351 的 Door_FL 从 0 篡改为 1；只有 K3、Jetson 真实回传后才判定检测成功。</small>
+          </div>
+          <div class="body-intrusion-actions">
+            <button data-body-canoe-attack><i>!</i><span>CANoe 发起篡改攻击</span><small>固定持续 5 秒 · 自动恢复</small></button>
+          </div>
+          <div class="body-intrusion-latest" data-body-canoe-state>尚未创建攻击命令</div>
+          <div class="body-intrusion-detail" data-body-canoe-detail hidden>
+            <div><span>报文 ID</span><b data-body-canoe-can-id>—</b></div>
+            <div><span>Payload</span><code data-body-canoe-payload>—</code></div>
+            <div><span>异常位置</span><b data-body-canoe-location>—</b></div>
+            <div><span>异常内容</span><b>左前门由关闭篡改为开启</b></div>
+            <div><span>判定依据</span><b data-body-canoe-reason>—</b></div>
+            <div><span>闭环链路</span><b data-body-canoe-path>CANoe → K3 → Jetson → 云端</b></div>
+          </div>
+        </div>
+      </article>
+
       <div class="body-cloud-grid">
         <article class="panel body-diagnostic-panel">
           <div class="panel-title">
@@ -1130,6 +1155,8 @@
     };
     root.querySelectorAll("[data-body-action]").forEach((button) => {
       button.classList.toggle("active", actionStates[button.dataset.bodyAction] === true);
+      button.disabled = ["pending", "executing"].includes(eventCommand.status)
+        || payload.canoe_attack?.active === true;
     });
     const edgeChip = root.querySelector("[data-body-edge-chip]");
     if (edgeChip) {
@@ -1179,9 +1206,57 @@
     if (!root) return;
     const frames = Array.isArray(payload.frame_history) ? payload.frame_history.slice(0, 8) : [];
     const latest = payload.latest_frame || frames[0];
+    const intrusion = payload.intrusion || {};
+    const canoeAttack = payload.canoe_attack || null;
     setBodyProtocol(root, "frame_count", Number(payload.frame_count || 0).toLocaleString());
+    const agentChip = root.querySelector("[data-body-canoe-agent]");
+    if (agentChip) {
+      agentChip.textContent = payload.canoe_agent_online ? "CANoe 代理在线" : "等待 CANoe 代理";
+      agentChip.classList.toggle("online", payload.canoe_agent_online === true);
+    }
+    const attackState = root.querySelector("[data-body-canoe-state]");
+    const attackButton = root.querySelector("[data-body-canoe-attack]");
+    const stateText = {
+      queued: "等待 CANoe 代理领取命令",
+      injecting: "CANoe 正在注入篡改报文，等待真实回传",
+      detected: "云端已通过 K3 / Jetson 真实回传检测到异常",
+      timeout: canoeAttack?.error || "30 秒内未检测到目标异常",
+    };
+    if (attackState) {
+      attackState.textContent = canoeAttack ? stateText[canoeAttack.status] || "等待攻击命令" : "尚未创建攻击命令";
+      attackState.classList.toggle("active", canoeAttack?.status === "detected");
+      attackState.classList.toggle("pending", ["queued", "injecting"].includes(canoeAttack?.status));
+    }
+    if (attackButton) attackButton.disabled = canoeAttack?.active === true
+      || ["pending", "executing"].includes(payload.event_command?.status);
+    const detectedFrame = canoeAttack?.detected_frame || intrusion.latest;
+    const detail = root.querySelector("[data-body-canoe-detail]");
+    if (detail) detail.hidden = !detectedFrame;
+    if (detectedFrame) {
+      const canId = root.querySelector("[data-body-canoe-can-id]");
+      const payloadCode = root.querySelector("[data-body-canoe-payload]");
+      const location = root.querySelector("[data-body-canoe-location]");
+      const reason = root.querySelector("[data-body-canoe-reason]");
+      if (canId) canId.textContent = detectedFrame.can_id || "0x351";
+      if (location) location.textContent = detectedFrame.anomaly_location || "Byte 0 · Bit 0（Door_FL）：0 → 1";
+      if (reason) reason.textContent = detectedFrame.reason || "中央门锁已锁止，但左前门处于开启状态";
+      if (payloadCode) {
+        const bytes = String(detectedFrame.data_hex || "").trim().split(/\s+/).filter(Boolean);
+        payloadCode.innerHTML = bytes.length
+          ? `<mark>${escapeHtml(bytes[0])}</mark>${bytes.slice(1).map((item) => ` ${escapeHtml(item)}`).join("")}`
+          : "—";
+      }
+    }
     if (!latest) return;
 
+    const latestIsIntrusion = latest.is_intrusion === true;
+    const summary = root.querySelector(".body-protocol-summary");
+    if (summary) summary.classList.toggle("intrusion", latestIsIntrusion);
+    const liveBadge = root.querySelector(".body-live-badge");
+    if (liveBadge) {
+      liveBadge.innerHTML = latestIsIntrusion ? "<i></i> INTRUSION" : "<i></i> LIVE";
+      liveBadge.classList.toggle("intrusion", latestIsIntrusion);
+    }
     setBodyProtocol(root, "can_id", latest.can_id || "—");
     setBodyProtocol(root, "frame_name", latest.frame_name || "等待报文");
     setBodyProtocol(root, "cycle", latest.cycle_ms ? `${latest.cycle_ms} ms` : "事件触发");
@@ -1192,12 +1267,12 @@
     frameList.classList.remove("body-frame-empty");
     frameList.classList.add("body-frame-list");
     frameList.innerHTML = frames.map((frame) => `
-      <div class="body-frame-row${frame.test ? " test" : ""}${frame.valid === false ? " invalid" : ""}">
+      <div class="body-frame-row${frame.test ? " test" : ""}${frame.valid === false ? " invalid" : ""}${frame.is_intrusion ? " intrusion" : ""}">
         <span><b>${escapeHtml(formatFrameTime(frame.vehicle_time_ms))}</b><small>SEQ ${Number(frame.sequence || 0)}</small></span>
-        <span><b>${escapeHtml(frame.can_id || "—")}</b><small>${escapeHtml(frame.frame_name || "—")}</small></span>
+        <span><b>${escapeHtml(frame.can_id || "—")}</b><small>${escapeHtml(frame.is_intrusion ? `⚠ ${frame.intrusion_label || "入侵报文"}` : frame.frame_name || "—")}</small></span>
         <code>${escapeHtml(frame.data_hex || "—")}</code>
-        <span><b>${escapeHtml(bodySignalText(frame.signal_changes))}</b></span>
-        <span><b class="body-latency">${Math.round(Number(frame.latency_ms || 0))} ms</b><small>${frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
+        <span><b>${escapeHtml(frame.is_intrusion ? frame.intrusion_reason || "检测到模拟攻击" : bodySignalText(frame.signal_changes))}</b></span>
+        <span><b class="body-latency">${Math.round(Number(frame.latency_ms || 0))} ms</b><small>${frame.is_intrusion ? "入侵报文" : frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
       </div>`).join("");
   }
 
@@ -1470,7 +1545,7 @@
     resetNavigationView();
     bodyStatusDataSource.reset();
     history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${state.currentView}`);
-    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); setupBodyTransmissionControls(); connect();
+    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); setupBodyCanoeAttack(); setupBodyTransmissionControls(); connect();
   });
 
   function setupDomainOpenButtons() {
@@ -1481,6 +1556,7 @@
     document.querySelectorAll("[data-body-action]").forEach((button) => {
       button.addEventListener("click", async () => {
         const action = button.dataset.bodyAction;
+        let accepted = false;
         button.disabled = true;
         button.classList.add("loading");
         try {
@@ -1491,11 +1567,47 @@
           });
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const data = await response.json();
+          accepted = true;
+          renderBodyStatus(data.body || {});
           toast(`${data.label}命令已提交，等待K3真实CAN回读`);
         } catch (_) {
           toast("车身报文发送失败，请检查云端服务");
         } finally {
-          button.disabled = false;
+          if (!accepted) button.disabled = false;
+          button.classList.remove("loading");
+        }
+      });
+    });
+  }
+
+  function setupBodyCanoeAttack() {
+    document.querySelectorAll("[data-body-canoe-attack]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        let accepted = false;
+        button.disabled = true;
+        button.classList.add("loading");
+        try {
+          const response = await fetch(
+            `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/canoe-attack`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ attack: "door_fl_tamper" }),
+            },
+          );
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          accepted = true;
+          renderBodyProtocol(data.body || {});
+          if (data.agent_launch?.started) {
+            toast("正在自动启动 CANoe 和代理，随后执行篡改攻击");
+          } else {
+            toast("攻击命令已创建，CANoe 代理正在领取");
+          }
+        } catch (_) {
+          toast("CANoe 攻击命令创建失败或已有命令正在执行");
+        } finally {
+          if (!accepted) button.disabled = false;
           button.classList.remove("loading");
         }
       });
@@ -1612,6 +1724,7 @@
   setupNavigation();
   setupDomainOpenButtons();
   setupBodyDemo();
+  setupBodyCanoeAttack();
   setupBodyTransmissionControls();
   setTimeout(() => {
     if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();

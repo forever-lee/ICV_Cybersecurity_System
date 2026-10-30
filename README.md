@@ -50,7 +50,7 @@ export VEHICLE_INGEST_TOKEN='与电脑A完全一致的Token'
 python3 start_edge.py
 ```
 
-Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、WiFi 和车身域组件。
+Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；`start_edge.py` 统一监管视频、导航、WiFi 和车身域组件。所有子进程继承 `start_edge.py` 顶部配置的云端地址和上传令牌。
 
 ## 当前数据链路
 
@@ -95,6 +95,22 @@ S32K344 UDP 7100
   → 事件期间屏蔽其他周期门锁/灯光动作，只呈现本次事件
   → 事件保持约 5 秒后恢复原周期演示
 
+车身 CANoe 状态篡改闭环（隔离实验台架）
+  → Web 创建唯一的左前门篡改命令
+  → CANoe 电脑 Python 代理经 COM 启动 Measurement 并触发 CAPL
+  → CAPL 在每 10 个 0x351 中随机将第 5 或第 6 帧替换为 Door_FL=1
+  → K3 CAN0 真实接收 CAN ID、DLC、Payload，并通过 UDP 7100 上传
+  → Jetson 优先透传 K3 原始帧，云端只在真实回传后判定 detected
+  → Web 将异常 0x351、Byte 0 和冲突原因标红；5 秒后 CAPL 自动恢复
+
+CANoe 首次使用时需要按 [`canoe_gateway/README.md`](canoe_gateway/README.md)
+创建并保存一次配置工程。之后只需运行 `run_cloud.py`；点击网页攻击按钮时，
+后端会自动后台启动 CANoe 代理，代理自动打开配置并开始 Measurement，无需单独
+运行代理终端或手动点击 CANoe。K3 工程需要重新
+Clean/Build/Debug 烧录；Jetson 需要更新 `body_protocol.py` 与
+`body_edge_agent.py`。旧版 16/25/32/40 字节 K3 报文仍可解析，新版 54 字节
+报文会额外携带 CAN0 本次真实收到的 CAN ID、DLC 和 8 字节 Payload。
+
 电脑 A 页面控制
   → 云端建立 queued 命令
   → Jetson HTTP 轮询并通过 UDP 7101 下发（2 秒重试，最多 3 次）
@@ -122,6 +138,8 @@ WiFi 链路中，`192.168.3.x` 是 BMS 报文产生端与 ESP32 热点之间的�
 - `POST /api/vehicles/{vehicle_id}/navigation`：独立导航数据接收接口。
 - `POST /api/vehicles/{vehicle_id}/domains/body`：车身域状态上传接口。
 - `POST /api/vehicles/{vehicle_id}/body/event`：提交真实车身控制命令；等待 K3 CAN0 回读成功后更新页面。
+- `POST /api/vehicles/{vehicle_id}/body/canoe-attack`：创建固定的左前门 CANoe 篡改命令。
+- `/api/vehicles/{vehicle_id}/body/canoe-attack/{next,ack}`：CANoe 代理领取命令并上报注入状态；使用现有 ingest token。
 - `POST /api/vehicles/{vehicle_id}/domains/body/control`：Jetson 轮询车身域启停控制。
 - `POST /api/vehicles/{vehicle_id}/body/transmission`：网页设置车身域上传状态。
 - `GET /api/vehicles/{vehicle_id}/body/history`：车身域历史报文。

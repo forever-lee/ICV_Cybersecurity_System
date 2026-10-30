@@ -312,9 +312,39 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-action-grid button > span { align-self: end; font-size: 11px; font-weight: 600; }
 .body-action-grid button > small { align-self: start; color: #668195; font-size: 8px; }
 .body-action-grid button.loading > i { animation: radar .8s linear infinite; }
+.body-intrusion-panel { margin-top: 14px; overflow: hidden; border-color: rgba(255,100,124,.22); }
+.body-intrusion-panel .tag.danger { color: #ff8da0; border-color: rgba(255,100,124,.32); background: rgba(255,100,124,.08); }
+.body-intrusion-content { display: grid; grid-template-columns: minmax(210px,.8fr) minmax(480px,1.6fr); gap: 14px 22px; align-items: center; padding: 15px 16px 17px; }
+.body-intrusion-copy b, .body-intrusion-copy small { display: block; }
+.body-intrusion-copy b { color: #ff93a5; font-size: 11px; }
+.body-intrusion-copy small { margin-top: 6px; color: #70889a; font-size: 9px; line-height: 1.6; }
+.body-intrusion-actions { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.body-intrusion-actions button { min-height: 58px; display: grid; grid-template-columns: 28px 1fr; grid-template-rows: 1fr 1fr; align-items: center; gap: 0 8px; padding: 8px 10px; color: #e8c4ca; border: 1px solid rgba(255,100,124,.22); border-radius: 7px; background: rgba(56,10,23,.24); text-align: left; cursor: pointer; transition: border-color .18s,background .18s,transform .18s; }
+.body-intrusion-actions button:hover { border-color: rgba(255,100,124,.58); background: rgba(255,100,124,.10); transform: translateY(-1px); }
+.body-intrusion-actions button:disabled { opacity: .55; cursor: wait; transform: none; }
+.body-intrusion-actions button > i { grid-row: 1 / 3; width: 26px; height: 26px; display: grid; place-items: center; color: #ff647c; border: 1px solid rgba(255,100,124,.42); border-radius: 50%; font-size: 11px; font-style: normal; font-weight: 700; }
+.body-intrusion-actions button > span { align-self: end; font-size: 10px; font-weight: 600; }
+.body-intrusion-actions button > small { align-self: start; color: #8f6972; font-size: 8px; }
+.body-intrusion-actions button.loading > i { animation: pulse 1s infinite; }
+.body-intrusion-latest { grid-column: 1 / -1; min-height: 28px; display: flex; align-items: center; padding: 0 10px; color: #765b63; border-left: 2px solid rgba(255,100,124,.18); background: rgba(255,100,124,.025); font-size: 9px; }
+.body-intrusion-latest.active { color: #ff8da0; border-left-color: #ff647c; background: rgba(255,100,124,.07); }
+.body-intrusion-latest.pending { color: var(--amber); border-left-color: var(--amber); background: rgba(242,184,75,.06); }
+.body-intrusion-panel .tag.danger.online { color: var(--green); border-color: rgba(53,221,162,.4); background: rgba(53,221,162,.08); }
+.body-intrusion-detail { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
+.body-intrusion-detail[hidden] { display: none; }
+.body-intrusion-detail > div { min-width: 0; padding: 10px 12px; border: 1px solid rgba(255,100,124,.15); border-radius: 6px; background: rgba(255,100,124,.035); }
+.body-intrusion-detail span, .body-intrusion-detail b, .body-intrusion-detail code { display: block; }
+.body-intrusion-detail span { color: #8d6a73; font-size: 8px; }
+.body-intrusion-detail b, .body-intrusion-detail code { margin-top: 5px; overflow-wrap: anywhere; color: #efbec7; font-size: 9px; font-weight: 500; }
+.body-intrusion-detail code { font-family: Consolas,monospace; }
+.body-intrusion-detail mark { padding: 1px 3px; color: #fff; border-radius: 3px; background: #d92e4d; }
 .tag.event-active { color: var(--green); border-color: rgba(53,221,162,.42); background: rgba(53,221,162,.09); }
 .body-live-badge { display: inline-flex; align-items: center; gap: 6px; color: var(--green); font-size: 9px; letter-spacing: .12em; }
 .body-live-badge i { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px var(--green); animation: pulse 1.8s infinite; }
+.body-protocol-summary.intrusion { border-color: rgba(255,100,124,.55); box-shadow: inset 0 0 34px rgba(255,100,124,.055); }
+.body-protocol-summary.intrusion [data-body-protocol="can_id"], .body-protocol-summary.intrusion [data-body-protocol="frame_name"] { color: #ff647c; }
+.body-live-badge.intrusion { color: #ff647c; }
+.body-live-badge.intrusion i { background: #ff647c; box-shadow: 0 0 9px #ff647c; }
 .body-protocol-kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 14px 16px 10px; }
 .body-protocol-kpis > div { min-height: 74px; padding: 12px; border: 1px solid rgba(111,171,219,.1); border-radius: 7px; background: var(--body-surface); }
 .body-protocol-kpis span, .body-protocol-kpis strong, .body-protocol-kpis small { display: block; }
@@ -433,6 +463,8 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-frame-row.head { min-height: 36px; color: #5f7b8f; background: rgba(7,20,34,.52); font-size: 8px; letter-spacing: .05em; }
 .body-frame-row.test { box-shadow: inset 2px 0 rgba(32,214,231,.35); }
 .body-frame-row.invalid { box-shadow: inset 2px 0 rgba(255,100,124,.5); background: rgba(255,100,124,.025); }
+.body-frame-row.intrusion { color: #ffd8df; box-shadow: inset 3px 0 #ff4f6d; background: linear-gradient(90deg,rgba(255,50,82,.16),rgba(255,50,82,.045)); }
+.body-frame-row.intrusion b, .body-frame-row.intrusion code, .body-frame-row.intrusion small, .body-frame-row.intrusion .body-latency { color: #ff7189; }
 .body-frame-row span, .body-frame-row b, .body-frame-row small { min-width: 0; display: block; }
 .body-frame-row b { overflow: hidden; color: #b8ccd8; font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .body-frame-row small { margin-top: 4px; overflow: hidden; color: #607c90; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
@@ -456,7 +488,7 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 }
 @media (max-width: 680px) {
   .workspace { padding: 16px 11px; }.topbar { padding: 0 10px; }.breadcrumb span, .breadcrumb i, .top-clock, .vehicle-picker > span { display: none; }.top-actions { gap: 7px; }.connection-pill { min-width: 30px; padding: 0 8px; }.connection-pill #connectionText { display: none; }.page-heading { flex-direction: column; }.heading-meta, .domain-summary, .notice-pill { align-self: flex-start; }.kpi-grid, .overview-bottom, .domain-stat-grid, .defense-kpis, .scenario-grid { grid-template-columns: 1fr; }.topology-map { height: 570px; }.vehicle-core { top: 50%; transform: translate(-50%,-50%) scale(.85); }.domain-node { width: calc(50% - 18px); }.node-adas, .node-chassis, .node-body { left: 10px; }.node-telematics, .node-power, .node-cockpit { right: 10px; }.node-adas, .node-telematics { top: 7%; }.node-chassis, .node-power { top: 44%; }.node-body, .node-cockpit { bottom: 7%; }.surface-list { grid-template-columns: 1fr; }.metrics-column { grid-template-columns: 1fr 1fr; }.video-stage { min-height: 0; }.telemetry-layout { padding: 9px; }.module-head { align-items: flex-start; flex-direction: column; }.module-actions { width: 100%; justify-content: space-between; }.packet-stats { grid-template-columns: 1fr 1fr; }.history-row { grid-template-columns: 32px 68px 1fr 34px; }.history-source { display: none; }.matrix-table { overflow-x: auto; }.matrix-row { min-width: 620px; }.event-toolbar { align-items: stretch; flex-direction: column; gap: 8px; }.fake-search { width: 100%; }.event-table-head { min-width: 680px; }.event-table { overflow-x: auto; }.event-table-empty { min-width: 680px; }.location-title { align-items: flex-start; gap: 9px; flex-direction: column; padding-top: 13px; padding-bottom: 13px; }.location-title-meta { width: 100%; justify-content: space-between; }.map-shell { min-height: 300px; }.driving-telemetry { padding: 16px; }.speed-ring { width: 100px; height: 100px; flex-basis: 100px; }.speed-ring::before { width: 86px; height: 86px; }.speed-ring strong { font-size: 29px; }.location-data-grid { gap: 6px; }.location-data-grid > div { padding: 10px; }
-  .body-controller-identity { padding: 17px; }.body-controller-identity > i { width: 58px; height: 58px; flex-basis: 58px; font-size: 14px; }.body-controller-metrics { grid-template-columns: 1fr 1fr; padding: 10px; }.body-metric-card { min-height: 112px; padding: 12px; }.body-action-grid { grid-template-columns: 1fr 1fr; }.body-protocol-kpis { grid-template-columns: 1fr 1fr; }.body-link-grid { grid-template-columns: 1fr 1fr; }.body-door-stage { min-height: 570px; grid-template-columns: 1fr 1fr; grid-template-rows: 250px 1fr 1fr; grid-template-areas: "car car" "fl fr" "rl rr"; gap: 10px; padding: 13px; }.body-car-model { transform: scale(.82); }.body-door-card { min-height: 72px; padding: 11px; }.body-door-card::after { display: none; }.body-door-card b { font-size: 11px; }.body-door-card em { min-width: 38px; }.body-light-grid { grid-template-columns: 1fr; }.body-light-item.hazard { grid-column: auto; }
+  .body-controller-identity { padding: 17px; }.body-controller-identity > i { width: 58px; height: 58px; flex-basis: 58px; font-size: 14px; }.body-controller-metrics { grid-template-columns: 1fr 1fr; padding: 10px; }.body-metric-card { min-height: 112px; padding: 12px; }.body-action-grid { grid-template-columns: 1fr 1fr; }.body-intrusion-content, .body-intrusion-detail { grid-template-columns: 1fr; }.body-intrusion-actions { grid-template-columns: 1fr; }.body-protocol-kpis { grid-template-columns: 1fr 1fr; }.body-link-grid { grid-template-columns: 1fr 1fr; }.body-door-stage { min-height: 570px; grid-template-columns: 1fr 1fr; grid-template-rows: 250px 1fr 1fr; grid-template-areas: "car car" "fl fr" "rl rr"; gap: 10px; padding: 13px; }.body-car-model { transform: scale(.82); }.body-door-card { min-height: 72px; padding: 11px; }.body-door-card::after { display: none; }.body-door-card b { font-size: 11px; }.body-door-card em { min-width: 38px; }.body-light-grid { grid-template-columns: 1fr; }.body-light-item.hazard { grid-column: auto; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
 
