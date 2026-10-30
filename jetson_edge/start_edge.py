@@ -23,6 +23,9 @@ NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
 BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
+DEFAULT_CLOUD_HTTP_URL = "http://5567b4e0.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://5567b4e0.r7.nas.cpolar.cn"
+DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
 class Component:
@@ -97,13 +100,16 @@ def enabled(name, default="1"):
 
 
 def required_environment():
-    cloud_http_url = os.getenv("CLOUD_HTTP_URL", "").strip().rstrip("/")
-    ingest_token = os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
-    if not cloud_http_url:
-        raise SystemExit("请设置 CLOUD_HTTP_URL（电脑 A 的云端地址）")
-    if not ingest_token:
-        raise SystemExit("请设置 VEHICLE_INGEST_TOKEN")
-    cloud_ws_url = os.getenv("CLOUD_WS_URL", "").strip().rstrip("/")
+    cloud_http_url = (
+        os.getenv("CLOUD_HTTP_URL", "").strip() or DEFAULT_CLOUD_HTTP_URL
+    ).rstrip("/")
+    ingest_token = (
+        os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
+        or DEFAULT_VEHICLE_INGEST_TOKEN
+    )
+    cloud_ws_url = (
+        os.getenv("CLOUD_WS_URL", "").strip() or DEFAULT_CLOUD_WS_URL
+    ).rstrip("/")
     if not cloud_ws_url:
         cloud_ws_url = (
             ("wss://" + cloud_http_url[8:])

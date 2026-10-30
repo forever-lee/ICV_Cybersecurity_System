@@ -8,7 +8,7 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", "未配置")
+PUBLIC_DASHBOARD_URL = "http://5567b4e0.r7.nas.cpolar.cn"
 
 # 必须与 Jetson 环境变量 VEHICLE_INGEST_TOKEN 完全一致。
 INGEST_TOKEN = os.getenv("VEHICLE_INGEST_TOKEN", "").strip()
