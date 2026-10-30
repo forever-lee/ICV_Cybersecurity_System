@@ -12,6 +12,7 @@ PACKET_SIZE = 16
 TIMESTAMPED_PACKET_SIZE = 25
 CONTROL_ACK_PACKET_SIZE = 32
 TRANSMISSION_ACK_PACKET_SIZE = 40
+RAW_CAN_PACKET_SIZE = 54
 PACKET_MAGIC = bytes((0xA5, 0x5A))
 COMMAND_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x02))
 TIME_SYNC_PACKET_MAGIC = bytes((0xA5, 0x5A, 0x01, 0x03))
@@ -221,13 +222,13 @@ def initial_state():
 def decode_serial_packet(packet):
     supported_sizes = (
         PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
-        TRANSMISSION_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE,
     )
     if len(packet) not in supported_sizes:
         raise ValueError(
-            "expected {}, {}, {} or {} bytes, got {}".format(
+            "expected {}, {}, {}, {} or {} bytes, got {}".format(
                 PACKET_SIZE, TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
-                TRANSMISSION_ACK_PACKET_SIZE, len(packet)
+                TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE, len(packet)
             )
         )
     if packet[:2] != PACKET_MAGIC:
@@ -250,12 +251,13 @@ def decode_serial_packet(packet):
     board_sent_at_ms = None
     if len(packet) in (
         TIMESTAMPED_PACKET_SIZE, CONTROL_ACK_PACKET_SIZE,
-        TRANSMISSION_ACK_PACKET_SIZE,
+        TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE,
     ):
         checksum_index = {
             TIMESTAMPED_PACKET_SIZE: 24,
             CONTROL_ACK_PACKET_SIZE: 31,
             TRANSMISSION_ACK_PACKET_SIZE: 39,
+            RAW_CAN_PACKET_SIZE: 53,
         }[len(packet)]
         extended_checksum = 0
         for value in packet[:checksum_index]:
@@ -297,7 +299,7 @@ def decode_serial_packet(packet):
         "transmissionEnabled": bool(packet[14] & 0x01),
         "boardSentAtMs": board_sent_at_ms,
     }
-    if len(packet) in (CONTROL_ACK_PACKET_SIZE, TRANSMISSION_ACK_PACKET_SIZE):
+    if len(packet) in (CONTROL_ACK_PACKET_SIZE, TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE):
         ack_sequence = int.from_bytes(packet[24:28], byteorder="little")
         ack_signal_id = packet[28]
         ack_target = bool(packet[29])
@@ -314,7 +316,7 @@ def decode_serial_packet(packet):
             "result_code": ack_result_code,
             "result": CONTROL_ACK_RESULTS.get(ack_result_code, "unknown"),
         }
-    if len(packet) == TRANSMISSION_ACK_PACKET_SIZE:
+    if len(packet) in (TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE):
         tx_sequence = int.from_bytes(packet[32:36], byteorder="little")
         tx_action_code = packet[36]
         tx_result_code = packet[37]
@@ -327,6 +329,27 @@ def decode_serial_packet(packet):
             "result": TRANSMISSION_ACK_RESULTS.get(tx_result_code, "unknown"),
             "error_code": tx_error_code,
             "error": TRANSMISSION_ACK_ERRORS.get(tx_error_code, "unknown"),
+        }
+    if len(packet) == RAW_CAN_PACKET_SIZE:
+        legacy_checksum = 0
+        for value in packet[:39]:
+            legacy_checksum ^= value
+        if legacy_checksum != packet[39]:
+            raise ValueError(
+                "legacy extended checksum mismatch: expected 0x{:02X}, got 0x{:02X}".format(
+                    legacy_checksum, packet[39]
+                )
+            )
+        raw_can_id = int.from_bytes(packet[40:44], byteorder="little")
+        raw_dlc = int(packet[44])
+        if not 0 <= raw_can_id <= 0x1FFFFFFF:
+            raise ValueError("raw CAN ID is outside the CAN/CAN-FD range")
+        if not 0 <= raw_dlc <= 8:
+            raise ValueError("raw CAN DLC must be between 0 and 8")
+        decoded["rawCanFrame"] = {
+            "can_id": raw_can_id,
+            "dlc": raw_dlc,
+            "data": bytes(packet[45:45 + raw_dlc]),
         }
     return decoded
 
@@ -431,7 +454,34 @@ def ethernet_payload(decoded, board_address, udp_received_at_ms=None):
             else "jetson_udp_receive_to_cloud_ingest"
         ),
     })
-    payload["raw_frame"] = body_can_frame_metadata(decoded)
+    raw_can = decoded.get("rawCanFrame")
+    if raw_can:
+        can_id = int(raw_can["can_id"])
+        names = {
+            0x180: ("BodyStatus", 100, "K3周期报文"),
+            0x351: ("BodyDoorStatus", 100, "CANoe周期报文"),
+            0x352: ("CentralLockStatus", 100, "CANoe周期报文"),
+            0x353: ("BodyLightStatus", 50, "CAN0真实报文"),
+        }
+        frame_name, cycle_ms, send_type = names.get(
+            can_id, ("UnknownBodyFrame", 0, "CAN0真实报文")
+        )
+        ack = decoded.get("controlAck") or {}
+        # "restored" is a persistent acknowledgement in K3 status packets.
+        # It marks the end of the five-second event window, so subsequent
+        # periodic 0x180 frames must return to their normal classification.
+        if ack.get("result") in {"applied", "duplicate"}:
+            cycle_ms, send_type = 0, "Web事件触发/CAN回读"
+        payload["raw_frame"] = {
+            "can_id": "0x{:X}".format(can_id),
+            "dlc": int(raw_can["dlc"]),
+            "data_hex": " ".join("{:02X}".format(value) for value in raw_can["data"]),
+            "frame_name": frame_name,
+            "cycle_ms": cycle_ms,
+            "send_type": send_type,
+        }
+    else:
+        payload["raw_frame"] = body_can_frame_metadata(decoded)
     if decoded.get("controlAck"):
         payload["control_ack"] = dict(decoded["controlAck"])
     if decoded.get("transmissionAck"):

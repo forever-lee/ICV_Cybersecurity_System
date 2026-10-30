@@ -17,6 +17,13 @@ INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 # 公网页面的独立访问口令，不要与车端上传令牌混用。
 DASHBOARD_ACCESS_TOKEN = "autocan4023"
 
+# 网页点击“CANoe发起篡改攻击”时，由后端自动启动本机CANoe代理。
+# 代理会打开此配置并启动Measurement，无需再单独运行代理终端。
+CANOE_AGENT_AUTOSTART_ON_ATTACK = True
+CANOE_CONFIG_PATH = os.getenv(
+    "CANOE_CONFIG_PATH", r"D:\CANoeProjects\BodyAttack\canoe_attack.cfg"
+)
+
 # 超过多少秒没有收到车端数据，判定车辆离线。
 OFFLINE_AFTER_SECONDS = 20
 
@@ -39,6 +46,12 @@ AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "")
 # server.py 在导入时读取这些配置，因此必须先设置环境变量。
 os.environ["VEHICLE_INGEST_TOKEN"] = INGEST_TOKEN
 os.environ["DASHBOARD_ACCESS_TOKEN"] = DASHBOARD_ACCESS_TOKEN
+os.environ["CANOE_AGENT_AUTOSTART_ON_ATTACK"] = (
+    "1" if CANOE_AGENT_AUTOSTART_ON_ATTACK else "0"
+)
+os.environ["CANOE_CONFIG_PATH"] = CANOE_CONFIG_PATH
+os.environ["CANOE_AGENT_CLOUD_URL"] = "http://127.0.0.1:{}".format(PORT)
+os.environ["CANOE_AGENT_VEHICLE_ID"] = "VHC-001"
 os.environ["OFFLINE_AFTER_SECONDS"] = str(OFFLINE_AFTER_SECONDS)
 os.environ["BLUETOOTH_CONTROL_MODE"] = BLUETOOTH_CONTROL_MODE
 os.environ["FMP4_BUFFER_SEGMENTS"] = str(FMP4_BUFFER_SEGMENTS)
@@ -56,6 +69,7 @@ if __name__ == "__main__":
     print("局域网访问：http://本机IP:{}".format(PORT))
     print("公网访问：{}".format(PUBLIC_DASHBOARD_URL))
     print("公网访问口令：{}".format(DASHBOARD_ACCESS_TOKEN))
+    print("CANoe按需启动：网页攻击按钮（配置：{}）".format(CANOE_CONFIG_PATH))
     print("请保持此窗口运行；视频与定位由 Jetson 边缘端上传")
     print("=" * 64)
     uvicorn.run(

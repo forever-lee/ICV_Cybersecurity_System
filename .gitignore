@@ -28,6 +28,10 @@ data/
 navigation_live.json
 navigation_live.json.tmp
 
+# CANoe local/generated artifacts
+canoe_gateway/*.cbf
+canoe_gateway/*.ini
+
 # IDE
 .idea/
 .vscode/

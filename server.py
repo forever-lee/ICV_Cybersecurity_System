@@ -14,7 +14,9 @@ import random
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -68,6 +70,20 @@ BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
 BODY_EVENT_HOLD_SECONDS = 5
 BODY_EVENT_TIMEOUT_MS = 8000
 BODY_CONTROL_TIMEOUT_MS = int(os.getenv("BODY_CONTROL_TIMEOUT_MS", "10000"))
+BODY_CANOE_ATTACK_TIMEOUT_MS = int(os.getenv("BODY_CANOE_ATTACK_TIMEOUT_MS", "30000"))
+CANOE_AGENT_AUTOSTART_ON_ATTACK = os.getenv(
+    "CANOE_AGENT_AUTOSTART_ON_ATTACK", "0"
+).strip().lower() in {"1", "true", "yes", "on"}
+CANOE_CONFIG_PATH = Path(os.getenv(
+    "CANOE_CONFIG_PATH", str(BASE_DIR / "canoe_gateway" / "canoe_attack.cfg")
+)).expanduser().resolve()
+CANOE_AGENT_CLOUD_URL = os.getenv(
+    "CANOE_AGENT_CLOUD_URL", "http://127.0.0.1:8001"
+).strip().rstrip("/")
+CANOE_AGENT_VEHICLE_ID = os.getenv("CANOE_AGENT_VEHICLE_ID", "VHC-001").strip()
+CANOE_AGENT_LOG_PATH = Path(os.getenv(
+    "CANOE_AGENT_LOG_PATH", str(BASE_DIR / "logs" / "canoe_attack_agent.log")
+)).expanduser().resolve()
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
@@ -88,6 +104,10 @@ HMI_COMPARISON_RUNTIME = {
     "error": None,
     "loaded_at_ms": 0,
 }
+
+_CANOE_AGENT_PROCESS = None
+_CANOE_AGENT_LOG_HANDLE = None
+_CANOE_AGENT_LOCK = threading.Lock()
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -132,6 +152,18 @@ def init_body_database():
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_body_frames_vehicle_time ON body_frames(vehicle_id, received_at_ms DESC)"
         )
+        existing_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(body_frames)").fetchall()
+        }
+        for column_name, definition in (
+            ("is_intrusion", "INTEGER NOT NULL DEFAULT 0"),
+            ("intrusion_type", "TEXT NOT NULL DEFAULT ''"),
+            ("intrusion_reason", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column_name not in existing_columns:
+                connection.execute(
+                    "ALTER TABLE body_frames ADD COLUMN {} {}".format(column_name, definition)
+                )
 
 
 def persist_body_frame(vehicle_id, frame):
@@ -140,14 +172,17 @@ def persist_body_frame(vehicle_id, frame):
             """INSERT INTO body_frames (
                 vehicle_id, sequence, can_id, dlc, data_hex, signals_json,
                 captured_at_ms, received_at_ms, valid, invalid_reason,
-                device_id, interface_path, source, is_test
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                device_id, interface_path, source, is_test,
+                is_intrusion, intrusion_type, intrusion_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 vehicle_id, frame["sequence"], frame["can_id"], frame["dlc"], frame["data_hex"],
                 json.dumps(frame.get("signal_changes", {}), ensure_ascii=False, separators=(",", ":")),
                 frame["vehicle_time_ms"], frame["cloud_receive_time_ms"], int(frame.get("valid", True)),
                 frame.get("invalid_reason", ""), frame.get("device_id", ""),
                 frame.get("interface_path", ""), frame.get("source", ""), int(frame.get("test", False)),
+                int(frame.get("is_intrusion", False)), frame.get("intrusion_type", ""),
+                frame.get("intrusion_reason", ""),
             ),
         )
 
@@ -225,6 +260,14 @@ class VehicleState:
         self.body_sequence = 0
         self.body_frame_history = deque(maxlen=80)
         self.body_alerts = deque(maxlen=40)
+        self.body_intrusion_alerts = deque(maxlen=20)
+        self.body_intrusion_count = 0
+        self.body_latest_intrusion = None
+        # CANoe system variables are configured as signed Int32. Keep the
+        # cloud idempotency key positive and representable by COM/CAPL.
+        self.body_canoe_attack_sequence = now_ms() & 0x7FFFFFFF
+        self.body_canoe_attack_command = None
+        self.body_canoe_agent_last_seen_ms = 0
         self.body_last_seen_ms = 0
         # Seed from wall clock so a cloud restart does not reuse the last K3
         # idempotency key and accidentally turn a new action into a duplicate.
@@ -450,8 +493,30 @@ class VehicleState:
                 control["status"] = "expired"
                 control["completed_at_ms"] = snapshot_at_ms
                 control["error"] = "等待K3真实状态确认超时"
+        canoe_attack = self.body_canoe_attack_command
+        if canoe_attack and canoe_attack.get("status") in {"queued", "injecting"}:
+            requested_at_ms = int(canoe_attack.get("requested_at_ms") or 0)
+            if requested_at_ms and snapshot_at_ms - requested_at_ms >= BODY_CANOE_ATTACK_TIMEOUT_MS:
+                canoe_attack["status"] = "timeout"
+                canoe_attack["completed_at_ms"] = snapshot_at_ms
+                canoe_attack["error"] = "{}秒内未收到K3/Jetson真实篡改报文".format(
+                    max(1, BODY_CANOE_ATTACK_TIMEOUT_MS // 1000)
+                )
+        if canoe_attack:
+            restore_due_at_ms = int(canoe_attack.get("restore_due_at_ms") or 0)
+            canoe_attack["active"] = bool(
+                canoe_attack.get("status") in {"queued", "injecting"}
+                or (
+                    canoe_attack.get("status") == "detected"
+                    and restore_due_at_ms > snapshot_at_ms
+                )
+            )
         body["event_command"] = dict(command) if command else None
-        alerts = list(self.body_alerts)
+        intrusion_alerts = [
+            alert for alert in self.body_intrusion_alerts
+            if snapshot_at_ms - int(alert.get("created_at_ms") or 0) <= 60000
+        ]
+        alerts = intrusion_alerts + list(self.body_alerts)
         if self.body_last_seen_ms and not online:
             alerts.insert(0, {
                 "key": "link:timeout", "level": "critical", "title": "车身数据超时",
@@ -462,7 +527,33 @@ class VehicleState:
         body["frame_count"] = self.body_sequence
         frame_history = list(self.body_frame_history)
         body["latest_frame"] = frame_history[0] if frame_history else None
-        body["frame_history"] = frame_history[:8]
+        visible_frames = frame_history[:8]
+        recent_intrusion = next(
+            (
+                frame for frame in frame_history
+                if frame.get("is_intrusion")
+                and snapshot_at_ms - int(frame.get("cloud_receive_time_ms") or 0) <= 60000
+            ),
+            None,
+        )
+        if recent_intrusion and recent_intrusion not in visible_frames:
+            if len(visible_frames) >= 8:
+                visible_frames[-1] = recent_intrusion
+            else:
+                visible_frames.append(recent_intrusion)
+        body["frame_history"] = visible_frames
+        body["intrusion"] = {
+            "count": self.body_intrusion_count,
+            "latest": dict(self.body_latest_intrusion) if self.body_latest_intrusion else None,
+        }
+        body["canoe_attack"] = dict(canoe_attack) if canoe_attack else None
+        body["canoe_agent_online"] = bool(
+            self.body_canoe_agent_last_seen_ms
+            # The agent waits up to eight seconds for the five-second CAPL
+            # restore window, so a five-second heartbeat threshold flickers
+            # offline during every successful injection.
+            and snapshot_at_ms - self.body_canoe_agent_last_seen_ms < 15000
+        )
         body["transmission_control"] = dict(control)
         return body
 
@@ -553,6 +644,97 @@ def get_hmi_compare_function():
     _HMI_COMPARE_SOURCE = source_path
     LOGGER.info("hmi_comparison_loaded source=%s", source_path)
     return _HMI_COMPARE_FUNCTION
+
+
+def canoe_agent_process_running():
+    process = _CANOE_AGENT_PROCESS
+    return bool(process is not None and process.poll() is None)
+
+
+def ensure_canoe_agent_started():
+    """Start the local CANoe bridge on demand from the Web attack button."""
+    global _CANOE_AGENT_PROCESS, _CANOE_AGENT_LOG_HANDLE
+
+    if os.name != "nt":
+        raise RuntimeError("CANoe自动启动仅支持安装CANoe的Windows主机")
+    if not CANOE_CONFIG_PATH.is_file():
+        raise RuntimeError("找不到CANoe配置：{}".format(CANOE_CONFIG_PATH))
+    script_path = BASE_DIR / "canoe_gateway" / "canoe_attack_agent.py"
+    if not script_path.is_file():
+        raise RuntimeError("找不到CANoe代理：{}".format(script_path))
+
+    with _CANOE_AGENT_LOCK:
+        if canoe_agent_process_running():
+            return {
+                "started": False,
+                "already_running": True,
+                "pid": _CANOE_AGENT_PROCESS.pid,
+            }
+
+        if _CANOE_AGENT_LOG_HANDLE is not None:
+            try:
+                _CANOE_AGENT_LOG_HANDLE.close()
+            except Exception:
+                pass
+            _CANOE_AGENT_LOG_HANDLE = None
+
+        CANOE_AGENT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _CANOE_AGENT_LOG_HANDLE = CANOE_AGENT_LOG_PATH.open(
+            "a", encoding="utf-8", buffering=1
+        )
+        environment = os.environ.copy()
+        environment.update({
+            "CLOUD_HTTP_URL": CANOE_AGENT_CLOUD_URL,
+            "VEHICLE_ID": CANOE_AGENT_VEHICLE_ID,
+            "VEHICLE_INGEST_TOKEN": INGEST_TOKEN,
+            "CANOE_CONFIG_PATH": str(CANOE_CONFIG_PATH),
+            "PYTHONUNBUFFERED": "1",
+        })
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            _CANOE_AGENT_PROCESS = subprocess.Popen(
+                [sys.executable, str(script_path)],
+                cwd=str(BASE_DIR),
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=_CANOE_AGENT_LOG_HANDLE,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+        except Exception:
+            _CANOE_AGENT_LOG_HANDLE.close()
+            _CANOE_AGENT_LOG_HANDLE = None
+            raise
+        LOGGER.info(
+            "canoe_agent_started pid=%s config=%s log=%s",
+            _CANOE_AGENT_PROCESS.pid,
+            CANOE_CONFIG_PATH,
+            CANOE_AGENT_LOG_PATH,
+        )
+        return {
+            "started": True,
+            "already_running": False,
+            "pid": _CANOE_AGENT_PROCESS.pid,
+            "log_path": str(CANOE_AGENT_LOG_PATH),
+        }
+
+
+def stop_managed_canoe_agent():
+    global _CANOE_AGENT_PROCESS, _CANOE_AGENT_LOG_HANDLE
+    with _CANOE_AGENT_LOCK:
+        if canoe_agent_process_running():
+            _CANOE_AGENT_PROCESS.terminate()
+            try:
+                _CANOE_AGENT_PROCESS.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                _CANOE_AGENT_PROCESS.kill()
+        _CANOE_AGENT_PROCESS = None
+        if _CANOE_AGENT_LOG_HANDLE is not None:
+            try:
+                _CANOE_AGENT_LOG_HANDLE.close()
+            except Exception:
+                pass
+        _CANOE_AGENT_LOG_HANDLE = None
 
 
 def comparison_runtime_snapshot():
@@ -711,7 +893,6 @@ BODY_TEST_ACTIONS = {
     "hazard": ("Hazard", "双闪"),
 }
 
-
 def body_switch(value):
     if isinstance(value, bool):
         return value
@@ -810,6 +991,70 @@ def body_alerts(body, validity, reasons, timestamp):
             "detail": "双闪开启时左右转向灯状态不一致", "created_at_ms": timestamp,
         })
     return alerts
+
+
+def detect_canoe_body_tamper(state, frame, body, received_at_ms):
+    """Confirm the attack only from a valid K3/Jetson raw CAN readback."""
+    command = state.body_canoe_attack_command
+    if not command or command.get("status") not in {"injecting", "detected"}:
+        return None
+    if received_at_ms < int(command.get("requested_at_ms") or 0):
+        return None
+    if received_at_ms - int(command.get("requested_at_ms") or 0) > BODY_CANOE_ATTACK_TIMEOUT_MS:
+        return None
+    if str(frame.get("can_id", "")).lower() != "0x351" or int(frame.get("dlc") or 0) != 8:
+        return None
+    try:
+        raw_bytes = bytes.fromhex(str(frame.get("data_hex", "")))
+    except ValueError:
+        return None
+    if len(raw_bytes) != 8:
+        return None
+    if not (raw_bytes[0] & 0x01):
+        return None
+    if str(body.get("CentralLockState", "")).lower() != "locked":
+        return None
+
+    frame.update({
+        "is_intrusion": True,
+        "intrusion_type": "door_fl_tamper",
+        "intrusion_label": "CANoe左前门状态篡改",
+        "intrusion_reason": "中央门锁已锁止，但左前门处于开启状态",
+        "anomaly_location": "Byte 0 · Bit 0（Door_FL）：0 → 1",
+    })
+    state.body_intrusion_count += 1
+    state.body_latest_intrusion = {
+        "type": "door_fl_tamper",
+        "label": frame["intrusion_label"],
+        "reason": frame["intrusion_reason"],
+        "can_id": frame["can_id"],
+        "data_hex": frame["data_hex"],
+        "anomaly_location": frame["anomaly_location"],
+        "path": "CANoe → K3 → Jetson → 云端",
+        "created_at_ms": received_at_ms,
+        "sequence": frame["sequence"],
+    }
+    first_detection = command.get("status") != "detected"
+    if first_detection:
+        command["status"] = "detected"
+        command["detected_at_ms"] = received_at_ms
+        command["completed_at_ms"] = received_at_ms
+        command["detected_frame"] = dict(state.body_latest_intrusion)
+        command["error"] = ""
+    if not first_detection:
+        return None
+    alert = {
+        "key": "conflict:locked-door-open",
+        "level": "critical",
+        "title": "检测到CAN状态篡改",
+        "detail": "中央门锁已锁止，但左前门状态为开启",
+        "can_id": frame["can_id"],
+        "data_hex": frame["data_hex"],
+        "anomaly_location": frame["anomaly_location"],
+        "created_at_ms": received_at_ms,
+    }
+    state.body_intrusion_alerts.appendleft(alert)
+    return alert
 
 
 def record_body_update(state, payload, is_test=False):
@@ -935,8 +1180,21 @@ def record_body_update(state, payload, is_test=False):
             "device_id": body["device_id"], "interface_path": interface_path,
             "source": source, "test": bool(is_test),
         }
+        intrusion_alert = detect_canoe_body_tamper(
+            state, frame, body, received_at_ms
+        ) if raw_supplied and frame_valid else None
         state.body_frame_history.appendleft(frame)
         persist_body_frame(state.vehicle_id, frame)
+        if intrusion_alert:
+            with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
+                connection.execute(
+                    "INSERT INTO body_events (vehicle_id,event_key,level,title,detail,created_at_ms) VALUES (?,?,?,?,?,?)",
+                    (
+                        state.vehicle_id, intrusion_alert["key"], intrusion_alert["level"],
+                        intrusion_alert["title"], intrusion_alert["detail"],
+                        intrusion_alert["created_at_ms"],
+                    ),
+                )
         created_frames.append(frame)
     return state.body_snapshot(), created_frames
 
@@ -1057,6 +1315,13 @@ async def start_hmi_comparison_runtime():
     await asyncio.to_thread(initialize_hmi_comparison)
 
 
+@app.on_event("shutdown")
+async def stop_canoe_agent_runtime():
+    """Do not leave a hidden CANoe bridge process after the cloud exits."""
+
+    await asyncio.to_thread(stop_managed_canoe_agent)
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     public_path = request.url.path in {
@@ -1078,6 +1343,10 @@ async def security_headers(request: Request, call_next):
         or (request.method == "POST" and request.url.path.endswith("/wifi/control/ack"))
     )
     navigation_ingest = request.method == "POST" and request.url.path.endswith("/navigation")
+    canoe_agent = request.method == "POST" and (
+        request.url.path.endswith("/body/canoe-attack/next")
+        or request.url.path.endswith("/body/canoe-attack/ack")
+    )
     if (
         DASHBOARD_ACCESS_TOKEN
         and not public_path
@@ -1088,6 +1357,7 @@ async def security_headers(request: Request, call_next):
         and not wifi_ingest
         and not wifi_edge_control
         and not navigation_ingest
+        and not canoe_agent
     ):
         query_token = request.query_params.get("access_token", "")
         if token_matches(query_token, DASHBOARD_ACCESS_TOKEN):
@@ -1265,7 +1535,8 @@ async def body_history(vehicle_id: str, limit: int = 100):
         connection.row_factory = sqlite3.Row
         rows = connection.execute(
             """SELECT sequence,can_id,dlc,data_hex,signals_json,captured_at_ms,
-                      received_at_ms,valid,invalid_reason,device_id,interface_path,source,is_test
+                      received_at_ms,valid,invalid_reason,device_id,interface_path,source,is_test,
+                      is_intrusion,intrusion_type,intrusion_reason
                FROM body_frames WHERE vehicle_id=? ORDER BY received_at_ms DESC LIMIT ?""",
             (vehicle_id, limit),
         ).fetchall()
@@ -1275,6 +1546,7 @@ async def body_history(vehicle_id: str, limit: int = 100):
         record["signals"] = json.loads(record.pop("signals_json") or "{}")
         record["valid"] = bool(record["valid"])
         record["is_test"] = bool(record["is_test"])
+        record["is_intrusion"] = bool(record["is_intrusion"])
         records.append(record)
     return {"vehicle_id": vehicle_id, "count": len(records), "frames": records}
 
@@ -1329,12 +1601,132 @@ async def trigger_body_event(vehicle_id: str, request: Request):
     if action not in BODY_TEST_ACTIONS:
         raise HTTPException(status_code=400, detail="unsupported body event action")
     state = registry.get(vehicle_id)
+    state.body_snapshot()
+    canoe_command = state.body_canoe_attack_command
+    if canoe_command and canoe_command.get("active"):
+        raise HTTPException(status_code=409, detail="CANoe attack is active")
     command = queue_body_event_command(state, action)
     return {
         "accepted": True, "vehicle_id": state.vehicle_id, "action": action,
         "label": command["label"], "value": command["target"],
         "command": command, "body": state.body_snapshot(), "frames": [],
     }
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/canoe-attack")
+async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    attack_type = str(payload.get("attack", "door_fl_tamper")).strip().lower()
+    if attack_type != "door_fl_tamper":
+        raise HTTPException(status_code=400, detail="only door_fl_tamper is supported")
+    state = registry.get(vehicle_id)
+    current_body = state.body_snapshot()
+    current = state.body_canoe_attack_command
+    if current and current.get("active"):
+        raise HTTPException(status_code=409, detail="a CANoe attack command is already active")
+    event_command = state.body_event_command
+    if event_command and event_command.get("status") in {"pending", "executing"}:
+        raise HTTPException(status_code=409, detail="a body event command is already active")
+    agent_launch = {
+        "enabled": CANOE_AGENT_AUTOSTART_ON_ATTACK,
+        "started": False,
+        "already_running": bool(current_body.get("canoe_agent_online")),
+    }
+    if CANOE_AGENT_AUTOSTART_ON_ATTACK and not current_body.get("canoe_agent_online"):
+        try:
+            agent_launch.update(ensure_canoe_agent_started())
+        except Exception as exc:
+            LOGGER.exception("canoe_agent_autostart_failure")
+            raise HTTPException(
+                status_code=503,
+                detail="CANoe代理自动启动失败：{}".format(exc),
+            )
+    state.body_canoe_attack_sequence = (state.body_canoe_attack_sequence + 1) & 0x7FFFFFFF
+    if state.body_canoe_attack_sequence == 0:
+        state.body_canoe_attack_sequence = 1
+    state.body_canoe_attack_command = {
+        "sequence": state.body_canoe_attack_sequence,
+        "attack": attack_type,
+        "status": "queued",
+        "requested_at_ms": now_ms(),
+        "acknowledged_at_ms": None,
+        "detected_at_ms": None,
+        "completed_at_ms": None,
+        "restore_due_at_ms": None,
+        "detected_frame": None,
+        "error": "",
+    }
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "agent_launch": agent_launch,
+        "command": dict(state.body_canoe_attack_command),
+        "body": state.body_snapshot(),
+    }
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/canoe-attack/next")
+async def next_body_canoe_attack(vehicle_id: str, request: Request):
+    if bearer_token(request.headers) != INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    try:
+        last_sequence = max(0, int(payload.get("last_sequence", 0)))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="last_sequence must be an integer")
+    state = registry.get(vehicle_id)
+    state.body_canoe_agent_last_seen_ms = now_ms()
+    state.body_snapshot()
+    command = state.body_canoe_attack_command
+    pending = bool(
+        command
+        and command.get("status") == "queued"
+        and int(command.get("sequence") or 0) != last_sequence
+    )
+    return {
+        "accepted": True,
+        "vehicle_id": state.vehicle_id,
+        "pending": pending,
+        "command": dict(command) if pending else None,
+    }
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/canoe-attack/ack")
+async def acknowledge_body_canoe_attack(vehicle_id: str, request: Request):
+    if bearer_token(request.headers) != INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    try:
+        payload = await request.json()
+        sequence = int(payload.get("sequence", 0))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="sequence must be an integer")
+    agent_status = str(payload.get("status", "")).strip().lower()
+    if agent_status not in {"injecting", "failed"}:
+        raise HTTPException(status_code=400, detail="status must be injecting or failed")
+    state = registry.get(vehicle_id)
+    state.body_canoe_agent_last_seen_ms = now_ms()
+    command = state.body_canoe_attack_command
+    if not command or sequence != int(command.get("sequence") or 0):
+        raise HTTPException(status_code=409, detail="attack sequence does not match")
+    if command.get("status") == "detected":
+        return {"accepted": True, "command": dict(command)}
+    if agent_status == "injecting":
+        command["status"] = "injecting"
+        command["acknowledged_at_ms"] = now_ms()
+        command["restore_due_at_ms"] = command["acknowledged_at_ms"] + 5000
+        command["active"] = True
+        command["error"] = ""
+    else:
+        command["status"] = "timeout"
+        command["completed_at_ms"] = now_ms()
+        command["error"] = str(payload.get("error") or "CANoe代理启动注入失败")[:240]
+    return {"accepted": True, "command": dict(command)}
 
 
 @app.post("/api/vehicles/{vehicle_id}/body/transmission")

