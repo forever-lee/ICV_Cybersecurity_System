@@ -14,6 +14,19 @@
   const H264_TARGET_BUFFER_SECONDS = 1;
   const H264_RESUME_BUFFER_SECONDS = 0.5;
   const H264_MAX_LIVE_LATENCY_MS = 5000;
+  const MAP_DEMO_MODE = new URLSearchParams(location.search).get("map_demo") === "1";
+  const MAP_DEMO_POINTS = [
+    [106.611825, 29.537908],
+    [106.612113, 29.537873],
+    [106.612419, 29.537836],
+    [106.612672, 29.537697],
+    [106.612751, 29.537461],
+    [106.612710, 29.537220],
+    [106.612513, 29.537075],
+    [106.612207, 29.537102],
+    [106.611930, 29.537244],
+    [106.611781, 29.537489],
+  ];
   const VIEW_NAMES = {
     overview: "全局安全态势", telematics: "车联网域", bluetooth: "蓝牙域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
@@ -64,7 +77,7 @@
     navigationTrackingActive: false,
     navigationSessionId: null, pendingNavigationHistory: null,
     navigationHistoryRenderId: 0, navigationHistoryLoading: false,
-    pendingLiveNavigationPoints: [],
+    pendingLiveNavigationPoints: [], mapDemoTimer: null, mapDemoIndex: 0,
     mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
     mediaMime: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
@@ -555,13 +568,11 @@
     if (state.routeLine) state.vehicleMap.remove(state.routeLine);
     const latestNavigation = simplified[simplified.length - 1];
     const latestPosition = positions[positions.length - 1];
-    const markerContent = document.createElement("div");
-    markerContent.className = "vehicle-map-marker";
-    markerContent.innerHTML = '<i class="vehicle-heading"></i>';
+    const markerContent = createVehicleMarkerContent();
     state.vehicleMarker = new state.amap.Marker({
       position: latestPosition,
       content: markerContent,
-      offset: new state.amap.Pixel(-13, -13),
+      offset: new state.amap.Pixel(-17, -17),
       zIndex: 120,
     });
     state.routeLine = new state.amap.Polyline({
@@ -612,13 +623,14 @@
     navigationPosition(navigation, (position) => {
       if (updateId !== state.navigationUpdateId) return;
       if (!state.vehicleMarker) {
-        const markerContent = document.createElement("div");
-        markerContent.className = "vehicle-map-marker";
-        markerContent.innerHTML = '<i class="vehicle-heading"></i>';
+        const demoMarker = state.navigationSourceKind === "demo";
+        const markerContent = createVehicleMarkerContent(demoMarker);
         state.vehicleMarker = new state.amap.Marker({
           position,
           content: markerContent,
-          offset: new state.amap.Pixel(-13, -13),
+          offset: demoMarker
+            ? new state.amap.Pixel(-16, -28)
+            : new state.amap.Pixel(-17, -17),
           zIndex: 120,
         });
         state.routeLine = new state.amap.Polyline({
@@ -659,6 +671,54 @@
     });
   }
 
+  function createVehicleMarkerContent(demoMarker = false) {
+    const markerContent = document.createElement("div");
+    markerContent.className = "vehicle-map-marker";
+    if (demoMarker) {
+      markerContent.classList.add("demo-navigation-car");
+      markerContent.innerHTML = `
+        <svg class="vehicle-heading demo-car-svg" viewBox="0 0 32 56" aria-hidden="true">
+          <defs>
+            <linearGradient id="demo-car-body" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#ffffff" />
+              <stop offset=".42" stop-color="#e8edf1" />
+              <stop offset=".72" stop-color="#aeb8c0" />
+              <stop offset="1" stop-color="#f8fafb" />
+            </linearGradient>
+            <linearGradient id="demo-car-glass" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#73808d" />
+              <stop offset=".22" stop-color="#182430" />
+              <stop offset="1" stop-color="#05090d" />
+            </linearGradient>
+            <linearGradient id="demo-car-roof" x1="0" y1="0" x2="1" y2="0">
+              <stop offset="0" stop-color="#aeb8c0" />
+              <stop offset=".48" stop-color="#ffffff" />
+              <stop offset="1" stop-color="#929da6" />
+            </linearGradient>
+          </defs>
+          <ellipse class="demo-car-shadow" cx="16" cy="29" rx="12" ry="24" />
+          <path class="demo-car-body" d="M16 1.2c5.1 0 8.7 3.2 10.1 8.4l1.6 7.2v28.3c0 6-4.5 9.7-11.7 9.7S4.3 51.1 4.3 45.1V16.8l1.6-7.2C7.3 4.4 10.9 1.2 16 1.2Z" />
+          <path class="demo-car-hood" d="M7.6 16.5 9.2 8.8C10.3 5.3 12.5 3.5 16 3.5s5.7 1.8 6.8 5.3l1.6 7.7-3.2-2.2H10.8l-3.2 2.2Z" />
+          <path class="demo-car-windshield" d="m8.4 18.1 3.1-4h9l3.1 4-1.5 10.1H9.9L8.4 18.1Z" />
+          <path class="demo-car-roof" d="M10.2 29h11.6l.8 11.1-2.8 3.8h-7.6l-2.8-3.8.8-11.1Z" />
+          <path class="demo-car-rear-glass" d="m9.8 41.2 2.7 3.5h7l2.7-3.5.9 5.2-3.3 2.5h-7.6l-3.3-2.5.9-5.2Z" />
+          <path class="demo-car-highlight" d="M7.7 17.3 6.9 44c-.1 4.2 2.1 6.8 6.2 8.1M24.3 17.3l.8 26.7c.1 4.2-2.1 6.8-6.2 8.1" />
+          <path class="demo-car-headlight" d="m8.1 9.7 3.3-3-1.3 5-2.4 1.3.4-3.3Zm15.8 0-3.3-3 1.3 5 2.4 1.3-.4-3.3Z" />
+          <path class="demo-car-rear-trim" d="M10.2 49.2c3.8 1.7 7.8 1.7 11.6 0l-.7 2.2c-3.4 1.3-6.8 1.3-10.2 0l-.7-2.2Z" />
+        </svg>`;
+      return markerContent;
+    }
+    markerContent.innerHTML = `
+      <svg class="vehicle-heading" viewBox="0 0 24 34" aria-hidden="true">
+        <path class="vehicle-marker-wheel" d="M1 8h3v7H1zM20 8h3v7h-3zM1 21h3v7H1zM20 21h3v7h-3z" />
+        <path class="vehicle-marker-body" d="M12 1 17.5 4.5c1.3.8 2.2 2.3 2.3 3.8l.7 19.5c.1 2.8-2.1 5.2-4.9 5.2H8.4c-2.8 0-5-2.4-4.9-5.2l.7-19.5c.1-1.5 1-3 2.3-3.8L12 1Z" />
+        <path class="vehicle-marker-glass" d="m7 8.5 2-3h6l2 3 .5 5.5h-11L7 8.5Zm-.3 16h10.6l-.2 4.4H6.9l-.2-4.4Z" />
+        <path class="vehicle-marker-cabin" d="M6.5 16h11l-.3 6.1H6.8L6.5 16Z" />
+        <path class="vehicle-marker-light" d="M6.1 6.9 8 5.3l-.7 2.9-1.2-1.3Zm11.8 0L16 5.3l.7 2.9 1.2-1.3Z" />
+      </svg>`;
+    return markerContent;
+  }
+
   function formatNavigationAge(epoch) {
     if (!epoch) return "—";
     const ageSeconds = Math.max(0, Math.round((Date.now() - Number(epoch)) / 1000));
@@ -684,11 +744,12 @@
     const speed = Number.isFinite(navigationSpeed) ? navigationSpeed : chassisSpeed;
     $("vehicleSpeed").textContent = Number.isFinite(speed) ? Math.max(0, speed).toFixed(1) : "—";
     $("speedSource").textContent = Number.isFinite(navigationSpeed)
-      ? "边缘端 GNSS / CAN"
+      ? MAP_DEMO_MODE && navigation?.source === "WEB-DEMO" ? "网页模拟轨迹" : "边缘端 GNSS / CAN"
       : Number.isFinite(chassisSpeed) ? "底盘域 CAN" : "等待边缘端";
     if (!hasPosition) return;
 
-    const sourceKind = "edge";
+    const demoNavigation = MAP_DEMO_MODE && navigation.source === "WEB-DEMO";
+    const sourceKind = demoNavigation ? "demo" : "edge";
     if (state.navigationSourceKind && state.navigationSourceKind !== sourceKind) {
       state.routePoints = [];
       if (state.vehicleMap) {
@@ -701,7 +762,9 @@
     state.navigationSourceKind = sourceKind;
 
     const online = navigationIsFresh(navigation);
-    $("navigationDataSourceTag").textContent = "数据源：边缘端 GNSS / CAN";
+    $("navigationDataSourceTag").textContent = demoNavigation
+      ? "数据源：WEB-DEMO 模拟轨迹"
+      : "数据源：边缘端 GNSS / CAN";
     $("vehicleLongitude").textContent = Number(navigation.longitude).toFixed(6);
     $("vehicleLatitude").textContent = Number(navigation.latitude).toFixed(6);
     $("vehicleHeading").textContent = navigation.heading_deg == null ? "—" : `${Number(navigation.heading_deg).toFixed(1)}°`;
@@ -712,13 +775,45 @@
     $("navigationAge").textContent = formatNavigationAge(navigation.captured_at_ms);
     $("navigationPulse").classList.toggle("online", online);
     $("navigationStatus").className = `tag ${online ? "online" : "stale"}`;
-    $("navigationStatus").textContent = online ? "边缘端定位在线" : "定位数据已过期";
+    $("navigationStatus").textContent = online
+      ? demoNavigation ? "地图演示运行中" : "边缘端定位在线"
+      : "定位数据已过期";
     $("navigationHeadingStatus").classList.toggle("active", online);
     $("navigationHeadingStatus").textContent = online ? "实时定位" : "定位已过期";
     if (online) {
       state.navigationTrackingActive = true;
       renderNavigationOnMap(navigation);
     }
+  }
+
+  function mapDemoHeading(current, next) {
+    const averageLatitude = (current[1] + next[1]) * Math.PI / 360;
+    const east = (next[0] - current[0]) * Math.cos(averageLatitude);
+    const north = next[1] - current[1];
+    return (Math.atan2(east, north) * 180 / Math.PI + 360) % 360;
+  }
+
+  function startMapDemo() {
+    if (!MAP_DEMO_MODE || state.mapDemoTimer) return;
+    const update = () => {
+      const current = MAP_DEMO_POINTS[state.mapDemoIndex];
+      const nextIndex = (state.mapDemoIndex + 1) % MAP_DEMO_POINTS.length;
+      const next = MAP_DEMO_POINTS[nextIndex];
+      updateNavigation({
+        longitude: current[0],
+        latitude: current[1],
+        coordinate_system: "GCJ02",
+        heading_deg: mapDemoHeading(current, next),
+        speed_kph: 20,
+        accuracy_m: 1,
+        source: "WEB-DEMO",
+        status: "online",
+        captured_at_ms: Date.now(),
+      }, {});
+      state.mapDemoIndex = nextIndex;
+    };
+    update();
+    state.mapDemoTimer = window.setInterval(update, 1000);
   }
 
   function preferredNavigation() {
@@ -1162,7 +1257,7 @@
     state.rateHistory = state.rateHistory.slice(-40);
     updateFpsBars(fps);
     updateDomains(metrics.domains || {});
-    if (online) {
+    if (!MAP_DEMO_MODE && online) {
       const sessionId = metrics.navigation_session_id || "legacy";
       if (sessionId !== state.navigationSessionId) {
         resetNavigationView();
@@ -1172,7 +1267,7 @@
         renderNavigationHistory(metrics.navigation_history, sessionId);
       }
       applyPreferredNavigation();
-    } else if (state.navigationTrackingActive) {
+    } else if (!MAP_DEMO_MODE && state.navigationTrackingActive) {
       resetNavigationView();
     }
     updateBluetooth(metrics.bluetooth || {});
@@ -1999,14 +2094,20 @@
   bodyStatusDataSource.subscribe(renderBodyStatus);
   initializeVehicleMap();
   setupNavigation();
+  startMapDemo();
   setupDomainOpenButtons();
   setupBodyDemo();
   setupBodyTransmissionControls();
   setTimeout(() => {
-    if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
+    if (!MAP_DEMO_MODE
+      && typeof startBrowserLocationFallback === "function"
+      && !navigationIsFresh(state.latestMetrics.navigation)) {
+      startBrowserLocationFallback();
+    }
   }, 1500);
   window.addEventListener("resize", () => { if (state.currentView === "adas") resizeChart(); });
   window.addEventListener("beforeunload", () => {
+    if (state.mapDemoTimer) window.clearInterval(state.mapDemoTimer);
     closeSockets();
   });
   setInterval(updateClock, 1000);
