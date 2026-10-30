@@ -147,6 +147,10 @@
                 </div>
               </div>
             </article>
+            <article class="panel wifi-control-panel" aria-label="WiFi 报文发送控制">
+              <div><p class="eyebrow">WIFI SENDER CONTROL</p><h2>报文发送控制</h2><p id="wifiControlStatus" role="status" aria-live="polite">等待 WiFi 接收程序连接</p></div>
+              <div class="module-actions"><button class="primary-button" id="wifiPauseButton" type="button" disabled>暂停发送</button><button class="primary-button" id="wifiResumeButton" type="button" disabled>恢复发送</button></div>
+            </article>
             <article class="panel data-module wifi-module" aria-labelledby="wifiPacketTitle">
               <div class="module-head"><div class="module-ident wifi"><i>UDP</i><span><p class="eyebrow">FORWARDED WIFI PACKETS</p><h2 id="wifiPacketTitle">WiFi 充电报文</h2><small>保留原始文本、HEX 和最近接收记录</small></span></div><div class="module-actions"><button class="primary-button clear-wifi-button" id="wifiClearButton" type="button">清空本轮数据</button></div></div>
               <div class="telemetry-layout">

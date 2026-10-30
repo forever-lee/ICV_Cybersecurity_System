@@ -579,3 +579,12 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
   .module-actions { flex-wrap: wrap; }
   .abnormal-row { grid-template-columns: 1fr; gap: 5px; }
 }
+:root { --wifi-control-muted: #8aa7ba; }
+.wifi-control-panel { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:22px; margin-bottom:16px; }
+.wifi-control-panel h2 { font-size:18px; margin:5px 0 10px; }
+.wifi-control-panel small { color:var(--wifi-control-muted); }
+#wifiControlStatus { color:#49d8d4; margin:8px 0; }
+#wifiControlStatus[data-status="pending"] { color:#f7c568; }
+#wifiControlStatus[data-status="expired"] { color:#ff8299; }
+.wifi-control-panel button:disabled { opacity:.45; cursor:not-allowed; }
+@media(max-width:700px) { .wifi-control-panel { align-items:flex-start; flex-direction:column; } }

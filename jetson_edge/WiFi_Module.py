@@ -9,10 +9,14 @@ import socket
 import time
 from datetime import datetime
 from urllib import error, request
+try:
+    from .wifi_control_agent import WifiControlAgent
+except ImportError:
+    from wifi_control_agent import WifiControlAgent
 
 
 # 可直接修改，也可通过同名环境变量覆盖。
-UDP_IP = os.getenv("WIFI_UDP_HOST", "0.0.0.0")
+UDP_IP = os.getenv("WIFI_UDP_HOST", os.getenv("WIFI_JETSON_ADDRESS", "192.168.4.100"))
 UDP_PORT = int(os.getenv("WIFI_UDP_PORT", "6001"))
 WIFI_DEVICE_HOST = os.getenv("WIFI_DEVICE_HOST", "192.168.4.201").strip()
 WIFI_NETWORK_INTERFACE = os.getenv("WIFI_NETWORK_INTERFACE", "eno1").strip()
@@ -122,11 +126,15 @@ def forward_to_cloud(data, addr, udp_received_at_ms=None):
     return False
 
 
-def run_receiver(host, port):
+def run_receiver(host, port, control_enabled=True):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind((host, port))
     sock.settimeout(1.0)
+    control = WifiControlAgent(sock, (WIFI_DEVICE_HOST, 6002), CLOUD_HTTP_URL, VEHICLE_ID, INGEST_TOKEN) if control_enabled else None
+    if control:
+        control.start()
+        print("[CONTROL] Cloud polling active, downlink {}:6002".format(WIFI_DEVICE_HOST), flush=True)
     print("UDP receiver started, listening on {}:{}".format(host, port))
     print(
         "[WiFi LINK] S32K344 Ethernet {} -> cable/UDP -> switch -> "
@@ -185,6 +193,11 @@ def run_receiver(host, port):
             next_diagnostic_at = last_packet_at + WIFI_DIAGNOSTIC_INTERVAL_SECONDS
             timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
             text = data.decode("utf-8", errors="replace").strip()
+            if text.startswith("ACK,"):
+                if control:
+                    control.receive_ack(data, addr)
+                print("[CONTROL ACK] {} from {} (excluded from telemetry)".format(text, addr), flush=True)
+                continue
             print(
                 "[WiFi RX OK] packet={} source={}:{} bytes={} received_at={}".format(
                     packet_count,
@@ -217,6 +230,9 @@ def run_receiver(host, port):
     except KeyboardInterrupt:
         print("\nWiFi receiver stopped.")
     finally:
+        if control:
+            control.stopped.set()
+            control.join(timeout=5)
         sock.close()
 
 
@@ -224,6 +240,7 @@ def main():
     parser = argparse.ArgumentParser(description="WiFi UDP receiver and cloud forwarder")
     parser.add_argument("--host", default=UDP_IP, help="UDP listen address")
     parser.add_argument("--port", type=int, default=UDP_PORT, help="UDP listen port")
+    parser.add_argument("--no-control", action="store_true", help="receive telemetry only")
     parser.add_argument("--send-test", action="store_true", help="send random UDP test data and exit")
     parser.add_argument("--target-host", default="127.0.0.1", help="test packet target host")
     parser.add_argument("--count", type=int, default=1, help="number of test packets")
@@ -232,7 +249,7 @@ def main():
     if args.send_test:
         send_test_packets(args.target_host, args.port, max(1, args.count), max(0, args.interval))
     else:
-        run_receiver(args.host, args.port)
+        run_receiver(args.host, args.port, control_enabled=not args.no_control)
 
 
 if __name__ == "__main__":

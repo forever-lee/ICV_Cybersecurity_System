@@ -1,0 +1,160 @@
+diff --git a/src/wifi_at_uart.c b/src/wifi_at_uart.c
+index 15bdb6c..20bf056 100644
+--- a/src/wifi_at_uart.c
++++ b/src/wifi_at_uart.c
+@@ -65,6 +65,25 @@ volatile uint32_t g_wifi_uart_overflow_cnt = 0U;
+ 
+ static uint8_t  g_wifi_uart_udp_line_buf[WIFI_UART_UDP_LINE_BUF_SIZE];
+ static uint32_t g_wifi_uart_udp_line_index = 0U;
++/* Main-loop TX pump: never block Ethernet/RX while sending a command. */
++static uint8_t s_control_tx[128];
++static uint16_t s_control_tx_len = 0U;
++static uint16_t s_control_tx_index = 0U;
++volatile uint32_t g_wifi_control_tx_done_cnt = 0U;
++
++uint8_t WifiAtUart_QueueControl(const uint8_t *data, uint16_t len)
++{
++    if ((data == NULL) || (len == 0U) ||
++        (len >= sizeof(s_control_tx)) || (s_control_tx_len != 0U))
++    {
++        return 0U;
++    }
++    memcpy(s_control_tx, data, len);
++    s_control_tx[len] = '\n';
++    s_control_tx_index = 0U;
++    s_control_tx_len = (uint16_t)(len + 1U);
++    return 1U;
++}
+ 
+ volatile uint32_t g_wifi_uart_udp_line_cnt = 0U;
+ volatile uint32_t g_wifi_uart_udp_overflow_cnt = 0U;
+@@ -495,6 +514,8 @@ static void WifiAtUart_PeripheralInit(void)
+ 
+ void WifiAtUart_Init(void)
+ {
++	s_control_tx_len = 0U;
++	s_control_tx_index = 0U;
+ 	 g_wifi_uart_rx_cnt = 0U;
+ 	    g_wifi_uart_last_byte = 0U;
+ 	    g_wifi_uart_line_cnt = 0U;
+@@ -670,6 +691,8 @@ static uint8_t WifiAtUart_OpenUdpBroadcast(void)
+ 
+ uint8_t WifiAtUart_SendUdpBroadcast(const uint8_t *data, uint16_t len)
+ {
++    /* Avoid inserting board-generated demo text into a control command. */
++    if (s_control_tx_len != 0U) { return 0U; }
+     if ((data == NULL) || (len == 0U) || (len > WIFI_UART_UDP_LINE_BUF_SIZE))
+     {
+         g_wifi_at_broadcast_fail_cnt++;
+@@ -744,4 +767,15 @@ while ((IP_LPUART_1->STAT & LPUART_STAT_RDRF_MASK) != 0U)
+ }
+ 
+ ChargeSim_Process((uint32_t)sys_now());
++/* Transmit at most one byte per poll; RX and lwIP remain serviced. */
++if ((s_control_tx_len != 0U) &&
++    ((IP_LPUART_1->STAT & LPUART_STAT_TDRE_MASK) != 0U))
++{
++    IP_LPUART_1->DATA = s_control_tx[s_control_tx_index++];
++    if (s_control_tx_index >= s_control_tx_len)
++    {
++        s_control_tx_len = 0U;
++        g_wifi_control_tx_done_cnt++;
++    }
++}
+ }
+diff --git a/src/wifi_udp_forward.c b/src/wifi_udp_forward.c
+index 9c31579..38ccee7 100644
+--- a/src/wifi_udp_forward.c
++++ b/src/wifi_udp_forward.c
+@@ -7,6 +7,7 @@
+ 
+ 
+ #include "wifi_udp_forward.h"
++#include "wifi_at_uart.h"
+ 
+ #include <stdint.h>
+ #include <string.h>
+@@ -34,6 +35,48 @@
+ 
+ static struct udp_pcb *g_wifi_udp_pcb = NULL;
+ static ip_addr_t g_wifi_udp_dst_ip;
++static struct udp_pcb *s_control_pcb = NULL;
++volatile uint32_t g_wifi_control_rx_cnt = 0U;
++volatile uint32_t g_wifi_control_queued_cnt = 0U;
++volatile uint32_t g_wifi_control_drop_cnt = 0U;
++volatile int32_t g_wifi_control_bind_err = -1;
++
++/* Separate control channel; telemetry keeps its existing port and framing. */
++static void WifiControl_Receive(void *arg, struct udp_pcb *pcb,
++                               struct pbuf *p, const ip_addr_t *addr, u16_t port)
++{
++    uint8_t text[128];
++    uint16_t len;
++    uint16_t i;
++    uint16_t id_start = 8U; /* CTRL,ID= */
++    (void)arg; (void)pcb; (void)port;
++    if (p == NULL) { return; }
++    g_wifi_control_rx_cnt++;
++    len = p->tot_len;
++    if (!ip_addr_cmp(addr, &g_wifi_udp_dst_ip) ||
++        (len >= sizeof(text)) || (len < 22U)) { goto rejected; }
++    (void)pbuf_copy_partial(p, text, len, 0U);
++    while ((len > 0U) && ((text[len - 1U] == '\n') ||
++                         (text[len - 1U] == '\r'))) { len--; }
++    if (memcmp(text, "CTRL,ID=", id_start) != 0) { goto rejected; }
++    for (i = id_start; i < len && text[i] != ','; i++)
++    {
++        uint8_t c = text[i];
++        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
++              (c >= 'a' && c <= 'z') || c == '_' || c == '-')) { goto rejected; }
++    }
++    if ((i == id_start) || ((uint16_t)(i - id_start) > 40U)) { goto rejected; }
++    if (!(((len - i) == 13U && memcmp(&text[i], ",ACTION=PAUSE", 13U) == 0) ||
++          ((len - i) == 14U && memcmp(&text[i], ",ACTION=RESUME", 14U) == 0)))
++    { goto rejected; }
++    if (WifiAtUart_QueueControl(text, len) == 0U) { goto rejected; }
++    g_wifi_control_queued_cnt++;
++    pbuf_free(p);
++    return;
++rejected:
++    g_wifi_control_drop_cnt++;
++    pbuf_free(p);
++}
+ 
+ volatile uint32_t g_wifi_udp_init_ok = 0U;
+ volatile uint32_t g_wifi_udp_send_cnt = 0U;
+@@ -82,6 +125,22 @@ void WifiUdpForward_Init(void)
+     g_wifi_udp_send_cnt = 0U;
+     g_wifi_udp_send_fail_cnt = 0U;
+     g_wifi_udp_last_len = 0U;
++
++    /* Commands are accepted only from the configured Ethernet receiver. */
++    s_control_pcb = udp_new();
++    if (s_control_pcb != NULL)
++    {
++        g_wifi_control_bind_err = udp_bind(s_control_pcb, IP_ADDR_ANY, 6002U);
++        if (g_wifi_control_bind_err == ERR_OK)
++        {
++            udp_recv(s_control_pcb, WifiControl_Receive, NULL);
++        }
++        else
++        {
++            udp_remove(s_control_pcb);
++            s_control_pcb = NULL;
++        }
++    }
+ }
+ 
+ void WifiUdpForward_Send(const uint8_t *data, uint16_t len)
+diff --git a/include/wifi_at_uart.h b/include/wifi_at_uart.h
+index ab3e3ef..4e24504 100644
+--- a/include/wifi_at_uart.h
++++ b/include/wifi_at_uart.h
+@@ -12,6 +12,7 @@
+ 
+ void WifiAtUart_Init(void);
+ void WifiAtUart_Process(void);
++uint8_t WifiAtUart_QueueControl(const uint8_t *data, uint16_t len);
+ uint8_t WifiAtUart_SendUdpBroadcast(const uint8_t *data, uint16_t len);
+ 
+ extern volatile uint32_t g_wifi_at_broadcast_tx_cnt;

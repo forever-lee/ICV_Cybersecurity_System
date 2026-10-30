@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Preserve firmware patch context and LF endings on Windows checkouts.
+firmware/s32k344_wifi_downlink/*.patch text eol=lf -whitespace

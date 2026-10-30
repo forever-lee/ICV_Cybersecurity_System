@@ -36,6 +36,7 @@ from stream_protocol import (
     unpack_frame,
 )
 from wifi_ids import detect_wifi_intrusion, parse_charging_packet
+from wifi_control import WifiControl
 from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack
 
 
@@ -220,6 +221,7 @@ class VehicleState:
         self.wifi_ids_last_good_sequence = None
         self.wifi_ids_alert_count = 0
         self.wifi_ids_latest_alert = None
+        self.wifi_control = WifiControl()
         self.body_sequence = 0
         self.body_frame_history = deque(maxlen=80)
         self.body_alerts = deque(maxlen=40)
@@ -410,6 +412,7 @@ class VehicleState:
             "packet_count": self.wifi_sequence,
             "latest": self.wifi_latest,
             "history": list(self.wifi_history)[:12],
+            "control": self.wifi_control.snapshot(),
             "ids": {
                 "status": "alert" if self.wifi_ids_latest_alert else "normal",
                 "alert_count": self.wifi_ids_alert_count,
@@ -1070,6 +1073,10 @@ async def security_headers(request: Request, call_next):
     )
     bluetooth_local_ipc = "/bluetooth/local/" in request.url.path and request.method in {"GET", "POST"}
     wifi_ingest = request.method == "POST" and request.url.path.endswith("/wifi")
+    wifi_edge_control = (
+        (request.method == "GET" and request.url.path.endswith("/wifi/control/next"))
+        or (request.method == "POST" and request.url.path.endswith("/wifi/control/ack"))
+    )
     navigation_ingest = request.method == "POST" and request.url.path.endswith("/navigation")
     if (
         DASHBOARD_ACCESS_TOKEN
@@ -1079,6 +1086,7 @@ async def security_headers(request: Request, call_next):
         and not bluetooth_control_poll
         and not bluetooth_local_ipc
         and not wifi_ingest
+        and not wifi_edge_control
         and not navigation_ingest
     ):
         query_token = request.query_params.get("access_token", "")
@@ -1980,6 +1988,53 @@ async def ingest_wifi(vehicle_id: str, request: Request):
     state = registry.get(vehicle_id)
     record = record_wifi_packet(state, payload)
     return {"accepted": True, "vehicle_id": state.vehicle_id, "wifi": record}
+
+
+async def read_wifi_control_json(request):
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON payload")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="control payload must be an object")
+    return payload
+
+
+@app.post("/api/vehicles/{vehicle_id}/wifi/control")
+async def queue_wifi_control(vehicle_id: str, request: Request):
+    payload = await read_wifi_control_json(request)
+    control = registry.get(vehicle_id).wifi_control
+    try:
+        result = control.queue(str(payload.get("command", "")).lower())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"accepted": True, "control": result}
+
+
+@app.get("/api/vehicles/{vehicle_id}/wifi/control/next")
+async def next_wifi_control(vehicle_id: str, request: Request):
+    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    control = registry.get(vehicle_id).wifi_control
+    return {"command": control.poll(), "server_time_ms": now_ms()}
+
+
+@app.post("/api/vehicles/{vehicle_id}/wifi/control/ack")
+async def acknowledge_wifi_control(vehicle_id: str, request: Request):
+    if not token_matches(bearer_token(request.headers), INGEST_TOKEN):
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    payload = await read_wifi_control_json(request)
+    try:
+        result = registry.get(vehicle_id).wifi_control.acknowledge(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"accepted": True, "control": result}
 
 
 @app.post("/api/vehicles/{vehicle_id}/wifi/test")

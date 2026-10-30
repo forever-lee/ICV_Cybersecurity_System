@@ -1,5 +1,7 @@
 # V-SHIELD 云端服务
 
+WiFi 暂停/恢复的本地测试与 Jetson 部署见 [WiFi 下行操作说明](WIFI下行_本地操作说明.md)。本版通过 Jetson、有线 S32K、ESP32 透传将命令送到发送脚本，取得脚本 ACK 后才更新页面执行状态。
+
 电脑 A 同时运行云端服务、Web 页面和 `ble_s32_sender.py`；Jetson 统一运行视频、导航、蓝牙、WiFi 和车身域边缘端。Jetson 的完整操作见 [`jetson_edge/README.md`](jetson_edge/README.md)。
 
 ## 云端文件
