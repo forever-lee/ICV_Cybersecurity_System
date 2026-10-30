@@ -26,8 +26,8 @@ BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 BLUETOOTH_AGENT_PATH = BASE_DIR / "bluetooth_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-DEFAULT_CLOUD_HTTP_URL = "http://2f3c458d.r7.nas.cpolar.cn"
-DEFAULT_CLOUD_WS_URL = "ws://2f3c458d.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_HTTP_URL = "http://5567b4e0.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://5567b4e0.r7.nas.cpolar.cn"
 DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
