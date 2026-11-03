@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#07131f" />
+    <meta name="description" content="V-SHIELD 车联网多域数据管理平台演示页面" />
+    <title>V-SHIELD · 数据管理平台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="admin-shell">
+      <aside class="admin-sidebar" id="adminSidebar">
+        <div class="admin-brand">
+          <div class="brand-shield">V</div>
+          <div><strong>V-SHIELD</strong><span>DATA CENTER</span></div>
+        </div>
+
+        <div class="side-caption">车联网数据管理平台</div>
+        <nav class="admin-nav" aria-label="数据管理导航">
+          <p>管理中心</p>
+          <button class="nav-item active" data-page="overview"><i>总</i><span>数据管理总览</span></button>
+          <button class="nav-item" data-page="videos"><i>视</i><span>视频数据管理</span><em>6</em></button>
+          <button class="nav-item" data-page="jobs"><i>任</i><span>存储与回放任务</span><em class="amber">2</em></button>
+
+          <p>多域数据</p>
+          <button class="nav-item reserved" data-page="body"><i>身</i><span>车身域</span><b>预留</b></button>
+          <button class="nav-item reserved" data-page="wifi"><i>网</i><span>Wi-Fi 域</span><b>预留</b></button>
+          <button class="nav-item reserved" data-page="bluetooth"><i>蓝</i><span>蓝牙域</span><b>预留</b></button>
+        </nav>
+
+        <div class="side-system">
+          <div><span class="live-dot"></span><p><strong>管理服务正常</strong><small>PC-A · 127.0.0.1:8001</small></p></div>
+          <a href="http://127.0.0.1:8001/" target="_blank" rel="noopener">打开实时监控平台 <span>↗</span></a>
+        </div>
+      </aside>
+
+      <main class="admin-main">
+        <header class="admin-topbar">
+          <div class="topbar-left">
+            <button class="menu-button" id="menuButton" aria-label="打开菜单">☰</button>
+            <div><span>数据资产中心</span><i>/</i><strong id="pageCrumb">管理总览</strong></div>
+          </div>
+          <div class="topbar-right">
+            <span class="demo-badge">方案演示</span>
+            <label>目标车辆<select id="vehicleScope"><option>全部车辆</option><option>VHC-001</option><option>VHC-002</option></select></label>
+            <div class="clock"><strong id="adminClock">--:--:--</strong><span id="adminDate">----</span></div>
+            <button class="avatar" title="管理员">AD</button>
+          </div>
+        </header>
+
+        <div class="admin-workspace">
+          <section class="admin-page active" data-page-panel="overview">
+            <div class="page-title">
+              <div><p>DATA GOVERNANCE OVERVIEW</p><h1>车联网数据管理总览</h1><span>以视频域为首期建设对象，统一完成采集、归档、查询与历史回放</span></div>
+              <button class="primary-action" id="newArchiveButton"><span>＋</span> 新建保存任务</button>
+            </div>
+
+            <article class="solution-banner">
+              <div class="solution-copy">
+                <span class="section-kicker">总体数据链路</span>
+                <h2>实时业务与历史数据管理双通道运行</h2>
+                <p>保留现有视频实时播放链路，电脑 A 在后台异步保存 PCAP，并通过 MySQL 建立可检索的数据资产目录。</p>
+              </div>
+              <div class="flow-map" aria-label="视频数据处理流程">
+                <div class="flow-node"><i>JET</i><b>Jetson</b><small>fMP4 上传</small></div><span>›</span>
+                <div class="flow-node accent"><i>云</i><b>电脑 A</b><small>实时转发</small></div><span>›</span>
+                <div class="flow-split"><div><b>LIVE</b><small>网页实时播放</small></div><div><b>PCAP</b><small>异步归档</small></div></div><span>›</span>
+                <div class="flow-node green"><i>库</i><b>MySQL</b><small>索引管理</small></div>
+              </div>
+            </article>
+
+            <div class="metric-grid">
+              <article class="metric-card featured"><div class="metric-icon">视</div><div><span>视频数据记录</span><strong>6<small>条</small></strong><p>当前演示数据集</p></div><em>主建设域</em></article>
+              <article class="metric-card"><div class="metric-icon cyan">存</div><div><span>PCAP 归档容量</span><strong>42.6<small>MB</small></strong><p>磁盘文件独立保存</p></div><em>正常</em></article>
+              <article class="metric-card"><div class="metric-icon amber">析</div><div><span>回放解析任务</span><strong>2<small>项</small></strong><p>1 项解析中 · 1 项待处理</p></div><em>按需执行</em></article>
+              <article class="metric-card"><div class="metric-icon violet">域</div><div><span>规划数据域</span><strong>4<small>个</small></strong><p>视频域首期建设</p></div><em>逐步接入</em></article>
+            </div>
+
+            <div class="overview-layout">
+              <article class="panel records-panel">
+                <header class="panel-header"><div><p>VIDEO DATA</p><h2>最近视频数据</h2></div><button class="text-button" data-goto="videos">查看全部 <span>→</span></button></header>
+                <div class="table-wrap"><table><thead><tr><th>记录名称</th><th>车辆 / 摄像头</th><th>数据类型</th><th>持续时间</th><th>保存状态</th><th>回放状态</th><th></th></tr></thead><tbody id="recentRecords"></tbody></table></div>
+              </article>
+
+              <article class="panel storage-panel">
+                <header class="panel-header"><div><p>STORAGE PROFILE</p><h2>存储概况</h2></div><span class="healthy"><i></i>运行正常</span></header>
+                <div class="storage-body">
+                  <div class="storage-ring"><div><strong>42.6</strong><span>MB 已归档</span></div></div>
+                  <div class="storage-legend">
+                    <div><i class="normal"></i><span>正常视频</span><b>24.9 MB</b></div>
+                    <div><i class="replay"></i><span>Replay 攻击</span><b>10.1 MB</b></div>
+                    <div><i class="dos"></i><span>DoS 攻击</span><b>7.6 MB</b></div>
+                  </div>
+                  <div class="storage-foot"><span>数据盘使用率</span><b>4.2%</b><div><i></i></div><small>剩余空间充足，不影响实时视频服务</small></div>
+                </div>
+              </article>
+            </div>
+
+            <div class="domain-grid">
+              <article class="domain-card video-domain"><div class="domain-head"><i>视</i><span>首期建设</span></div><h3>视频域</h3><p>PCAP采集、MySQL索引、分类查询与历史视频回放。</p><div class="domain-progress"><span><b></b></span><em>方案演示完成</em></div></article>
+              <article class="domain-card"><div class="domain-head"><i>身</i><span>后续规划</span></div><h3>车身域</h3><p>预留CAN报文、控制事件与车身状态数据管理入口。</p><button data-placeholder="车身域">查看预留页</button></article>
+              <article class="domain-card"><div class="domain-head"><i>网</i><span>后续规划</span></div><h3>Wi-Fi 域</h3><p>预留扫描、连接、通信报文和异常事件查询入口。</p><button data-placeholder="Wi-Fi 域">查看预留页</button></article>
+              <article class="domain-card"><div class="domain-head"><i>蓝</i><span>后续规划</span></div><h3>蓝牙域</h3><p>预留蓝牙设备、遥测报文与攻击测试数据入口。</p><button data-placeholder="蓝牙域">查看预留页</button></article>
+            </div>
+          </section>
+
+          <section class="admin-page" data-page-panel="videos">
+            <div class="page-title compact"><div><p>VIDEO DATA MANAGEMENT</p><h1>视频数据管理</h1><span>集中查看PCAP归档、数据分类和历史回放状态</span></div><button class="primary-action" data-toast="保存任务已进入演示队列"><span>＋</span> 新建保存任务</button></div>
+            <article class="field-coverage">
+              <div><span>MYSQL FIELD COVERAGE</span><b>核心字段完整展示</b><small>video_records 表字段覆盖</small></div>
+              <strong>16 / 16</strong>
+              <p><code>pcap_path</code> 在列表中直接展示；方案不设置 MP4 文件路径，其他时间、状态及错误字段可通过“全部字段”查看。</p>
+            </article>
+            <article class="panel filter-panel">
+              <div class="search-box"><span>⌕</span><input id="recordSearch" placeholder="搜索记录名称、车辆或摄像头" /></div>
+              <label>数据类型<select id="typeFilter"><option value="all">全部类型</option><option value="normal">正常数据</option><option value="replay">Replay 攻击</option><option value="dos">DoS 攻击</option></select></label>
+              <label>回放状态<select id="statusFilter"><option value="all">全部状态</option><option value="available">可回放</option><option value="pending">待处理</option><option value="parsing">解析中</option><option value="failed">失败</option></select></label>
+              <button class="outline-button" id="resetFilters">重置筛选</button>
+            </article>
+            <article class="panel data-table-panel">
+              <header class="panel-header"><div><p>ARCHIVE RECORDS</p><h2>归档记录与文件路径</h2></div><div class="table-summary">共 <b id="recordCount">6</b> 条记录 · 横向滚动查看字段</div></header>
+              <div class="table-wrap full"><table class="archive-table"><thead><tr><th>ID / 记录名称</th><th>车辆 / 摄像头</th><th>开始 / 结束时间</th><th>时长</th><th>数据类型</th><th>PCAP 文件路径</th><th>PCAP 大小</th><th>保存状态</th><th>回放状态</th><th>最近更新</th><th>操作</th></tr></thead><tbody id="allRecords"></tbody></table></div>
+              <footer class="table-footer"><span>展示全部演示记录</span><div><button disabled>‹</button><b>1</b><button disabled>›</button></div></footer>
+            </article>
+          </section>
+
+          <section class="admin-page" data-page-panel="jobs">
+            <div class="page-title compact"><div><p>BACKGROUND TASKS</p><h1>存储与回放任务</h1><span>所有耗时操作在独立后台任务中执行，不阻塞实时视频链路</span></div></div>
+            <div class="pipeline-grid">
+              <article><i>01</i><span><b>旁路抓包</b><small>本地回环接口 · 8001端口</small></span><em class="state-live">运行中</em></article>
+              <article><i>02</i><span><b>PCAP 文件归档</b><small>异步滚动保存至数据盘</small></span><em class="state-live">正常</em></article>
+              <article><i>03</i><span><b>MySQL 元数据</b><small>路径、时间、类型与状态</small></span><em class="state-live">正常</em></article>
+              <article><i>04</i><span><b>历史回放解析</b><small>PCAP → fMP4 流 → 浏览器 MSE</small></span><em class="state-warn">1项解析中</em></article>
+            </div>
+            <article class="panel job-panel">
+              <header class="panel-header"><div><p>TASK QUEUE</p><h2>后台任务队列</h2></div><span class="queue-badge">队列独立运行</span></header>
+              <div class="job-row"><i class="spinner"></i><div><b>normal_002 · 按需解析回放</b><span>正在从PCAP重组WebSocket数据并流式输出fMP4</span></div><div class="job-progress"><span><i style="width:68%"></i></span><b>68%</b></div><em>解析中</em></div>
+              <div class="job-row"><i class="wait-icon">…</i><div><b>dos_001 · 等待回放解析</b><span>等待解析工作进程，不生成任何回放文件</span></div><div class="job-progress"><span><i style="width:0%"></i></span><b>0%</b></div><em class="pending">待处理</em></div>
+              <div class="job-row"><i class="done-icon">✓</i><div><b>replay_001 · 文件归档及入库</b><span>PCAP文件和MySQL记录均已就绪</span></div><div class="job-progress"><span><i style="width:100%"></i></span><b>100%</b></div><em class="complete">已完成</em></div>
+            </article>
+            <div class="panel job-playback-panel">
+              <header class="panel-header"><div><p>ON-DEMAND PLAYBACK</p><h2>视频播放窗口</h2></div><span class="stream-mode"><i></i> PCAP 按需流式回放</span></header>
+              <div class="job-video-layout">
+                <div class="job-video-player">
+                  <div class="job-video-window" aria-label="历史视频播放预留窗口">
+                    <div class="video-corner top-left"></div><div class="video-corner top-right"></div><div class="video-corner bottom-left"></div><div class="video-corner bottom-right"></div>
+                    <div class="video-placeholder"><i>视</i><b>normal_001 · 历史视频流</b><span>PCAP 已按需解析，fMP4 片段正在流式发送至浏览器</span><small>不生成、不保存回放视频文件</small></div>
+                    <div class="preview-hud"><span>PCAP STREAM · VHC-001 / CAM-FRONT-01</span><em id="jobStreamState">STREAMING</em></div>
+                  </div>
+                  <div class="job-player-controls">
+                    <button id="jobPlaybackToggle" aria-label="暂停播放">Ⅱ</button>
+                    <span id="jobElapsedTime">00:12</span>
+                    <input id="jobPlaybackProgress" type="range" min="0" max="60" step="0.1" value="12" aria-label="视频播放进度" />
+                    <span id="jobTotalTime">01:00</span>
+                    <button id="jobVolumeButton" class="text-control">音量 80%</button>
+                    <button id="jobFullscreenButton" class="text-control">全屏</button>
+                  </div>
+                </div>
+                <aside class="stream-info-panel">
+                  <span>PLAYBACK SESSION</span><h3>当前回放会话</h3>
+                  <dl><div><dt>视频记录</dt><dd>normal_001</dd></div><div><dt>数据来源</dt><dd>PCAP 原始归档</dd></div><div><dt>传输方式</dt><dd>fMP4 流 / 浏览器 MSE</dd></div><div><dt>文件落盘</dt><dd class="no-storage">不生成回放文件</dd></div></dl>
+                  <button data-goto="videos">选择可回放记录</button>
+                </aside>
+              </div>
+            </div>
+          </section>
+
+          <section class="admin-page placeholder-page" data-page-panel="body"><div class="placeholder-content"><i>身</i><span>RESERVED DOMAIN</span><h1>车身域数据管理</h1><p>预留CAN报文、车门门锁、灯光状态与控制事件的数据接入和查询能力。</p><div><b>计划能力</b><small>报文归档 · 信号检索 · 事件关联 · 状态回放</small></div></div></section>
+          <section class="admin-page placeholder-page" data-page-panel="wifi"><div class="placeholder-content"><i>网</i><span>RESERVED DOMAIN</span><h1>Wi-Fi 域数据管理</h1><p>预留无线设备扫描、连接状态、通信报文与异常测试记录的统一管理能力。</p><div><b>计划能力</b><small>设备资产 · 会话记录 · 报文查询 · 攻击标注</small></div></div></section>
+          <section class="admin-page placeholder-page" data-page-panel="bluetooth"><div class="placeholder-content"><i>蓝</i><span>RESERVED DOMAIN</span><h1>蓝牙域数据管理</h1><p>预留蓝牙设备、遥测报文、控制指令和攻击实验数据的统一管理能力。</p><div><b>计划能力</b><small>设备列表 · 遥测记录 · 指令审计 · 异常数据</small></div></div></section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="playbackModal" aria-hidden="true">
+      <div class="playback-modal" role="dialog" aria-modal="true" aria-labelledby="playbackTitle">
+        <header><div><p>PCAP ON-DEMAND STREAMING</p><h2 id="playbackTitle">PCAP 按需解析与流式回放</h2></div><button id="closePlayback" aria-label="关闭">×</button></header>
+        <div class="playback-layout">
+          <div class="mock-video"><canvas id="playbackCanvas"></canvas><div class="video-hud top"><span><i></i> ARCHIVE</span><b id="videoRecordLabel">normal_001</b></div><div class="video-hud bottom"><span id="videoVehicleLabel">VHC-001 · CAM-FRONT-01</span><b id="videoTimeLabel">10:00:00.000</b></div></div>
+          <aside class="record-details"><div class="detail-heading"><span>MYSQL RECORD</span><b>video_records 全部字段</b></div><dl id="recordFieldList"></dl><button data-toast="PCAP下载为方案演示功能">下载原始PCAP</button></aside>
+        </div>
+        <footer class="player-controls"><button id="playToggle">Ⅱ</button><span id="elapsedTime">00:00</span><input id="playbackProgress" type="range" min="0" max="100" value="12" /><span id="totalTime">00:30</span><button id="volumeToggle">音量 80%</button><button id="fullscreenMock">全屏</button></footer>
+      </div>
+    </div>
+
+    <div class="admin-toast" id="adminToast"></div>
+    <script src="./app.js"></script>
+  </body>
+</html>

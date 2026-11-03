@@ -16,14 +16,7 @@ from collections import OrderedDict
 from bleak import BleakClient
 
 
-def required_environment(name):
-    value = os.getenv(name, "").strip()
-    if not value:
-        raise SystemExit("缺少环境变量 {}".format(name))
-    return value
-
-
-BLE_ADDRESS = required_environment("BLE_ADDRESS")
+BLE_ADDRESS = "E2:92:FA:3D:0E:40"
 WRITE_UUID = os.getenv(
     "BLE_WRITE_UUID", "00001001-0000-1000-8000-00805f9b34fb"
 ).strip()

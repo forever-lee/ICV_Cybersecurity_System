@@ -8,7 +8,7 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "http://5567b4e0.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "http://2f3c458d.r7.nas.cpolar.cn"
 
 # 必须与 jetson_edge 中配置的 VEHICLE_INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
@@ -21,7 +21,7 @@ DASHBOARD_ACCESS_TOKEN = "autocan4023"
 # 代理会打开此配置并启动Measurement，无需再单独运行代理终端。
 CANOE_AGENT_AUTOSTART_ON_ATTACK = True
 CANOE_CONFIG_PATH = os.getenv(
-    "CANOE_CONFIG_PATH", r"D:\CANoeProjects\BodyAttack\canoe_attack.cfg"
+    "CANOE_CONFIG_PATH", r"D:\300_Develop\CANoe_Projetcs\canoe_gateway\canoe_attack.cfg"
 )
 
 # 超过多少秒没有收到车端数据，判定车辆离线。
