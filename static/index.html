@@ -120,8 +120,8 @@
               <article><span>当前 SOC</span><strong id="chargeSocStat">--<small>%</small></strong><small>来自最新 WiFi 报文</small></article>
               <article><span>充电状态</span><strong id="chargeStateStat">等待启动</strong><small>CHARGING / FULL</small></article>
               <article><span>最新序号</span><strong id="chargeSeqStat">--</strong><small>严格递增校验</small></article>
-              <article><span>接收报文 RX</span><strong id="wifiPacketCount">0</strong><small>充电报文与状态回复</small></article>
-              <article><span>发送报文 TX</span><strong id="wifiTxCount">0</strong><small>已下发命令，包含重试</small></article>
+              <article><span>充电报文 RX</span><strong id="wifiPacketCount">0</strong><small>有效充电数据</small></article>
+              <article><span>控制 TX / RX</span><strong id="wifiTxCount">0 / 0</strong><small>下发命令 / 收到回复</small></article>
               <article class="latency-stat"><span>端到端延迟（估算）</span><strong id="chargeLatencyStat">--<small>ms</small></strong><small id="chargeLatencyHint">等待带 TS 的报文</small></article>
             </div>
             <article class="panel charge-monitor" aria-labelledby="wifiTitle">
@@ -149,8 +149,8 @@
               </div>
             </article>
             <article class="panel wifi-control-panel" aria-label="WiFi 报文发送控制">
-              <div><p class="eyebrow">WIFI SENDER CONTROL</p><h2>报文发送控制</h2><p id="wifiControlStatus" role="status" aria-live="polite">等待 WiFi 接收程序连接</p></div>
-              <div class="module-actions"><button class="primary-button" id="wifiPauseButton" type="button" disabled>暂停发送</button><button class="primary-button" id="wifiResumeButton" type="button" disabled>恢复发送</button></div>
+              <div><p class="eyebrow">WIFI SENDER CONTROL</p><h2>充电控制</h2><p id="wifiControlStatus" role="status" aria-live="polite">等待状态确认</p><p id="wifiControlLink">等待控制连接</p><p id="wifiControlOperation"></p></div>
+              <div class="module-actions"><button class="primary-button" id="wifiPauseButton" type="button" disabled>暂停充电</button><button class="primary-button" id="wifiResumeButton" type="button" disabled>恢复充电</button></div>
             </article>
             <article class="panel wifi-attack-panel" aria-label="WiFi 攻击模拟">
               <div><p class="eyebrow">ATTACK SIMULATION · B</p><h2>攻击模拟</h2><p id="wifiAttackStatus" role="status">正常发送 · 未启用攻击</p></div>
@@ -163,6 +163,10 @@
                 <div class="latest-packet"><span class="label">最新报文</span><strong id="wifiText">尚未收到 WiFi 数据</strong><div class="packet-stats"><span>序号 <b id="wifiSeq">—</b></span><span>状态 <b id="wifiState">—</b></span><span>时间 <b id="wifiTime">—</b></span><span>延迟 <b id="wifiLatency">—</b></span></div><div class="hex-view blue"><span>HEX</span><code id="wifiHex">—</code></div></div>
                 <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="wifiHistory" class="history-list"><div class="history-empty">等待 WiFi 充电报文…</div></div></div>
               </div>
+            </article>
+            <article class="panel data-module wifi-module" aria-labelledby="wifiControlHistoryTitle">
+              <div class="module-head"><div class="module-ident wifi"><i>CTRL</i><span><h2 id="wifiControlHistoryTitle">控制报文 TX / RX</h2><small>状态查询和命令确认在此记录</small></span></div></div>
+              <div class="packet-history"><div id="wifiControlHistory" class="history-list"></div></div>
             </article>
             <article class="wifi-ids-alert idle" id="wifiIdsAlert" aria-live="polite">
               <div class="wifi-ids-alert-icon" id="wifiIdsAlertIcon">✓</div>

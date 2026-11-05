@@ -35,6 +35,7 @@ class WifiControl:
             fresh = bool(self.sender_seen_ms and self.clock() - self.sender_seen_ms < 15000)
             return {"agent_status": "online" if self.last_seen_ms and self.clock() - self.last_seen_ms < 10000 else "offline",
                     "state": self.confirmed_state if fresh else "unknown", "mode": self.mode if fresh else "unknown",
+                    "last_confirmed_state": self.confirmed_state, "state_fresh": fresh,
                     "sender_seen_ms": self.sender_seen_ms, "pending": dict(self.pending) if self.pending else None,
                     "last_ack": dict(self.last_ack) if self.last_ack else None,
                     "status": self.pending["status"] if self.pending else (self.last_ack or {}).get("status", "idle"),
@@ -93,7 +94,7 @@ class WifiControl:
 
     def acknowledge(self, payload):
         with self.lock:
-            self.last_seen_ms = self.clock()
+            self.expire()
             if payload.get("sent"):
                 sent = payload["sent"]
                 job = self.jobs.get(sent.get("id"))
@@ -110,24 +111,34 @@ class WifiControl:
             job = self.jobs.get(ack["id"])
             if not job or job["command"] != ack["command"]:
                 raise RuntimeError("unknown/mismatching reply")
-            self.record("RX", text, "rx:" + str(payload.get("event_id", ack["id"])))
-            observed_at = min(self.clock(), int(payload.get("received_at_ms", self.clock())))
-            fresh = self.clock() - observed_at < 15000
-            if (ack["status"] == "ok" and fresh and ack["last_order"] >= self.last_confirmed_order
-                    and job["order"] >= self.last_observation_order and observed_at >= self.sender_seen_ms):
-                self.sender_seen_ms = observed_at
+            event_id = "rx:" + str(payload.get("event_id", ack["id"]))
+            if event_id in self.event_ids:
+                return self.snapshot()
+            now = self.clock()
+            observed_at = (now - max(0, int(payload["age_ms"])) if "age_ms" in payload
+                           else min(now, int(payload.get("received_at_ms", now))))
+            self.record("RX", text, event_id)
+            fresh = now - observed_at < 15000
+            newer = (job["order"], observed_at) >= (self.last_observation_order, self.sender_seen_ms)
+            valid_state = (ack["status"] == "ok" and fresh and newer
+                           and ack["last_order"] >= self.last_confirmed_order)
+            if valid_state:
+                self.sender_seen_ms = max(self.sender_seen_ms, observed_at)
                 self.last_observation_order = job["order"]
                 self.last_confirmed_order = ack["last_order"]
                 self.confirmed_state = ack["state"]
                 self.mode = ack["mode"]
-            if self.pending and (ack["id"] == self.pending["id"] or
-                                 (ack["status"] == "ok" and ack["last_order"] == self.pending["order"])):
-                self.last_ack = dict(self.pending, status="applied" if ack["status"] == "ok" else ack["status"],
-                                     acknowledged_at_ms=self.clock())
-                self.pending = None
+            operation = self.pending or self.last_ack
+            if operation and (self.pending or operation["status"] == "expired"):
+                target = {"pause": "paused", "resume": "running"}.get(operation["command"])
+                applied = (valid_state and ack["last_order"] == operation["order"]
+                           and (target is None or ack["state"] == target))
+                rejected = (self.pending and fresh and ack["id"] == operation["id"]
+                            and ack["status"] != "ok")
+                if applied or rejected:
+                    self.last_ack = dict(operation, status="applied" if applied else ack["status"],
+                                         acknowledged_at_ms=now)
+                    self.pending = None
             if self.probe and self.probe["id"] == ack["id"]:
                 self.probe = None
-            if (self.last_ack and self.last_ack["status"] == "expired" and
-                    ack["status"] == "ok" and ack["last_order"] == self.last_ack["order"]):
-                self.last_ack["status"] = "applied"
             return self.snapshot()

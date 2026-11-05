@@ -83,6 +83,7 @@
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
     h264Rebuffering: false,
     wifiClearBeforeMs: 0, wifiClearBaseCount: 0, wifiClearBaseAlertCount: 0,
+    wifiSubmission: null, wifiMetricsAt: 0, wifiConnectAt: 0,
   };
 
   if (!window.VShieldBody?.BodyStatusDataSource) {
@@ -1085,6 +1086,8 @@
   function connect() {
     clearTimeout(state.reconnectTimer);
     closeSockets();
+    state.wifiMetricsAt = 0;
+    updateWifi(state.latestMetrics.wifi || {});
     resetPlayback();
     setConnection(false, "正在连接");
     const fmp4Supported = "MediaSource" in window;
@@ -1096,17 +1099,30 @@
     state.liveSocket.onopen = () => setConnection(false, "等待车端");
     state.liveSocket.onclose = scheduleReconnect;
     state.liveSocket.onerror = () => state.liveSocket.close();
-    state.metricsSocket = new WebSocket(wsUrl(`/ws/metrics/${encodeURIComponent(state.vehicleId)}`));
-    state.metricsSocket.onmessage = (event) => {
-      try { updateMetrics(JSON.parse(event.data)); } catch (_) { /* Ignore malformed telemetry. */ }
+    const metricsSocket = new WebSocket(wsUrl(`/ws/metrics/${encodeURIComponent(state.vehicleId)}`));
+    state.metricsSocket = metricsSocket;
+    state.wifiConnectAt = Date.now();
+    metricsSocket.onmessage = (event) => {
+      if (state.metricsSocket !== metricsSocket) return;
+      try {
+        const metrics = JSON.parse(event.data);
+        state.wifiMetricsAt = Date.now();
+        updateMetrics(metrics);
+      } catch (_) { /* Ignore malformed telemetry. */ }
     };
-    state.metricsSocket.onclose = scheduleReconnect;
-    state.metricsSocket.onerror = () => state.metricsSocket.close();
+    metricsSocket.onclose = () => {
+      if (state.metricsSocket !== metricsSocket) return;
+      state.wifiMetricsAt = 0;
+      state.wifiConnectAt = 0;
+      updateWifi(state.latestMetrics.wifi || {});
+      scheduleReconnect();
+    };
+    metricsSocket.onerror = () => metricsSocket.close();
   }
 
   function closeSockets() {
     for (const socket of [state.liveSocket, state.metricsSocket]) {
-      if (socket) { socket.onclose = null; socket.close(); }
+      if (socket) { socket.onclose = null; socket.onmessage = null; socket.onerror = null; socket.close(); }
     }
   }
 
@@ -1752,17 +1768,18 @@
   function updateWifi(wifi) {
     wifi = wifiDisplaySnapshot(wifi || {});
     updateWifiControl(wifi.control || {});
-    const latest = wifi.latest;
-    const connected = ["running", "paused"].includes(wifi.control?.state);
-    const online = connected || (wifi.status === "online" && latest);
+    const latest = wifi.latest_charge;
+    const paused = wifi.control?.last_confirmed_state === "paused";
+    const online = wifiBrowserConnected() && (wifi.control?.state_fresh || (wifi.status === "online" && latest));
     const status = $("wifiStatus");
     status.classList.toggle("online", Boolean(online));
     status.classList.toggle("offline", !online);
-    status.querySelector("span").textContent = wifi.control?.state === "paused" ? "连接在线 · 已暂停" : online ? "数据在线" : "等待数据";
-    $("wifiPacketCount").textContent = Number(wifi.rx_count || 0).toLocaleString();
-    $("wifiTxCount").textContent = Number(wifi.tx_count || 0).toLocaleString();
-    const traffic = wifi.traffic_history || [];
-    $("wifiHistory").innerHTML = renderHistory(traffic, "WIFI-UDP", "等待 TX / RX 报文…", true);
+    status.querySelector("span").textContent = paused ? "充电已暂停" : online ? "数据在线" : latest ? "等待新数据" : "等待数据";
+    $("wifiPacketCount").textContent = Number(wifi.charge_count || 0).toLocaleString();
+    const control = wifi.control || {};
+    $("wifiTxCount").textContent = `${Number(control.tx_count || 0).toLocaleString()} / ${Number(control.rx_count || 0).toLocaleString()}`;
+    $("wifiHistory").innerHTML = renderHistory(wifi.charge_history, "WIFI-UDP", "等待充电报文…", true);
+    $("wifiControlHistory").innerHTML = renderHistory(control.history, "WIFI-CTRL", "等待控制报文…", true);
     updateWifiIds(wifi.ids || {});
     updateChargingSimulation(wifi);
     if (!latest) {
@@ -1790,9 +1807,9 @@
       ...wifi,
       status: latest ? wifi.status : "offline",
       packet_count: Math.max(0, Number(wifi.packet_count || 0) - state.wifiClearBaseCount),
-      rx_count: Math.max(0, Number(wifi.rx_count || 0) - (state.wifiClearBaseRx || 0)),
-      tx_count: Math.max(0, Number(wifi.tx_count || 0) - (state.wifiClearBaseTx || 0)),
-      traffic_history: (wifi.traffic_history || []).filter(isNew),
+      charge_count: Math.max(0, Number(wifi.charge_count || 0) - (state.wifiClearBaseCharge || 0)),
+      latest_charge: isNew(wifi.latest_charge) ? wifi.latest_charge : null,
+      charge_history: (wifi.charge_history || []).filter(isNew),
       latest,
       history,
       ids: {
@@ -1804,18 +1821,38 @@
     };
   }
 
+  function wifiBrowserConnected() {
+    return Boolean(state.wifiMetricsAt && Date.now() - state.wifiMetricsAt < 10000);
+  }
+
+  setInterval(() => {
+    const lastActivity = state.wifiMetricsAt || state.wifiConnectAt;
+    if (lastActivity && Date.now() - lastActivity >= 10000) {
+      state.wifiMetricsAt = 0;
+      state.wifiConnectAt = 0;
+      updateWifi(state.latestMetrics.wifi || {});
+      state.metricsSocket?.close();
+      scheduleReconnect();
+    }
+  }, 1000);
+
   function updateWifiControl(control) {
     const label = $("wifiControlStatus");
     const pause = $("wifiPauseButton");
     const resume = $("wifiResumeButton");
     if (!label || !pause || !resume) return;
-    const online = control.agent_status === "online";
-    const pending = Boolean(control.pending);
-    const names = {pause:"暂停发送", resume:"恢复发送", soc:"SOC 突变", flood:"流量模拟", stop:"停止攻击"};
-    const current = control.state === "paused" ? "已暂停发送" : control.state === "running" ? "正常发送" : "状态未知 · 等待连接确认";
-    const text = pending ? `正在处理：${names[control.pending.command] || "操作"}… · ${current}` :
-      ["expired", "stale"].includes(control.status) ? `操作未确认 · ${current}` : current;
-    label.textContent = text + (!online && control.status !== "idle" ? " · 接收程序离线" : "");
+    const browserOnline = wifiBrowserConnected();
+    const online = browserOnline && control.agent_status === "online";
+    const submitting = state.wifiSubmission?.vehicleId === state.vehicleId ? state.wifiSubmission.command : null;
+    const pending = Boolean(submitting || control.pending);
+    const names = {pause:"暂停充电", resume:"恢复充电", soc:"SOC 突变", flood:"流量模拟", stop:"停止攻击"};
+    const confirmed = control.last_confirmed_state;
+    const current = confirmed === "paused" ? "充电已暂停" : confirmed === "running" ? "允许充电" : "等待状态确认";
+    label.textContent = confirmed && confirmed !== "unknown" && (!online || !control.state_fresh) ? `最后确认：${current}` : current;
+    $("wifiControlLink").textContent = !browserOnline ? "页面与云端连接中断，等待重连" :
+      !online ? "控制连接中断，等待接收端重连" : control.state_fresh ? "控制连接在线" : "接收端在线，等待发送端回复";
+    $("wifiControlOperation").textContent = pending ? `正在处理${names[submitting || control.pending?.command] || "操作"}…` :
+      ["expired", "stale"].includes(control.status) ? "上次操作未确认，可以重试" : "";
     label.dataset.status = pending ? "pending" : control.status || "idle";
     pause.disabled = resume.disabled = !online || pending;
     $("wifiAttackStart").disabled = !online || pending || control.state !== "running" || !["none"].includes(control.mode);
@@ -1825,20 +1862,35 @@
 
   async function sendWifiControl(command) {
     const control = state.latestMetrics.wifi?.control || {};
-    if (control.agent_status !== "online" || control.pending) return;
-    $("wifiPauseButton").disabled = $("wifiResumeButton").disabled = true;
+    const vehicleId = state.vehicleId;
+    if (!wifiBrowserConnected() || control.agent_status !== "online" || control.pending
+        || state.wifiSubmission?.vehicleId === vehicleId) return;
+    const submission = {vehicleId, command};
+    state.wifiSubmission = submission;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    updateWifiControl(control);
     try {
-      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/wifi/control`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }),
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(vehicleId)}/wifi/control`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ command }), signal: controller.signal,
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || `HTTP ${response.status}`);
-      state.latestMetrics.wifi = { ...(state.latestMetrics.wifi || {}), control: data.control };
-      updateWifiControl(data.control);
+      if (state.vehicleId !== vehicleId) return;
+      const current = state.latestMetrics.wifi?.control || {};
+      const order = data.control.pending?.order || 0;
+      if (Math.max(current.last_ack?.order || 0, current.pending?.order || 0) < order) {
+        state.latestMetrics.wifi = { ...(state.latestMetrics.wifi || {}), control: data.control };
+      }
       toast("操作已提交，正在处理");
     } catch (error) {
-      updateWifiControl(control);
-      toast(`WiFi 控制失败：${error.message}`);
+      if (state.vehicleId === vehicleId) {
+        toast(error.name === "AbortError" ? "提交未确认，请查看操作状态" : `WiFi 控制失败：${error.message}`);
+      }
+    } finally {
+      clearTimeout(timer);
+      if (state.wifiSubmission === submission) state.wifiSubmission = null;
+      updateWifiControl(state.latestMetrics.wifi?.control || {});
     }
   }
 
@@ -1900,11 +1952,11 @@
   }
 
   function updateChargingSimulation(wifi) {
-    const latest = wifi.latest;
+    const latest = wifi.latest_charge;
     const charge = latest ? (latest.parsed_charge || parseChargingPacket(latest.text || "")) : { soc: null, sequence: null, state: "" };
     const hasSoc = Number.isFinite(charge.soc);
-    const paused = wifi.control?.state === "paused";
-    const stateText = paused ? "报文发送已暂停" : charge.state === "FULL" ? "充电完成" : charge.state === "CHARGING" ? "充电中" : latest ? "报文待识别" : "等待启动";
+    const paused = wifi.control?.last_confirmed_state === "paused";
+    const stateText = paused ? "充电已暂停" : charge.state === "FULL" ? "充电完成" : charge.state === "CHARGING" ? "充电中" : "等待启动";
     const socText = hasSoc ? `${charge.soc.toFixed(1)}%` : "--%";
     const progress = $("chargeProgress");
     progress.style.width = hasSoc ? `${charge.soc}%` : "0%";
@@ -2025,6 +2077,7 @@
   $("fullscreenButton").addEventListener("click", () => { const target = $("videoStage"); if (document.fullscreenElement) document.exitFullscreen(); else target.requestFullscreen().catch(() => toast("浏览器未允许全屏显示")); });
   $("vehicleSelect").addEventListener("change", (event) => {
     state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
+    delete state.latestMetrics.wifi;
     state.wifiClearBeforeMs = 0; state.wifiClearBaseCount = 0; state.wifiClearBaseAlertCount = 0;
     resetNavigationView();
     bodyStatusDataSource.reset();
@@ -2209,8 +2262,7 @@
     const wifi = state.latestMetrics.wifi || {};
     state.wifiClearBeforeMs = Date.now();
     state.wifiClearBaseCount = Number(wifi.packet_count || 0);
-    state.wifiClearBaseRx = Number(wifi.rx_count || 0);
-    state.wifiClearBaseTx = Number(wifi.tx_count || 0);
+    state.wifiClearBaseCharge = Number(wifi.charge_count || 0);
     state.wifiClearBaseAlertCount = Number((wifi.ids || {}).alert_count || 0);
     updateWifi(wifi);
     toast("页面 WiFi 数据已清零，设备与后端记录未改动");

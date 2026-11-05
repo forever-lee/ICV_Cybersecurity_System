@@ -249,6 +249,8 @@ class VehicleState:
         self.bluetooth_local_revision = -1
         self.bluetooth_local_ble_connected = False
         self.wifi_sequence = 0
+        self.wifi_charge_count = 0
+        self.wifi_charge_history = deque(maxlen=12)
         self.wifi_last_seen_ms = 0
         self.wifi_latest = None
         self.wifi_history = deque(maxlen=60)
@@ -457,6 +459,9 @@ class VehicleState:
             "status": "online" if online else "offline",
             "last_seen_ms": self.wifi_last_seen_ms,
             "packet_count": self.wifi_sequence,
+            "charge_count": self.wifi_charge_count,
+            "charge_history": list(self.wifi_charge_history),
+            "latest_charge": self.wifi_charge_history[0] if self.wifi_charge_history else None,
             "rx_count": self.wifi_sequence + control["rx_count"],
             "tx_count": control["tx_count"],
             "traffic_history": history[:80],
@@ -2377,6 +2382,9 @@ def record_wifi_packet(state, payload, is_test=False):
     }
     state.wifi_latest = record
     state.wifi_history.appendleft(record)
+    if charge is not None:
+        state.wifi_charge_count += 1
+        state.wifi_charge_history.appendleft(record)
     return record
 
 

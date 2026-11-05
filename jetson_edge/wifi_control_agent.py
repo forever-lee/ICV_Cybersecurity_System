@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 import uuid
+from collections import deque
 from urllib import request, error
 
 try:  # supports both python jetson_edge/WiFi_Module.py and package imports
@@ -21,9 +22,9 @@ class WifiControlAgent(threading.Thread):
         self.http = http or self._http
         self.stopped = threading.Event()
         self.acks = queue.Queue(maxsize=64)
+        self.receipts = queue.Queue(maxsize=64)
         self.last_id = None
         self.last_sent = 0
-        self.pending_ack = None
         self.last_error = None
         self.attempts = 0
         self.instance_id = uuid.uuid4().hex
@@ -45,27 +46,49 @@ class WifiControlAgent(threading.Thread):
             print("[CONTROL] Rejected invalid ACK/source: {}".format(addr), flush=True)
             return True
         try:
-            self.acks.put_nowait({"device_ack": text, "event_id": uuid.uuid4().hex,
-                                  "received_at_ms": int(time.time() * 1000)})
+            self.acks.put_nowait((time.monotonic(), {"device_ack": text, "event_id": uuid.uuid4().hex}))
         except queue.Full:
             print("[CONTROL] ACK queue full; waiting for cloud recovery", flush=True)
         return True
 
-    def step(self):
-        if self.pending_ack is None:
+    def upload_reports(self):
+        retries = deque(maxlen=self.acks.maxsize)
+        while not self.stopped.is_set():
             try:
-                self.pending_ack = self.acks.get_nowait()
+                report = self.acks.get_nowait()
+                attempts = 0
             except queue.Empty:
-                pass
-        if self.pending_ack is not None:
+                if retries:
+                    report, attempts = retries.popleft()
+                else:
+                    try:
+                        report = self.receipts.get_nowait()
+                        attempts = 0
+                    except queue.Empty:
+                        self.stopped.wait(0.1)
+                        continue
+            received_at, payload = report
+            age_ms = int((time.monotonic() - received_at) * 1000)
+            if age_ms >= 15000:
+                continue
+            is_reply = "device_ack" in payload
+            command_id = parse_ack(payload["device_ack"])["id"] if is_reply else payload["sent"]["id"]
             try:
-                self.http("/ack", self.pending_ack)
-                print("[CONTROL] Cloud accepted reply/TX receipt", flush=True)
+                self.http("/ack", dict(payload, age_ms=age_ms))
+                if is_reply:
+                    print("[CONTROL] Cloud accepted ACK ID={}".format(command_id), flush=True)
             except error.HTTPError as exc:
-                if exc.code not in (400, 409):
-                    raise
-                print("[CONTROL] Stale/rejected ACK: HTTP {}".format(exc.code), flush=True)
-            self.pending_ack = None
+                print("[CONTROL] Report ID={} HTTP {}".format(command_id, exc.code), flush=True)
+                if is_reply and exc.code >= 500 and attempts < 2:
+                    retries.append((report, attempts + 1))
+                self.stopped.wait(0.3)
+            except Exception as exc:
+                print("[CONTROL] Report ID={} failed: {}".format(command_id, exc), flush=True)
+                if is_reply and attempts < 2:
+                    retries.append((report, attempts + 1))
+                self.stopped.wait(0.3)
+
+    def step(self):
         result = self.http("/next")
         command = result.get("command")
         if not command:
@@ -79,18 +102,21 @@ class WifiControlAgent(threading.Thread):
         if self.attempts >= 5:
             return
         if command["id"] != self.last_id or now - self.last_sent >= 1:
-            if self.acks.full():
-                return  # retain every TX receipt; apply backpressure before sending
             self.sock.sendto(encode_command(command), self.board)
             self.attempts += 1
-            self.acks.put_nowait({"sent": {"id": command["id"], "attempt": self.attempts,
-                                           "event_id": self.instance_id + ":" + command["id"] + ":" + str(self.attempts),
-                                           "at_ms": int(time.time() * 1000)}})
+            try:
+                self.receipts.put_nowait((now, {"sent": {"id": command["id"], "attempt": self.attempts,
+                    "event_id": self.instance_id + ":" + command["id"] + ":" + str(self.attempts),
+                    "at_ms": int(time.time() * 1000)}}))
+            except queue.Full:
+                print("[CONTROL] TX statistics queue full, dropped ID={}".format(command["id"]), flush=True)
             print("[CONTROL] {} ID={} -> {}:{}".format(
                 command["command"], command["id"], *self.board), flush=True)
             self.last_id, self.last_sent = command["id"], now
 
     def run(self):
+        uploader = threading.Thread(target=self.upload_reports, daemon=True)
+        uploader.start()
         while not self.stopped.is_set():
             try:
                 self.step()
@@ -100,6 +126,7 @@ class WifiControlAgent(threading.Thread):
             except Exception as exc:
                 message = str(exc)
                 if message != self.last_error:
-                    print("[CONTROL] Poll/ACK failed: {}".format(message), flush=True)
+                    print("[CONTROL] Command poll failed: {}".format(message), flush=True)
                 self.last_error = message
             self.stopped.wait(0.5)
+        uploader.join(timeout=2.5)

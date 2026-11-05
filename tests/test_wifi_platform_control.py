@@ -1,6 +1,8 @@
 """B HTTP + real UDP bridge. Drop commands/ACKs and verify recovery/counting."""
 import select
 import socket
+import threading
+import time
 import unittest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -47,6 +49,10 @@ class PlatformLoopTests(unittest.TestCase):
         return response.json()
 
     def pump(self, drop_command=False, drop_ack=False):
+        for reports in (self.agent.acks, self.agent.receipts):
+            while not reports.empty():
+                _, report = reports.get_nowait()
+                self.http("/ack", report)
         self.agent.last_sent -= 1.1
         self.agent.step()
         while select.select([self.board], [], [], 0)[0]:
@@ -125,18 +131,108 @@ class PlatformLoopTests(unittest.TestCase):
             self.assertEqual(other.post(self.path + "/control/ack", json={}).status_code, 401)
         self.assertEqual(self.client.post(self.path + "/control/ack", headers=self.headers, json={"status": "applied"}).status_code, 400)
 
-    def test_http_failure_retains_ack_and_retries_later(self):
+    def test_blocked_ack_upload_does_not_block_poll_or_command_delivery(self):
         self.flush()
         self.queue("pause")
         self.pump()
-        original = self.agent.http
-        self.agent.http = lambda *args: (_ for _ in ()).throw(OSError("simulated network outage"))
-        with self.assertRaises(OSError):
-            self.agent.step()
-        self.assertIsNotNone(self.agent.pending_ack)
-        self.agent.http = original
+        entered = threading.Event()
+        release = threading.Event()
+        accepted = threading.Event()
+        failures = []
+
+        def http(suffix, payload=None):
+            if suffix == "/ack" and payload.get("device_ack") and not failures:
+                entered.set()
+                if release.wait(5):
+                    failures.append(payload["event_id"])
+                    raise TimeoutError("simulated ACK upload timeout")
+            result = self.http(suffix, payload)
+            if suffix == "/ack" and payload.get("device_ack"):
+                accepted.set()
+            return result
+
+        self.agent.http = http
+        self.agent.start()
+        try:
+            self.assertTrue(entered.wait(3))
+            self.board.settimeout(3)
+            wire, _ = self.board.recvfrom(4096)
+            self.assertIn(b"ACTION=PAUSE", wire)
+            self.assertEqual(self.control.snapshot()["agent_status"], "online")
+            release.set()
+            self.assertTrue(accepted.wait(4))
+            self.assertEqual(self.control.snapshot()["state"], "paused")
+            self.assertEqual(len(failures), 1)
+        finally:
+            release.set()
+            self.agent.stopped.set()
+            self.agent.join(5)
+
+    def test_repeated_pause_resume_with_packet_loss_and_reconnect(self):
         self.flush()
-        self.assertEqual(self.control.snapshot()["state"], "paused")
+        for _ in range(30):
+            for action, expected in (("pause", "paused"), ("resume", "running")):
+                self.queue(action)
+                self.pump(drop_command=True)
+                self.pump(drop_ack=True)
+                self.flush()
+                view = self.control.snapshot()
+                self.assertIsNone(view["pending"])
+                self.assertEqual(view["state"], expected)
+                self.assertEqual(view["status"], "applied")
+        self.queue("pause")
+        self.flush()
+        self.control.clock = lambda: int(time.time() * 1000) + 16000
+        view = self.control.snapshot()
+        self.assertEqual(view["agent_status"], "offline")
+        self.assertFalse(view["state_fresh"])
+        self.assertEqual(view["last_confirmed_state"], "paused")
+        self.flush()
+        self.queue("resume")
+        self.flush()
+        self.assertEqual(self.control.snapshot()["state"], "running")
+
+    def test_two_failed_ack_uploads_both_retry(self):
+        calls = []
+        accepted = threading.Event()
+
+        def http(suffix, payload):
+            event_id = payload["event_id"]
+            calls.append(event_id)
+            if calls.count(event_id) == 1:
+                raise TimeoutError("simulated intermittent upload failure")
+            if calls.count("first") == 2 and calls.count("second") == 2:
+                accepted.set()
+
+        self.agent.http = http
+        for event_id in ("first", "second"):
+            self.agent.acks.put_nowait((time.monotonic(), {
+                "event_id": event_id,
+                "device_ack": f"ACK,ID={event_id},ACTION=STATUS,STATUS=OK,STATE=PAUSED,MODE=NONE,LAST=1",
+            }))
+        uploader = threading.Thread(target=self.agent.upload_reports, daemon=True)
+        uploader.start()
+        try:
+            self.assertTrue(accepted.wait(3), calls)
+            self.assertEqual(calls, ["first", "second", "first", "second"])
+        finally:
+            self.agent.stopped.set()
+            uploader.join(3)
+
+    def test_control_updates_leave_charging_data_unchanged(self):
+        self.flush()
+        state = server.registry.get("VHC-001")
+        frame = server.record_wifi_packet(state, {"text": build_report("START", 0, 20, "CHARGING")})
+        self.queue("pause")
+        self.flush()
+        self.control.last_probe_ms = 0
+        self.flush()
+        view = state.wifi_snapshot()
+        self.assertEqual(view["charge_count"], 1)
+        self.assertEqual(view["charge_history"], [frame])
+        self.assertEqual(view["latest_charge"], frame)
+        self.assertEqual(view["control"]["state"], "paused")
+        self.assertGreater(view["control"]["rx_count"], 1)
 
     def test_rate_ids_only_charging_packets_and_edge_receive_time(self):
         state = server.registry.get("VHC-001")
