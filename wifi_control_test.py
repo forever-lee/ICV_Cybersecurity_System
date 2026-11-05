@@ -4,12 +4,14 @@ import argparse
 import socket
 import time
 import uuid
+from jetson_edge.wifi_control_protocol import encode_command, parse_ack
 
 
 def execute(sock, board, action, timeout=2.0, attempts=3):
     command_id = uuid.uuid4().hex[:16]
-    command = "CTRL,ID={},ACTION={}\n".format(command_id, action).encode("ascii")
-    expected = "ACK,ID={},ACTION={},STATUS=OK".format(command_id, action)
+    now = int(time.time() * 1000)
+    command = encode_command({"id": command_id, "command": action.lower(), "order": now,
+                              "expires_at_ms": now + int(timeout * attempts * 1000) + 2000})
     for attempt in range(attempts):
         sock.sendto(command, board)
         print("{} -> {}:{} (attempt {})".format(action, board[0], board[1], attempt + 1), flush=True)
@@ -22,7 +24,8 @@ def execute(sock, board, action, timeout=2.0, attempts=3):
                 break
             if addr[0] != board[0]:
                 continue
-            if expected in data.decode("ascii", errors="replace").strip().splitlines():
+            ack = parse_ack(data.decode("ascii", errors="replace"))
+            if ack and ack["id"] == command_id and ack["command"] == action.lower() and ack["status"] == "ok":
                 print("CONFIRMED by sender: {} (ID={})".format(action, command_id), flush=True)
                 return True
     print("NO CONFIRMATION. Check board counters, PTC7 -> GPIO16, sender WiFi IP and firewall.")

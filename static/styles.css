@@ -628,6 +628,14 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
   .abnormal-row { grid-template-columns: 1fr; gap: 5px; }
 }
 :root { --wifi-control-muted: #8aa7ba; }
+.charge-page .charge-stat-grid { grid-template-columns:repeat(6,minmax(0,1fr)); }
+.wifi-attack-panel { padding:22px; margin-bottom:16px; display:flex; flex-wrap:wrap; gap:18px; align-items:center; justify-content:space-between; }
+.wifi-attack-panel h2 { font-size:18px; margin:5px 0 10px; }
+.wifi-attack-panel small { flex-basis:100%; color:var(--wifi-control-muted); }
+.wifi-attack-panel label { display:flex; align-items:center; gap:6px; cursor:pointer; }
+.wifi-attack-panel button:disabled { opacity:.45; cursor:not-allowed; }
+@media(max-width:1000px) { .charge-page .charge-stat-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+@media(max-width:600px) { .charge-page .charge-stat-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } }
 .wifi-control-panel { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:22px; margin-bottom:16px; }
 .wifi-control-panel h2 { font-size:18px; margin:5px 0 10px; }
 .wifi-control-panel small { color:var(--wifi-control-muted); }

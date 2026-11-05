@@ -7,6 +7,8 @@ import random
 import re
 import socket
 import time
+import queue
+import threading
 from datetime import datetime
 from urllib import error, request
 try:
@@ -126,11 +128,41 @@ def forward_to_cloud(data, addr, udp_received_at_ms=None):
     return False
 
 
+class TelemetryUploader(threading.Thread):
+    """HTTP never blocks UDP reception or control ACKs; queue is bounded."""
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.items = queue.Queue(maxsize=256)
+        self.stopped = threading.Event()
+        self.dropped = 0
+
+    def enqueue(self, data, addr, at):
+        try:
+            self.items.put_nowait((data, addr, at))
+        except queue.Full:
+            self.dropped += 1
+            print("[UPLOAD] Queue full; dropped={} (no silent overflow)".format(self.dropped), flush=True)
+
+    def run(self):
+        while not self.stopped.is_set():
+            try:
+                item = self.items.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                ok = forward_to_cloud(*item)
+                print("CLOUD : {} backlog={}".format("accepted" if ok else "failed", self.items.qsize()), flush=True)
+            except Exception as exc:
+                print("[UPLOAD] {}".format(exc), flush=True)
+
+
 def run_receiver(host, port, control_enabled=True):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
     sock.bind((host, port))
     sock.settimeout(1.0)
+    uploader = TelemetryUploader()
+    uploader.start()
     control = WifiControlAgent(sock, (WIFI_DEVICE_HOST, 6002), CLOUD_HTTP_URL, VEHICLE_ID, INGEST_TOKEN) if control_enabled else None
     if control:
         control.start()
@@ -146,8 +178,8 @@ def run_receiver(host, port, control_enabled=True):
         )
     )
     print(
-        "[WiFi RX CHECK] Listening on all interfaces; expected source IP: {}".format(
-            WIFI_DEVICE_HOST
+        "[WiFi RX CHECK] Listening on {}; expected source IP: {}".format(
+            host, WIFI_DEVICE_HOST
         )
     )
     print("Forwarding WiFi data to {} (vehicle {})".format(CLOUD_HTTP_URL, VEHICLE_ID))
@@ -221,15 +253,13 @@ def run_receiver(host, port, control_enabled=True):
             print("HEX   : {}".format(bytes_to_hex(data)))
             with open("wifi_udp_log.txt", "a", encoding="utf-8") as log_file:
                 log_file.write(line + "\n")
-            print("CLOUD : {}".format(
-                "accepted"
-                if forward_to_cloud(data, addr, udp_received_at_ms)
-                else "failed"
-            ))
+            uploader.enqueue(data, addr, udp_received_at_ms)
             print("-" * 60)
     except KeyboardInterrupt:
         print("\nWiFi receiver stopped.")
     finally:
+        uploader.stopped.set()
+        uploader.join(timeout=6)
         if control:
             control.stopped.set()
             control.join(timeout=5)

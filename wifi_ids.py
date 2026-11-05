@@ -2,6 +2,7 @@
 
 import re
 import struct
+from collections import deque
 
 
 CHARGE_PACKET_PATTERN = re.compile(
@@ -51,6 +52,9 @@ def detect_wifi_intrusion(state, charge, detected_at_ms):
     result["verdict"] = "normal"
 
     if charge["kind"] == "START" and sequence == 0:
+        state.wifi_rate_times = deque()
+        state.wifi_rate_active = False
+        state.wifi_receive_rate = 0
         state.wifi_ids_last_good_soc = soc
         state.wifi_ids_last_good_sequence = sequence
         state.wifi_ids_alert_count = 0
@@ -89,3 +93,32 @@ def detect_wifi_intrusion(state, charge, detected_at_ms):
     state.wifi_ids_latest_alert = alert
     result.update({"verdict": "anomaly", "rule": "SOC_JUMP", "alert": alert})
     return result
+
+
+def detect_wifi_rate(state, charge, edge_at_ms, detected_at_ms):
+    """Only parsed charging DATA counts. Use edge reception time, not HTTP bursts."""
+    if not charge or charge["kind"] != "DATA":
+        return None
+    times = getattr(state, "wifi_rate_times", None)
+    if times is None:
+        times = state.wifi_rate_times = deque()
+    # Late/out-of-order uploads cannot manufacture a new sliding window.
+    if times and edge_at_ms < times[-1]:
+        return None
+    times.append(edge_at_ms)
+    while times and times[0] < edge_at_ms - 2000:
+        times.popleft()
+    rate = len(times) / 2.0
+    state.wifi_receive_rate = rate
+    if rate <= 3:
+        state.wifi_rate_active = False
+    if rate < 8:
+        return None
+    alert = {"rule": "WIFI_RATE", "severity": "high", "title": "DDoS 流量模拟告警",
+             "sequence": charge["sequence"], "detected_at_ms": detected_at_ms,
+             "rate_pps": rate, "threshold_pps": 8, "window_seconds": 2}
+    if not getattr(state, "wifi_rate_active", False):
+        state.wifi_ids_alert_count += 1
+        state.wifi_ids_latest_alert = alert
+        state.wifi_rate_active = True
+    return {"verdict": "anomaly", "rule": "WIFI_RATE", "alert": alert}

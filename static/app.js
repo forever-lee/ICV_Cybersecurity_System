@@ -1753,17 +1753,21 @@
     wifi = wifiDisplaySnapshot(wifi || {});
     updateWifiControl(wifi.control || {});
     const latest = wifi.latest;
-    const online = wifi.status === "online" && latest;
+    const connected = ["running", "paused"].includes(wifi.control?.state);
+    const online = connected || (wifi.status === "online" && latest);
     const status = $("wifiStatus");
     status.classList.toggle("online", Boolean(online));
     status.classList.toggle("offline", !online);
-    status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
-    $("wifiPacketCount").textContent = Number(wifi.packet_count || 0).toLocaleString();
+    status.querySelector("span").textContent = wifi.control?.state === "paused" ? "连接在线 · 已暂停" : online ? "数据在线" : "等待数据";
+    $("wifiPacketCount").textContent = Number(wifi.rx_count || 0).toLocaleString();
+    $("wifiTxCount").textContent = Number(wifi.tx_count || 0).toLocaleString();
+    const traffic = wifi.traffic_history || [];
+    $("wifiHistory").innerHTML = renderHistory(traffic, "WIFI-UDP", "等待 TX / RX 报文…", true);
     updateWifiIds(wifi.ids || {});
     updateChargingSimulation(wifi);
     if (!latest) {
       $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiSeq").textContent = "—"; $("wifiState").textContent = "—"; $("wifiTime").textContent = "—"; $("wifiLatency").textContent = "—";
-      $("wifiHistory").innerHTML = '<div class="history-empty">等待 WiFi 充电报文…</div>'; return;
+      return;
     }
     const charge = latest.parsed_charge || parseChargingPacket(latest.text || "");
     $("wifiText").textContent = latest.text || "（空报文）";
@@ -1772,7 +1776,6 @@
     $("wifiState").textContent = charge.state || "—";
     $("wifiTime").textContent = formatFrameTime(latest.received_at_ms);
     $("wifiLatency").textContent = formatEstimatedLatency(latest.e2e_latency_ms);
-    $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 充电报文…");
   }
 
   function wifiDisplaySnapshot(wifi) {
@@ -1787,6 +1790,9 @@
       ...wifi,
       status: latest ? wifi.status : "offline",
       packet_count: Math.max(0, Number(wifi.packet_count || 0) - state.wifiClearBaseCount),
+      rx_count: Math.max(0, Number(wifi.rx_count || 0) - (state.wifiClearBaseRx || 0)),
+      tx_count: Math.max(0, Number(wifi.tx_count || 0) - (state.wifiClearBaseTx || 0)),
+      traffic_history: (wifi.traffic_history || []).filter(isNew),
       latest,
       history,
       ids: {
@@ -1805,13 +1811,16 @@
     if (!label || !pause || !resume) return;
     const online = control.agent_status === "online";
     const pending = Boolean(control.pending);
-    const text = pending ? `正在${control.pending.command === "pause" ? "暂停" : "恢复"}发送…` :
-      control.status === "expired" ? "操作超时，请重试" :
-      control.status === "applied" ? `${control.state === "paused" ? "已暂停发送" : "已恢复发送"}` :
-      online ? "接收程序在线，可以发送命令" : "等待 WiFi 接收程序连接";
+    const names = {pause:"暂停发送", resume:"恢复发送", soc:"SOC 突变", flood:"流量模拟", stop:"停止攻击"};
+    const current = control.state === "paused" ? "已暂停发送" : control.state === "running" ? "正常发送" : "状态未知 · 等待连接确认";
+    const text = pending ? `正在处理：${names[control.pending.command] || "操作"}… · ${current}` :
+      ["expired", "stale"].includes(control.status) ? `操作未确认 · ${current}` : current;
     label.textContent = text + (!online && control.status !== "idle" ? " · 接收程序离线" : "");
     label.dataset.status = pending ? "pending" : control.status || "idle";
     pause.disabled = resume.disabled = !online || pending;
+    $("wifiAttackStart").disabled = !online || pending || control.state !== "running" || !["none"].includes(control.mode);
+    $("wifiAttackStop").disabled = !online || pending;
+    $("wifiAttackStatus").textContent = control.mode === "soc" ? "SOC 突变待执行" : control.mode === "flood" ? "DDoS 流量模拟已启用" : control.mode === "unknown" ? "等待状态确认" : "未启用攻击";
   }
 
   async function sendWifiControl(command) {
@@ -1835,17 +1844,23 @@
 
   $("wifiPauseButton")?.addEventListener("click", () => sendWifiControl("pause"));
   $("wifiResumeButton")?.addEventListener("click", () => sendWifiControl("resume"));
+  $("wifiAttackStart")?.addEventListener("click", () => sendWifiControl(document.querySelector('input[name="wifiAttack"]:checked').value));
+  $("wifiAttackStop")?.addEventListener("click", () => sendWifiControl("stop"));
 
   function updateWifiIds(ids) {
     const container = $("wifiIdsAlert");
     if (!container) return;
     const alert = ids && ids.latest_alert;
+    const rateAlert = alert?.rule === "WIFI_RATE";
+    $("wifiIdsBaselineLabel").textContent = rateAlert ? "告警阈值" : "正常基线";
+    $("wifiIdsObservedLabel").textContent = rateAlert ? "接收速率" : "异常数值";
+    $("wifiIdsDeltaLabel").textContent = rateAlert ? "检测窗口" : "变化幅度";
     container.classList.toggle("idle", !alert);
     const icon = $("wifiIdsAlertIcon");
     if (!alert) {
       icon.textContent = "✓";
-      $("wifiIdsAlertTitle").textContent = "当前未发现 SOC 突变";
-      $("wifiIdsAlertHint").textContent = "持续对比每条充电报文与可信 SOC 变化趋势。";
+      $("wifiIdsAlertTitle").textContent = "当前未发现异常";
+      $("wifiIdsAlertHint").textContent = "持续检测 SOC 变化与充电报文接收速率。";
       $("wifiIdsSequence").textContent = "----";
       $("wifiIdsBaseline").textContent = "--%";
       $("wifiIdsObserved").textContent = "--%";
@@ -1864,6 +1879,12 @@
     $("wifiIdsDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
     $("wifiIdsTime").textContent = formatFrameTime(alert.detected_at_ms);
     $("wifiIdsCount").textContent = String(Number(ids.alert_count || 0));
+    if (rateAlert) {
+      $("wifiIdsAlertHint").textContent = "充电报文接收频率超过阈值，状态查询与确认不参与计数。";
+      $("wifiIdsBaseline").textContent = `${alert.threshold_pps} 条/秒`;
+      $("wifiIdsObserved").textContent = `${alert.rate_pps} 条/秒`;
+      $("wifiIdsDelta").textContent = `${alert.window_seconds} 秒`;
+    }
   }
 
   function parseChargingPacket(text) {
@@ -1920,13 +1941,13 @@
     if (total) total.textContent = (Number(bluetooth.packet_count || 0) + Number(wifi.packet_count || 0)).toLocaleString();
   }
 
-  function renderHistory(history, source, emptyText) {
+  function renderHistory(history, source, emptyText, wifiTraffic = false) {
     const records = Array.isArray(history) ? history.slice(0, 8) : [];
     return records.map((record) => {
       const anomaly = record.ids_verdict === "anomaly";
       return `
       <div class="history-row ${record.test ? "test" : ""} ${anomaly ? "anomaly" : ""}">
-        <span title="云端接收编号；正常与异常报文共用此编号">#${escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
+        <span title="${wifiTraffic ? "云端视角的收发方向" : "云端接收编号"}">${wifiTraffic ? escapeHtml(record.direction || "RX") : "#" + escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
         <span class="history-source">${escapeHtml(record.source || source)}</span>
         <code title="${escapeHtml(record.hex || "")}">${record.sender_sequence == null ? "" : `<b title="发送端报文序号">SEQ ${escapeHtml(record.sender_sequence)} · </b>`}${anomaly ? '<b class="history-alert-badge">异常</b>' : ""}${escapeHtml(record.text || "（空报文）")}</code>
         <span class="history-size">${escapeHtml(record.byte_count || 0)} B</span>
@@ -2188,6 +2209,8 @@
     const wifi = state.latestMetrics.wifi || {};
     state.wifiClearBeforeMs = Date.now();
     state.wifiClearBaseCount = Number(wifi.packet_count || 0);
+    state.wifiClearBaseRx = Number(wifi.rx_count || 0);
+    state.wifiClearBaseTx = Number(wifi.tx_count || 0);
     state.wifiClearBaseAlertCount = Number((wifi.ids || {}).alert_count || 0);
     updateWifi(wifi);
     toast("页面 WiFi 数据已清零，设备与后端记录未改动");

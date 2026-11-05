@@ -37,7 +37,7 @@ from stream_protocol import (
     unpack_fmp4,
     unpack_frame,
 )
-from wifi_ids import detect_wifi_intrusion, parse_charging_packet
+from wifi_ids import detect_wifi_intrusion, parse_charging_packet, detect_wifi_rate
 from wifi_control import WifiControl
 from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack
 
@@ -449,13 +449,21 @@ class VehicleState:
             self.wifi_last_seen_ms
             and now_ms() - self.wifi_last_seen_ms < WIFI_OFFLINE_AFTER_SECONDS * 1000
         )
+        control = self.wifi_control.snapshot()
+        history = [dict(record, direction="RX") for record in self.wifi_history]
+        history.extend(control["history"])
+        history.sort(key=lambda record: record["received_at_ms"], reverse=True)
         return {
             "status": "online" if online else "offline",
             "last_seen_ms": self.wifi_last_seen_ms,
             "packet_count": self.wifi_sequence,
+            "rx_count": self.wifi_sequence + control["rx_count"],
+            "tx_count": control["tx_count"],
+            "traffic_history": history[:80],
+            "receive_rate_pps": getattr(self, "wifi_receive_rate", 0),
             "latest": self.wifi_latest,
             "history": list(self.wifi_history)[:12],
-            "control": self.wifi_control.snapshot(),
+            "control": control,
             "ids": {
                 "status": "alert" if self.wifi_ids_latest_alert else "normal",
                 "alert_count": self.wifi_ids_alert_count,
@@ -2330,6 +2338,9 @@ def record_wifi_packet(state, payload, is_test=False):
         udp_received_at_ms = int(payload.get("udp_received_at_ms"))
     except (TypeError, ValueError):
         udp_received_at_ms = None
+    rate_result = detect_wifi_rate(state, charge, udp_received_at_ms or state.wifi_last_seen_ms, state.wifi_last_seen_ms)
+    if rate_result and ids_result["verdict"] != "anomaly":
+        ids_result = rate_result
     sender_to_edge_latency_ms = (
         max(0, udp_received_at_ms - sender_time_ms)
         if sender_time_ms is not None and udp_received_at_ms is not None

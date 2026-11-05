@@ -120,7 +120,8 @@
               <article><span>当前 SOC</span><strong id="chargeSocStat">--<small>%</small></strong><small>来自最新 WiFi 报文</small></article>
               <article><span>充电状态</span><strong id="chargeStateStat">等待启动</strong><small>CHARGING / FULL</small></article>
               <article><span>最新序号</span><strong id="chargeSeqStat">--</strong><small>严格递增校验</small></article>
-              <article><span>接收报文</span><strong id="wifiPacketCount">0</strong><small>累计 UDP 数据包</small></article>
+              <article><span>接收报文 RX</span><strong id="wifiPacketCount">0</strong><small>充电报文与状态回复</small></article>
+              <article><span>发送报文 TX</span><strong id="wifiTxCount">0</strong><small>已下发命令，包含重试</small></article>
               <article class="latency-stat"><span>端到端延迟（估算）</span><strong id="chargeLatencyStat">--<small>ms</small></strong><small id="chargeLatencyHint">等待带 TS 的报文</small></article>
             </div>
             <article class="panel charge-monitor" aria-labelledby="wifiTitle">
@@ -151,6 +152,11 @@
               <div><p class="eyebrow">WIFI SENDER CONTROL</p><h2>报文发送控制</h2><p id="wifiControlStatus" role="status" aria-live="polite">等待 WiFi 接收程序连接</p></div>
               <div class="module-actions"><button class="primary-button" id="wifiPauseButton" type="button" disabled>暂停发送</button><button class="primary-button" id="wifiResumeButton" type="button" disabled>恢复发送</button></div>
             </article>
+            <article class="panel wifi-attack-panel" aria-label="WiFi 攻击模拟">
+              <div><p class="eyebrow">ATTACK SIMULATION · B</p><h2>攻击模拟</h2><p id="wifiAttackStatus" role="status">正常发送 · 未启用攻击</p></div>
+              <div class="module-actions"><label><input type="radio" name="wifiAttack" value="soc" checked> SOC 突变</label><label><input type="radio" name="wifiAttack" value="flood"> DDoS 流量模拟</label><button class="primary-button danger" id="wifiAttackStart" type="button" disabled>开始攻击</button><button class="primary-button" id="wifiAttackStop" type="button" disabled>停止攻击</button></div>
+              <small>确认后约 2 秒开始；SOC 突变一次；流量模拟为 10 条/秒、持续 10 秒。</small>
+            </article>
             <article class="panel data-module wifi-module" aria-labelledby="wifiPacketTitle">
               <div class="module-head"><div class="module-ident wifi"><i>UDP</i><span><p class="eyebrow">FORWARDED WIFI PACKETS</p><h2 id="wifiPacketTitle">WiFi 充电报文</h2><small>保留原始文本、HEX 和最近接收记录</small></span></div><div class="module-actions"><button class="primary-button clear-wifi-button" id="wifiClearButton" type="button">清空本轮数据</button></div></div>
               <div class="telemetry-layout">
@@ -163,9 +169,9 @@
               <div class="wifi-ids-alert-copy"><p>WIFI CHARGING IDS</p><h2 id="wifiIdsAlertTitle">当前未发现 SOC 突变</h2><span id="wifiIdsAlertHint">持续对比每条充电报文与可信 SOC 变化趋势。</span></div>
               <div class="wifi-ids-alert-metrics">
                 <span>报文序号<strong id="wifiIdsSequence">----</strong></span>
-                <span>正常基线<strong id="wifiIdsBaseline">--%</strong></span>
-                <span>异常数值<strong id="wifiIdsObserved">--%</strong></span>
-                <span>变化幅度<strong id="wifiIdsDelta">--%</strong></span>
+                <span><span id="wifiIdsBaselineLabel">正常基线</span><strong id="wifiIdsBaseline">--%</strong></span>
+                <span><span id="wifiIdsObservedLabel">异常数值</span><strong id="wifiIdsObserved">--%</strong></span>
+                <span><span id="wifiIdsDeltaLabel">变化幅度</span><strong id="wifiIdsDelta">--%</strong></span>
                 <span>检测时间<strong id="wifiIdsTime">--:--:--</strong></span>
                 <span>本轮告警<strong id="wifiIdsCount">0</strong></span>
               </div>

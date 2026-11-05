@@ -1,0 +1,63 @@
+--- a/src/wifi_udp_forward.c
++++ b/src/wifi_udp_forward.c
+@@ -66,9 +66,34 @@
+               (c >= 'a' && c <= 'z') || c == '_' || c == '-')) { goto rejected; }
+     }
+     if ((i == id_start) || ((uint16_t)(i - id_start) > 40U)) { goto rejected; }
+-    if (!(((len - i) == 13U && memcmp(&text[i], ",ACTION=PAUSE", 13U) == 0) ||
+-          ((len - i) == 14U && memcmp(&text[i], ",ACTION=RESUME", 14U) == 0)))
+-    { goto rejected; }
++    /* B: bounded whitelist, then decimal ordering/expiry fields.
++     * The sender enforces ordering and expiry; MCU only validates framing. */
++    {
++        uint16_t action_start;
++        uint16_t action_len;
++        uint16_t digits;
++        if ((uint16_t)(len - i) < 9U || memcmp(&text[i], ",ACTION=", 8U) != 0) { goto rejected; }
++        i = (uint16_t)(i + 8U);
++        action_start = i;
++        while (i < len && text[i] != ',') { i++; }
++        action_len = (uint16_t)(i - action_start);
++        if (!((action_len == 5U && memcmp(&text[action_start], "PAUSE", 5U) == 0) ||
++              (action_len == 6U && memcmp(&text[action_start], "RESUME", 6U) == 0) ||
++              (action_len == 6U && memcmp(&text[action_start], "STATUS", 6U) == 0) ||
++              (action_len == 3U && memcmp(&text[action_start], "SOC", 3U) == 0) ||
++              (action_len == 5U && memcmp(&text[action_start], "FLOOD", 5U) == 0) ||
++              (action_len == 4U && memcmp(&text[action_start], "STOP", 4U) == 0))) { goto rejected; }
++        if ((uint16_t)(len - i) < 6U || memcmp(&text[i], ",SEQ=", 5U) != 0) { goto rejected; }
++        i = (uint16_t)(i + 5U);
++        digits = 0U;
++        while (i < len && text[i] >= '0' && text[i] <= '9') { i++; digits++; }
++        if (digits == 0U || digits > 16U) { goto rejected; }
++        if ((uint16_t)(len - i) < 6U || memcmp(&text[i], ",EXP=", 5U) != 0) { goto rejected; }
++        i = (uint16_t)(i + 5U);
++        digits = 0U;
++        while (i < len && text[i] >= '0' && text[i] <= '9') { i++; digits++; }
++        if (digits == 0U || digits > 16U || i != len) { goto rejected; }
++    }
+     if (WifiAtUart_QueueControl(text, len) == 0U) { goto rejected; }
+     g_wifi_control_queued_cnt++;
+     pbuf_free(p);
+--- a/src/test.c
++++ b/src/test.c
+@@ -253,7 +253,7 @@
+ #endif /* USING_RTD */
+ 
+ /* stores the maximum time the tests can run, in seconds, in order to know when to shutdown the stack  */
+-uint32 tests_timeout = 1200;
++uint32 tests_timeout = 0; /* B gateway runs continuously; 0 disables demo shutdown. */
+ 
+ extern void sys_init(void);
+ 
+@@ -683,10 +683,9 @@
+ #else /* USING_RTD */
+   uint32_t time_now = OSIF_GetMilliseconds();
+ #endif /* USING_RTD */
+-  time_now = time_now / 1000;
+ 
+   /* If more than expected time passed during tests execution, shut down the stack */
+-  if (time_now - start_time >= tests_timeout)
++  if (tests_timeout != 0U && (uint32)(time_now - start_time) / 1000U >= tests_timeout)
+   {
+     for(int i = 0 ; i < ETHIF_NUMBER ; i++)
+     {

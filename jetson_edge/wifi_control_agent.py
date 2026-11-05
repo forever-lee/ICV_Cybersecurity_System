@@ -3,6 +3,7 @@ import json
 import queue
 import threading
 import time
+import uuid
 from urllib import request, error
 
 try:  # supports both python jetson_edge/WiFi_Module.py and package imports
@@ -24,6 +25,8 @@ class WifiControlAgent(threading.Thread):
         self.last_sent = 0
         self.pending_ack = None
         self.last_error = None
+        self.attempts = 0
+        self.instance_id = uuid.uuid4().hex
 
     def _http(self, suffix, payload=None):
         req = request.Request(self.url + suffix,
@@ -42,7 +45,8 @@ class WifiControlAgent(threading.Thread):
             print("[CONTROL] Rejected invalid ACK/source: {}".format(addr), flush=True)
             return True
         try:
-            self.acks.put_nowait({"device_ack": text})
+            self.acks.put_nowait({"device_ack": text, "event_id": uuid.uuid4().hex,
+                                  "received_at_ms": int(time.time() * 1000)})
         except queue.Full:
             print("[CONTROL] ACK queue full; waiting for cloud recovery", flush=True)
         return True
@@ -56,7 +60,7 @@ class WifiControlAgent(threading.Thread):
         if self.pending_ack is not None:
             try:
                 self.http("/ack", self.pending_ack)
-                print("[CONTROL] Cloud confirmed {}".format(self.pending_ack["device_ack"]), flush=True)
+                print("[CONTROL] Cloud accepted reply/TX receipt", flush=True)
             except error.HTTPError as exc:
                 if exc.code not in (400, 409):
                     raise
@@ -65,14 +69,23 @@ class WifiControlAgent(threading.Thread):
         result = self.http("/next")
         command = result.get("command")
         if not command:
-            self.last_id = None
             return
         # Use server-relative time, since edge and server clocks can differ.
         if command["expires_at_ms"] <= result["server_time_ms"]:
             return
         now = time.monotonic()
+        if command["id"] != self.last_id:
+            self.attempts = 0
+        if self.attempts >= 5:
+            return
         if command["id"] != self.last_id or now - self.last_sent >= 1:
+            if self.acks.full():
+                return  # retain every TX receipt; apply backpressure before sending
             self.sock.sendto(encode_command(command), self.board)
+            self.attempts += 1
+            self.acks.put_nowait({"sent": {"id": command["id"], "attempt": self.attempts,
+                                           "event_id": self.instance_id + ":" + command["id"] + ":" + str(self.attempts),
+                                           "at_ms": int(time.time() * 1000)}})
             print("[CONTROL] {} ID={} -> {}:{}".format(
                 command["command"], command["id"], *self.board), flush=True)
             self.last_id, self.last_sent = command["id"], now

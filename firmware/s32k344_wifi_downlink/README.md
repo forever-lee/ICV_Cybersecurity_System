@@ -1,5 +1,7 @@
 # S32K344 WiFi 下行源码补丁
 
+在已具备 A 版下行功能的板端工程根目录，先用 `git apply --check --ignore-space-change <仓库路径>/firmware/s32k344_wifi_downlink/B_from_A.patch` 检查，再用 `git apply --ignore-space-change <同一补丁路径>` 应用 B 版源码改动。按根目录的 B 版操作说明重新编译、烧录。补丁沿用该板端工程已有的 IP 和 MAC 配置。
+
 此补丁保存本次已经完成实物验证的板端改动，与平台 WiFi 暂停/恢复控制配套。原工程为 `lwip_baremetal_s32k344_wifi_uart_backup`，只修改 `src/wifi_at_uart.c`、`src/wifi_udp_forward.c`、`include/wifi_at_uart.h`。完整 NXP SDK、生成文件及编译产物不重复纳入本仓库。
 
 功能：板端监听有线 UDP 6002，接收来自 192.168.4.100 的 CTRL 命令，校验后由 PTC7/LPUART1_TX 送至 ESP32 GPIO16。命令使用换行分帧，UART 发送由主循环轮询推进。脚本 ACK 沿原来的串口接收及有线上行返回。ESP32 GPIO17 接 PTC6，双方共地。
