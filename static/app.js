@@ -195,14 +195,26 @@
         </div>
         <div class="body-intrusion-content">
           <div class="body-intrusion-copy">
-            <b>左前门状态篡改闭环</b>
-            <small>CANoe 将合法 0x351 的 Door_FL 从 0 篡改为 1；只有 K3、Jetson 真实回传后才判定检测成功。</small>
+            <b>CAN相关攻击类型</b>
+            <small>CAN与UDS测试统一归入CAN入侵演示；只有 K3、Jetson 真实回传后才判定检测成功。</small>
           </div>
           <div class="body-intrusion-actions">
+            <label class="body-intrusion-type-picker">
+              <span>攻击类型</span>
+              <select data-body-canoe-attack-type>
+                <option selected>CAN消息重放</option>
+                <option>有线通信安全类工具</option>
+                <option>获取车辆控制权限</option>
+                <option>车辆通信协议攻击</option>
+                <option>UDS</option>
+                <option>有线通信协议及接口攻击</option>
+              </select>
+            </label>
             <button data-body-canoe-attack><i>!</i><span>CANoe 发起篡改攻击</span><small>固定持续 5 秒 · 自动恢复</small></button>
           </div>
           <div class="body-intrusion-latest" data-body-canoe-state>尚未创建攻击命令</div>
           <div class="body-intrusion-detail" data-body-canoe-detail hidden>
+            <div><span>攻击类型</span><b data-body-canoe-detected-type>—</b></div>
             <div><span>报文 ID</span><b data-body-canoe-can-id>—</b></div>
             <div><span>Payload</span><code data-body-canoe-payload>—</code></div>
             <div><span>异常位置</span><b data-body-canoe-location>—</b></div>
@@ -1564,10 +1576,22 @@
     }
     const attackState = root.querySelector("[data-body-canoe-state]");
     const attackButton = root.querySelector("[data-body-canoe-attack]");
+    const attackTypeSelect = root.querySelector("[data-body-canoe-attack-type]");
+    if (attackTypeSelect) {
+      const attackIsActive = canoeAttack?.active === true;
+      attackTypeSelect.disabled = attackIsActive;
+      // Only mirror the command while it is executing. Once it finishes, keep
+      // the operator's next selection instead of restoring the previous type
+      // on every telemetry refresh.
+      if (attackIsActive && canoeAttack?.attack_type) {
+        attackTypeSelect.value = canoeAttack.attack_type;
+      }
+    }
+    const attackTypeText = canoeAttack?.attack_type ? `【${canoeAttack.attack_type}】` : "";
     const stateText = {
-      queued: "等待 CANoe 代理领取命令",
-      injecting: "CANoe 正在注入篡改报文，等待真实回传",
-      detected: "云端已通过 K3 / Jetson 真实回传检测到异常",
+      queued: `${attackTypeText}等待 CANoe 代理领取命令`,
+      injecting: `${attackTypeText}CANoe 正在注入篡改报文，等待真实回传`,
+      detected: `${attackTypeText}云端已通过 K3 / Jetson 真实回传检测到异常`,
       timeout: canoeAttack?.error || "30 秒内未检测到目标异常",
     };
     if (attackState) {
@@ -1582,10 +1606,12 @@
     if (detail) detail.hidden = !detectedFrame;
     if (detectedFrame) {
       const canId = root.querySelector("[data-body-canoe-can-id]");
+      const detectedType = root.querySelector("[data-body-canoe-detected-type]");
       const payloadCode = root.querySelector("[data-body-canoe-payload]");
       const location = root.querySelector("[data-body-canoe-location]");
       const reason = root.querySelector("[data-body-canoe-reason]");
       if (canId) canId.textContent = detectedFrame.can_id || "0x351";
+      if (detectedType) detectedType.textContent = detectedFrame.attack_type || canoeAttack?.attack_type || "CAN消息重放";
       if (location) location.textContent = detectedFrame.anomaly_location || "Byte 0 · Bit 0（Door_FL）：0 → 1";
       if (reason) reason.textContent = detectedFrame.reason || "中央门锁已锁止，但左前门处于开启状态";
       if (payloadCode) {
@@ -2124,12 +2150,14 @@
         button.disabled = true;
         button.classList.add("loading");
         try {
+          const root = button.closest('[data-domain-page="body"]') || document;
+          const attackType = root.querySelector("[data-body-canoe-attack-type]")?.value || "CAN消息重放";
           const response = await fetch(
             `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/canoe-attack`,
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ attack: "door_fl_tamper" }),
+              body: JSON.stringify({ attack: "door_fl_tamper", attack_type: attackType }),
             },
           );
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -2137,9 +2165,9 @@
           accepted = true;
           renderBodyProtocol(data.body || {});
           if (data.agent_launch?.started) {
-            toast("正在自动启动 CANoe 和代理，随后执行篡改攻击");
+            toast(`正在自动启动 CANoe 和代理，随后执行${attackType}`);
           } else {
-            toast("攻击命令已创建，CANoe 代理正在领取");
+            toast(`${attackType}命令已创建，CANoe 代理正在领取`);
           }
         } catch (_) {
           toast("CANoe 攻击命令创建失败或已有命令正在执行");

@@ -153,6 +153,7 @@ def test_raw_can_packet_is_preferred_over_reconstructed_metadata():
         "frame_name": "BodyDoorStatus", "cycle_ms": 100,
         "send_type": "CANoe周期报文",
     }
+    assert payload["simulation_step"] == 1
 
 
 def test_restored_event_ack_returns_raw_frames_to_periodic_classification():

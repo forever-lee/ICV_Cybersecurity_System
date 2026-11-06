@@ -334,7 +334,12 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-intrusion-copy b, .body-intrusion-copy small { display: block; }
 .body-intrusion-copy b { color: #ff93a5; font-size: 11px; }
 .body-intrusion-copy small { margin-top: 6px; color: #70889a; font-size: 9px; line-height: 1.6; }
-.body-intrusion-actions { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.body-intrusion-actions { display: grid; grid-template-columns: minmax(190px,.8fr) minmax(260px,1.2fr); gap: 8px; }
+.body-intrusion-type-picker { min-height: 58px; display: grid; align-content: center; gap: 6px; padding: 8px 10px; border: 1px solid rgba(255,100,124,.18); border-radius: 7px; background: rgba(56,10,23,.16); }
+.body-intrusion-type-picker > span { color: #8f6972; font-size: 8px; }
+.body-intrusion-type-picker select { min-width: 0; width: 100%; padding: 5px 7px; color: #efbec7; border: 1px solid rgba(255,100,124,.24); border-radius: 4px; outline: 0; background: #101b2b; font-size: 9px; }
+.body-intrusion-type-picker select:focus { border-color: rgba(255,100,124,.58); }
+.body-intrusion-type-picker select:disabled { opacity: .55; }
 .body-intrusion-actions button { min-height: 58px; display: grid; grid-template-columns: 28px 1fr; grid-template-rows: 1fr 1fr; align-items: center; gap: 0 8px; padding: 8px 10px; color: #e8c4ca; border: 1px solid rgba(255,100,124,.22); border-radius: 7px; background: rgba(56,10,23,.24); text-align: left; cursor: pointer; transition: border-color .18s,background .18s,transform .18s; }
 .body-intrusion-actions button:hover { border-color: rgba(255,100,124,.58); background: rgba(255,100,124,.10); transform: translateY(-1px); }
 .body-intrusion-actions button:disabled { opacity: .55; cursor: wait; transform: none; }
