@@ -3,12 +3,24 @@ import sqlite3
 import sys
 import types
 
+import pytest
+
 try:
     import cv2  # noqa: F401
 except ModuleNotFoundError:
     sys.modules["cv2"] = types.ModuleType("cv2")
 
 import server
+
+
+def run_async(coroutine):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coroutine)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 def make_state(timestamp=500000):
@@ -19,6 +31,7 @@ def make_state(timestamp=500000):
     state = server.VehicleState("VHC-CANOE-TEST")
     state.body_canoe_attack_command = {
         "sequence": 42, "attack": "door_fl_tamper", "status": "injecting",
+        "attack_type": "CAN消息重放",
         "requested_at_ms": timestamp - 100, "acknowledged_at_ms": timestamp - 50,
         "detected_at_ms": None, "completed_at_ms": None,
         "detected_frame": None, "error": "",
@@ -45,6 +58,8 @@ def test_real_k3_readback_marks_command_detected():
     assert state.body_canoe_attack_command["status"] == "detected"
     assert state.body_canoe_attack_command["detected_frame"]["can_id"] == "0x351"
     assert state.body_latest_intrusion["path"] == "CANoe → K3 → Jetson → 云端"
+    assert state.body_latest_intrusion["attack_type"] == "CAN消息重放"
+    assert alert["title"] == "检测到CAN消息重放"
 
 
 def test_com_ack_alone_never_marks_attack_detected():
@@ -91,6 +106,43 @@ def test_attack_times_out_after_cold_start_window(monkeypatch):
     snapshot = state.body_snapshot()
     assert snapshot["canoe_attack"]["status"] == "timeout"
     assert "30秒" in snapshot["canoe_attack"]["error"]
+
+
+def test_all_document_attack_types_are_exposed_without_test_item_codes():
+    assert server.BODY_CANOE_ATTACK_TYPES == (
+        "CAN消息重放",
+        "有线通信安全类工具",
+        "获取车辆控制权限",
+        "车辆通信协议攻击",
+        "UDS",
+        "有线通信协议及接口攻击",
+    )
+    assert all("PT_" not in label for label in server.BODY_CANOE_ATTACK_TYPES)
+    state = make_state()
+    assert state.body_snapshot()["canoe_attack_types"] == list(server.BODY_CANOE_ATTACK_TYPES)
+
+
+def test_trigger_preserves_selected_attack_type(monkeypatch):
+    class JsonRequest:
+        async def json(self):
+            return {"attack": "door_fl_tamper", "attack_type": "UDS"}
+
+    monkeypatch.setattr(server, "registry", server.Registry())
+    monkeypatch.setattr(server, "CANOE_AGENT_AUTOSTART_ON_ATTACK", False)
+    result = run_async(server.trigger_body_canoe_attack("VHC-TYPE", JsonRequest()))
+    assert result["command"]["attack_type"] == "UDS"
+    assert result["body"]["canoe_attack"]["attack_type"] == "UDS"
+
+
+def test_trigger_rejects_unlisted_attack_type(monkeypatch):
+    class JsonRequest:
+        async def json(self):
+            return {"attack": "door_fl_tamper", "attack_type": "PT_CAN_002"}
+
+    monkeypatch.setattr(server, "registry", server.Registry())
+    with pytest.raises(server.HTTPException) as error:
+        run_async(server.trigger_body_canoe_attack("VHC-TYPE", JsonRequest()))
+    assert error.value.status_code == 400
 
 
 def test_canoe_attack_sequence_fits_signed_int32(monkeypatch):

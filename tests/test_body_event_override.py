@@ -65,3 +65,92 @@ def test_pending_command_times_out_without_real_readback(monkeypatch):
     snapshot = state.body_snapshot()
     assert snapshot["event_command"]["status"] == "timeout"
     assert snapshot["Hazard"] is False
+
+
+def test_latest_overview_pins_event_can_id_then_returns_to_periodic(monkeypatch):
+    clock = {"now": 400000}
+    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
+    state = make_real_state(clock["now"])
+    command = server.queue_body_event_command(state, "door_fl")
+    command = state.body_event_command
+    command["status"] = "succeeded"
+    command["completed_at_ms"] = clock["now"] + 100
+    event_frame = {
+        "can_id": "0x351", "frame_name": "BodyDoorStatus",
+        "cloud_receive_time_ms": clock["now"] + 100,
+    }
+    periodic_frame = {
+        "can_id": "0x180", "frame_name": "BodyStatus",
+        "cloud_receive_time_ms": clock["now"] + 200,
+    }
+    state.body_frame_history.appendleft(event_frame)
+    state.body_frame_history.appendleft(periodic_frame)
+
+    clock["now"] += 1000
+    snapshot = state.body_snapshot()
+    assert snapshot["latest_frame"]["can_id"] == "0x351"
+
+    clock["now"] = command["completed_at_ms"] + 5000
+    snapshot = state.body_snapshot()
+    assert snapshot["latest_frame"]["can_id"] == "0x180"
+
+
+def test_event_actions_map_to_their_real_can_group():
+    assert server.BODY_EVENT_CAN_IDS["door_fr"] == "0x351"
+    assert server.BODY_EVENT_CAN_IDS["central_lock"] == "0x352"
+    assert server.BODY_EVENT_CAN_IDS["hazard"] == "0x353"
+
+
+def test_k3_ack_drives_event_overview_when_udp_raw_slot_is_only_0x180(monkeypatch):
+    clock = {"now": 500000}
+    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
+    state = make_real_state(clock["now"])
+    server.queue_body_event_command(state, "low_beam")
+    command = state.body_event_command
+    command["status"] = "succeeded"
+    command["completed_at_ms"] = clock["now"] + 100
+    state.domains["body"]["LowBeam"] = True
+    state.body_frame_history.appendleft({
+        "sequence": 88,
+        "can_id": "0x180",
+        "frame_name": "BodyStatus",
+        "cycle_ms": 100,
+        "send_type": "K3周期报文",
+        "data_hex": "00 0F 01 01 00 00 58 59",
+        "cloud_receive_time_ms": clock["now"] + 200,
+    })
+
+    clock["now"] += 1000
+    snapshot = state.body_snapshot()
+    assert snapshot["latest_frame"]["can_id"] == "0x353"
+    assert snapshot["latest_frame"]["send_type"] == "Web事件触发/CAN回读"
+    assert snapshot["latest_frame"]["overview_only"] is True
+    assert snapshot["frame_history"][0]["can_id"] == "0x180"
+
+    clock["now"] = command["completed_at_ms"] + 5000
+    snapshot = state.body_snapshot()
+    assert snapshot["latest_frame"]["can_id"] == "0x180"
+
+
+def test_periodic_overview_maps_k3_step_without_changing_raw_history(monkeypatch):
+    clock = {"now": 600000}
+    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
+    state = make_real_state(clock["now"])
+
+    for step, expected_id in ((1, "0x351"), (5, "0x353"), (0, "0x352")):
+        state.body_frame_history.clear()
+        state.body_frame_history.appendleft({
+            "sequence": 90 + step,
+            "can_id": "0x180",
+            "frame_name": "BodyStatus",
+            "cycle_ms": 100,
+            "send_type": "K3周期报文",
+            "data_hex": "00 0F 00 01 00 00 58 68",
+            "simulation_step": step,
+            "cloud_receive_time_ms": clock["now"],
+        })
+        snapshot = state.body_snapshot()
+        assert snapshot["latest_frame"]["can_id"] == expected_id
+        assert snapshot["latest_frame"]["raw_can_id"] == "0x180"
+        assert snapshot["latest_frame"]["overview_only"] is True
+        assert snapshot["frame_history"][0]["can_id"] == "0x180"

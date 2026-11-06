@@ -54,6 +54,15 @@ BODY_EVENT_HOLD_SECONDS = 5
 BODY_EVENT_TIMEOUT_MS = 8000
 BODY_CONTROL_TIMEOUT_MS = int(os.getenv("BODY_CONTROL_TIMEOUT_MS", "10000"))
 BODY_CANOE_ATTACK_TIMEOUT_MS = int(os.getenv("BODY_CANOE_ATTACK_TIMEOUT_MS", "30000"))
+BODY_CANOE_ATTACK_TYPES = (
+    "CAN消息重放",
+    "有线通信安全类工具",
+    "获取车辆控制权限",
+    "车辆通信协议攻击",
+    "UDS",
+    "有线通信协议及接口攻击",
+)
+BODY_CANOE_DEFAULT_ATTACK_TYPE = "CAN消息重放"
 CANOE_AGENT_AUTOSTART_ON_ATTACK = os.getenv(
     "CANOE_AGENT_AUTOSTART_ON_ATTACK", "0"
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -365,7 +374,71 @@ class VehicleState:
         body["alerts"] = alerts[:12]
         body["frame_count"] = self.body_sequence
         frame_history = list(self.body_frame_history)
-        body["latest_frame"] = frame_history[0] if frame_history else None
+        latest_frame = frame_history[0] if frame_history else None
+        if latest_frame and str(latest_frame.get("can_id") or "").lower() == "0x180":
+            simulation_step = latest_frame.get("simulation_step")
+            if simulation_step is not None:
+                periodic_group = body_periodic_group(simulation_step)
+                profile = BODY_SIGNAL_GROUPS[periodic_group]
+                # The K3 raw periodic frame remains 0x180.  Only the Web
+                # overview is projected to the logical group selected by the
+                # K3 simulation step; raw history remains unchanged.
+                latest_frame = dict(latest_frame)
+                latest_frame.update({
+                    "can_id": profile["can_id"],
+                    "frame_name": profile["frame_name"],
+                    "cycle_ms": profile["cycle_ms"],
+                    "send_type": "周期触发/逻辑分组",
+                    "event": "周期状态刷新",
+                    "data_hex": body_payload_bytes(
+                        body, int(latest_frame.get("sequence") or 0), periodic_group
+                    ),
+                    "overview_only": True,
+                    "overview_source": "K3周期阶段映射",
+                    "raw_can_id": "0x180",
+                })
+        if command:
+            command_status = str(command.get("status") or "")
+            completed_at_ms = int(command.get("completed_at_ms") or 0)
+            event_window_active = command_status in {"pending", "executing"} or (
+                command_status == "succeeded"
+                and completed_at_ms > 0
+                and snapshot_at_ms < completed_at_ms + int(command.get(
+                    "hold_seconds", BODY_EVENT_HOLD_SECONDS
+                )) * 1000
+            )
+            event_can_id = BODY_EVENT_CAN_IDS.get(str(command.get("action") or ""))
+            requested_at_ms = int(command.get("requested_at_ms") or 0)
+            if event_window_active and event_can_id:
+                event_frame = next((
+                    frame for frame in frame_history
+                    if str(frame.get("can_id") or "").lower() == event_can_id.lower()
+                    and int(frame.get("cloud_receive_time_ms") or 0) >= requested_at_ms
+                ), None)
+                if event_frame:
+                    latest_frame = event_frame
+                elif command_status == "succeeded" and latest_frame:
+                    # Some K3 builds acknowledge the real CAN0 readback but
+                    # only expose the periodic 0x180 frame in their UDP raw
+                    # frame slot. Keep history truthful and create a separate
+                    # overview-only frame from that hardware acknowledgement.
+                    event_group = BODY_EVENT_GROUPS.get(str(command.get("action") or ""))
+                    profile = BODY_SIGNAL_GROUPS.get(event_group or "")
+                    if profile:
+                        latest_frame = dict(latest_frame)
+                        latest_frame.update({
+                            "can_id": profile["can_id"],
+                            "frame_name": profile["frame_name"],
+                            "cycle_ms": 0,
+                            "send_type": "Web事件触发/CAN回读",
+                            "event": str(command.get("label") or "车身事件"),
+                            "data_hex": body_payload_bytes(
+                                body, int(latest_frame.get("sequence") or 0), event_group
+                            ),
+                            "overview_only": True,
+                            "overview_source": "K3真实事件确认",
+                        })
+        body["latest_frame"] = latest_frame
         visible_frames = frame_history[:8]
         recent_intrusion = next(
             (
@@ -386,6 +459,7 @@ class VehicleState:
             "latest": dict(self.body_latest_intrusion) if self.body_latest_intrusion else None,
         }
         body["canoe_attack"] = dict(canoe_attack) if canoe_attack else None
+        body["canoe_attack_types"] = list(BODY_CANOE_ATTACK_TYPES)
         body["canoe_agent_online"] = bool(
             self.body_canoe_agent_last_seen_ms
             # The agent waits up to eight seconds for the five-second CAPL
@@ -597,6 +671,42 @@ BODY_TEST_ACTIONS = {
     "hazard": ("Hazard", "双闪"),
 }
 
+BODY_EVENT_CAN_IDS = {
+    "door_fl": "0x351",
+    "door_fr": "0x351",
+    "door_rl": "0x351",
+    "door_rr": "0x351",
+    "central_lock": "0x352",
+    "low_beam": "0x353",
+    "high_beam": "0x353",
+    "turn_left": "0x353",
+    "turn_right": "0x353",
+    "hazard": "0x353",
+}
+
+BODY_EVENT_GROUPS = {
+    "door_fl": "door",
+    "door_fr": "door",
+    "door_rl": "door",
+    "door_rr": "door",
+    "central_lock": "lock",
+    "low_beam": "light",
+    "high_beam": "light",
+    "turn_left": "light",
+    "turn_right": "light",
+    "hazard": "light",
+}
+
+
+def body_periodic_group(simulation_step):
+    """Map K3's periodic demo step to the logical Web overview group."""
+    step = int(simulation_step or 0)
+    if 1 <= step <= 4:
+        return "door"
+    if 5 <= step <= 9:
+        return "light"
+    return "lock"
+
 def body_switch(value):
     if isinstance(value, bool):
         return value
@@ -719,10 +829,12 @@ def detect_canoe_body_tamper(state, frame, body, received_at_ms):
     if str(body.get("CentralLockState", "")).lower() != "locked":
         return None
 
+    attack_type = str(command.get("attack_type") or BODY_CANOE_DEFAULT_ATTACK_TYPE)
     frame.update({
         "is_intrusion": True,
         "intrusion_type": "door_fl_tamper",
         "intrusion_label": "CANoe左前门状态篡改",
+        "attack_type": attack_type,
         "intrusion_reason": "中央门锁已锁止，但左前门处于开启状态",
         "anomaly_location": "Byte 0 · Bit 0（Door_FL）：0 → 1",
     })
@@ -730,6 +842,7 @@ def detect_canoe_body_tamper(state, frame, body, received_at_ms):
     state.body_latest_intrusion = {
         "type": "door_fl_tamper",
         "label": frame["intrusion_label"],
+        "attack_type": attack_type,
         "reason": frame["intrusion_reason"],
         "can_id": frame["can_id"],
         "data_hex": frame["data_hex"],
@@ -750,8 +863,8 @@ def detect_canoe_body_tamper(state, frame, body, received_at_ms):
     alert = {
         "key": "conflict:locked-door-open",
         "level": "critical",
-        "title": "检测到CAN状态篡改",
-        "detail": "中央门锁已锁止，但左前门状态为开启",
+        "title": "检测到{}".format(attack_type),
+        "detail": "{}：中央门锁已锁止，但左前门状态为开启".format(attack_type),
         "can_id": frame["can_id"],
         "data_hex": frame["data_hex"],
         "anomaly_location": frame["anomaly_location"],
@@ -884,6 +997,8 @@ def record_body_update(state, payload, is_test=False):
             "device_id": body["device_id"], "interface_path": interface_path,
             "source": source, "test": bool(is_test),
         }
+        if payload.get("simulation_step") is not None:
+            frame["simulation_step"] = max(0, min(255, int(payload["simulation_step"])))
         intrusion_alert = detect_canoe_body_tamper(
             state, frame, body, received_at_ms
         ) if raw_supplied and frame_valid else None
@@ -1209,6 +1324,11 @@ async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
     attack_type = str(payload.get("attack", "door_fl_tamper")).strip().lower()
     if attack_type != "door_fl_tamper":
         raise HTTPException(status_code=400, detail="only door_fl_tamper is supported")
+    attack_label = str(
+        payload.get("attack_type") or BODY_CANOE_DEFAULT_ATTACK_TYPE
+    ).strip()
+    if attack_label not in BODY_CANOE_ATTACK_TYPES:
+        raise HTTPException(status_code=400, detail="unsupported CAN attack type")
     state = registry.get(vehicle_id)
     current_body = state.body_snapshot()
     current = state.body_canoe_attack_command
@@ -1237,6 +1357,7 @@ async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
     state.body_canoe_attack_command = {
         "sequence": state.body_canoe_attack_sequence,
         "attack": attack_type,
+        "attack_type": attack_label,
         "status": "queued",
         "requested_at_ms": now_ms(),
         "acknowledged_at_ms": None,

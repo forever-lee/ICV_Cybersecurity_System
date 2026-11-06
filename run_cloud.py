@@ -1,6 +1,7 @@
 """PyCharm 直接运行：启动云端服务与监控网页。"""
 
 import os
+from pathlib import Path
 
 
 # ======================== 可修改配置 ========================
@@ -19,8 +20,10 @@ DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "").strip()
 # 网页点击“CANoe发起篡改攻击”时，由后端自动启动本机CANoe代理。
 # 代理会打开此配置并启动Measurement，无需再单独运行代理终端。
 CANOE_AGENT_AUTOSTART_ON_ATTACK = True
+BASE_DIR = Path(__file__).resolve().parent
 CANOE_CONFIG_PATH = os.getenv(
-    "CANOE_CONFIG_PATH", r"D:\CANoeProjects\BodyAttack\canoe_attack.cfg"
+    "CANOE_CONFIG_PATH",
+    str(BASE_DIR / "canoe_gateway" / "canoe_attack.cfg"),
 )
 
 # 超过多少秒没有收到车端数据，判定车辆离线。

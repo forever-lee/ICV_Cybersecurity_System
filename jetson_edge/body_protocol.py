@@ -454,6 +454,11 @@ def ethernet_payload(decoded, board_address, udp_received_at_ms=None):
             else "jetson_udp_receive_to_cloud_ingest"
         ),
     })
+    # K3 keeps the physical periodic CAN frame as 0x180, while this step
+    # identifies which logical body group is active in the demo cycle.  Send
+    # it to the cloud so the Web overview can present the corresponding
+    # 0x351/0x352/0x353 group without changing the truthful raw CAN history.
+    payload["simulation_step"] = int(decoded.get("simulationStep") or 0)
     raw_can = decoded.get("rawCanFrame")
     if raw_can:
         can_id = int(raw_can["can_id"])
