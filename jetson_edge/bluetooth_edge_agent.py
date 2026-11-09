@@ -14,10 +14,10 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 try:
-    from .bluetooth_control_protocol import make_command, parse_ack
+    from .bluetooth_control_protocol import make_command, make_message, parse_ack, parse_message_ack
     from .bluetooth_time_sync import ClockSynchronizer, parse_response, parse_timed_telemetry
 except ImportError:  # Direct execution from jetson_edge/.
-    from bluetooth_control_protocol import make_command, parse_ack
+    from bluetooth_control_protocol import make_command, make_message, parse_ack, parse_message_ack
     from bluetooth_time_sync import ClockSynchronizer, parse_response, parse_timed_telemetry
 
 
@@ -143,13 +143,13 @@ def decode_datagram(data, address, source_prefix="S32K344-ETH"):
 
 def decode_ack_datagram(data, address, device_host):
     """Accept only a complete, CRC-valid K344 ACK from the configured board."""
-    if address[0] != device_host or not data.startswith(b"BTACK|"):
+    if address[0] != device_host or not data.startswith((b"BTACK|", b"BTMSGACK|")):
         raise ValueError("ACK source or type is invalid")
     frame = data.decode("ascii")
     # The existing K344 UART gateway strips '#' before forwarding a frame.
     if not frame.endswith("#"):
         frame += "#"
-    return parse_ack(frame), frame
+    return (parse_message_ack(frame) if frame.startswith("BTMSGACK|") else parse_ack(frame)), frame
 
 
 def decode_sync_datagram(data, address, device_host):
@@ -361,10 +361,13 @@ class ControlWorker(threading.Thread):
             identity = (command.get("id"), command.get("nonce"))
             if current is None or current["identity"] != identity:
                 try:
-                    frame = make_command(
+                    frame = (make_message(
+                        command["id"], command["text"],
+                        command["created_at_ms"], command["nonce"]
+                    ) if command["command"] == "message" else make_command(
                         command["id"], command["command"],
                         command["created_at_ms"], command["nonce"]
-                    ).encode("ascii")
+                    )).encode("ascii")
                 except (KeyError, TypeError, ValueError) as exc:
                     print("[蓝牙控制命令无效] {}".format(exc), flush=True)
                     self.stop_event.wait(self.poll_seconds)
@@ -386,7 +389,8 @@ class ControlWorker(threading.Thread):
                     "id": ack["id"], "nonce": ack["nonce"],
                     "status": ack["status"], "device_ack": raw_frame,
                     "device_ack_at_ms": device_ack_ms,
-                    "message": "发送端确认" if ack["status"] == "applied" else "发送端拒绝",
+                    "message": "笔记本已收到云端报文" if current["action"] == "message" and ack["status"] == "applied" else
+                               "发送端确认" if ack["status"] == "applied" else "发送端拒绝",
                 }
                 break
             if final_payload is not None:
@@ -534,6 +538,7 @@ def main():
             last_packet_at = time.monotonic()
             next_diagnostic_at = last_packet_at + diagnostic_interval
             packet_kind = (
+                "BTMSGACK" if data.startswith(b"BTMSGACK|") else
                 "BTACK" if data.startswith(b"BTACK|") else
                 "BTSYNC" if data.startswith(b"BTSYNC|") else
                 "BTDATA" if data.startswith(b"S32K344_") else "UNKNOWN"
@@ -552,7 +557,7 @@ def main():
                     ),
                     flush=True,
                 )
-            if data.startswith(b"BTACK|"):
+            if data.startswith((b"BTACK|", b"BTMSGACK|")):
                 try:
                     ack, frame = decode_ack_datagram(data, address, device_host)
                     received_acks.put_nowait((ack, frame, int(time.time() * 1000)))

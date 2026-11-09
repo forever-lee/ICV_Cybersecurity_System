@@ -85,3 +85,52 @@ def parse_ack(frame):
         raise ValueError("invalid ACK nonce")
     return {"id": int(fields[2]), "status": fields[3].lower(),
             "state": fields[4].lower(), "nonce": fields[5]}
+
+
+MAX_MESSAGE_BYTES = 64
+
+
+def make_message(command_id, message, issued_at_ms, nonce):
+    if not isinstance(message, str):
+        raise ValueError("message must be text")
+    encoded = message.encode("utf-8")
+    if not encoded or len(encoded) > MAX_MESSAGE_BYTES or any(
+            character in "\r\n\x00" for character in message):
+        raise ValueError("message must be 1-64 UTF-8 bytes on one line")
+    if not isinstance(command_id, int) or command_id < 1 or not isinstance(issued_at_ms, int) or issued_at_ms < 1:
+        raise ValueError("invalid message id or time")
+    nonce = str(nonce).upper()
+    if not NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("invalid message nonce")
+    return _pack(("BTMSG", 1, command_id, encoded.hex().upper(), issued_at_ms, nonce))
+
+
+def parse_message(frame):
+    fields = _unpack(frame, "BTMSG", 7)
+    if not fields[2].isdigit() or int(fields[2]) < 1 or not fields[4].isdigit():
+        raise ValueError("invalid message id or time")
+    if not NONCE_PATTERN.fullmatch(fields[5]) or not re.fullmatch(r"(?:[0-9A-F]{2}){1,64}", fields[3]):
+        raise ValueError("invalid message")
+    try:
+        message = bytes.fromhex(fields[3]).decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("message is not UTF-8") from exc
+    if any(character in "\r\n\x00" for character in message):
+        raise ValueError("message contains a control character")
+    return {"id": int(fields[2]), "message": message, "nonce": fields[5]}
+
+
+def make_message_ack(command_id, nonce):
+    nonce = str(nonce).upper()
+    if not isinstance(command_id, int) or command_id < 1 or not NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("invalid message ACK")
+    return _pack(("BTMSGACK", 1, command_id, "RECEIVED", nonce))
+
+
+def parse_message_ack(frame):
+    fields = _unpack(frame, "BTMSGACK", 6)
+    if not fields[2].isdigit() or int(fields[2]) < 1 or fields[3] != "RECEIVED":
+        raise ValueError("invalid message ACK")
+    if not NONCE_PATTERN.fullmatch(fields[4]):
+        raise ValueError("invalid message ACK nonce")
+    return {"id": int(fields[2]), "status": "applied", "state": "message", "nonce": fields[4]}

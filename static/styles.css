@@ -624,6 +624,15 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .bluetooth-control-button.off:hover, .bluetooth-control-button.off.active { color: #ffe0e2; background: rgba(255,93,104,.24); }
 .bluetooth-control-button:disabled { cursor: default; opacity: .5; }
 .bluetooth-control-button.active:disabled { opacity: 1; }
+.bluetooth-message-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; padding: 10px 17px; border-bottom: 1px solid var(--line); }
+.bluetooth-message-bar label { color: #a9c3d4; font-size: 10px; white-space: nowrap; }
+.bluetooth-message-bar input { flex: 1 1 250px; min-width: 150px; height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; outline: none; color: #d9eaf2; background: rgba(4,12,22,.45); font-size: 10px; }
+.bluetooth-message-bar input:focus { border-color: var(--cyan); }
+.bluetooth-message-bar small { color: #7f99a9; font-size: 9px; }
+.bluetooth-traffic-row .bluetooth-direction { display: inline-block; width: fit-content; padding: 2px 5px; border-radius: 3px; font-weight: 700; }
+.bluetooth-traffic-row.rx .bluetooth-direction { color: #80e5ed; background: rgba(32,214,231,.12); }
+.bluetooth-traffic-row.tx .bluetooth-direction { color: #dbc4ff; background: rgba(155,121,255,.2); }
+.bluetooth-traffic-row.tx code { color: #e2d0ff; }
 
 @media (max-width: 680px) {
   .bluetooth-control-group { align-items: stretch; width: 100%; }

@@ -39,7 +39,7 @@ from stream_protocol import (
 )
 from wifi_ids import detect_wifi_intrusion, parse_charging_packet, detect_wifi_rate
 from wifi_control import WifiControl
-from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack
+from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack, parse_message_ack as parse_bluetooth_message_ack, MAX_MESSAGE_BYTES
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -243,6 +243,7 @@ class VehicleState:
         self.bluetooth_last_seen_ms = 0
         self.bluetooth_latest = None
         self.bluetooth_history = deque(maxlen=60)
+        self.bluetooth_traffic_history = deque(maxlen=60)
         self.bluetooth_abnormal_count = 0
         self.bluetooth_latest_abnormal = None
         self.bluetooth_abnormal_history = deque(maxlen=60)
@@ -414,6 +415,7 @@ class VehicleState:
             "packet_count": self.bluetooth_sequence,
             "latest": self.bluetooth_latest,
             "history": list(self.bluetooth_history)[:12],
+            "traffic_history": list(self.bluetooth_traffic_history)[:12],
             "abnormal_count": self.bluetooth_abnormal_count,
             "latest_abnormal": self.bluetooth_latest_abnormal,
             "abnormal_history": list(self.bluetooth_abnormal_history)[:12],
@@ -439,6 +441,7 @@ class VehicleState:
             ),
             "pending": bool(pending),
             "pending_command": pending.get("command") if pending else None,
+            "pending_text": pending.get("text") if pending and pending.get("command") == "message" else None,
             "pending_id": pending.get("id") if pending else None,
             "expires_at_ms": pending.get("expires_at_ms") if pending else None,
             "last_ack": self.bluetooth_control_last_ack,
@@ -2137,6 +2140,7 @@ def record_bluetooth_packet(state, payload, is_test=False):
         "latency_reason": latency_reason,
         "clock_unsynced": clock_unsynced,
         "source": source,
+        "direction": "RX",
         "text": text,
         "hex": hex_text,
         "byte_count": len(encoded) if timing_removed else int(payload.get("byte_count", len(encoded))),
@@ -2165,6 +2169,7 @@ def record_bluetooth_packet(state, payload, is_test=False):
     else:
         state.bluetooth_latest = record
         state.bluetooth_history.appendleft(record)
+    state.bluetooth_traffic_history.appendleft(record)
     return record
 
 
@@ -2231,10 +2236,18 @@ async def queue_bluetooth_control(vehicle_id: str, request: Request):
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="control payload must be an object")
     command = str(payload.get("command", "")).strip().lower()
-    if command not in {"on", "off"}:
-        raise HTTPException(status_code=400, detail="command must be on or off")
+    if command not in {"on", "off", "message"}:
+        raise HTTPException(status_code=400, detail="command must be on, off or message")
+    message_text = None
+    if command == "message":
+        message_text = payload.get("text")
+        if not isinstance(message_text, str) or not message_text or any(
+                character in "\r\n\x00" for character in message_text) or len(message_text.encode("utf-8")) > MAX_MESSAGE_BYTES:
+            raise HTTPException(status_code=400, detail="message must be 1-64 UTF-8 bytes on one line")
     state = registry.get(vehicle_id)
     state.expire_bluetooth_control()
+    if command == "message" and state.bluetooth_control_mode != "hardware":
+        raise HTTPException(status_code=409, detail="downlink messages require hardware control mode")
     if (state.bluetooth_control_mode == "local_sender" and
             (not state.bluetooth_control_last_seen_ms or
              now_ms() - state.bluetooth_control_last_seen_ms >=
@@ -2242,6 +2255,8 @@ async def queue_bluetooth_control(vehicle_id: str, request: Request):
         raise HTTPException(status_code=503, detail="笔记本发送程序未连接")
     if state.bluetooth_control_pending:
         previous = state.bluetooth_control_pending
+        if command == "message" or previous["command"] == "message":
+            raise HTTPException(status_code=409, detail="another bluetooth command is pending")
         state.bluetooth_control_last_ack = {
             "id": previous["id"], "command": previous["command"],
             "status": "superseded", "message": "已被新命令替代",
@@ -2257,6 +2272,8 @@ async def queue_bluetooth_control(vehicle_id: str, request: Request):
         "expires_at_ms": created_at_ms + int(BLUETOOTH_CONTROL_EXPIRY_SECONDS * 1000),
         "status": "queued",
     }
+    if message_text is not None:
+        state.bluetooth_control_pending["text"] = message_text
     return {"accepted": True, "vehicle_id": state.vehicle_id, "control": state.bluetooth_control_snapshot()}
 
 
@@ -2404,7 +2421,8 @@ async def acknowledge_bluetooth_control(vehicle_id: str, request: Request):
     device_ack = None
     if raw_device_ack:
         try:
-            device_ack = parse_bluetooth_device_ack(raw_device_ack)
+            device_ack = (parse_bluetooth_message_ack(raw_device_ack)
+                          if pending["command"] == "message" else parse_bluetooth_device_ack(raw_device_ack))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="invalid device ACK: {}".format(exc))
         if (device_ack["id"] != command_id or device_ack["nonce"] != nonce
@@ -2425,7 +2443,18 @@ async def acknowledge_bluetooth_control(vehicle_id: str, request: Request):
     state.bluetooth_control_last_ack = ack
     state.bluetooth_control_pending = None
     if status == "applied":
-        state.bluetooth_control_state = pending["command"]
+        if pending["command"] == "message":
+            text = pending["text"]
+            encoded = text.encode("utf-8")
+            state.bluetooth_traffic_history.appendleft({
+                "sequence": "TX-{}".format(command_id),
+                "received_at_ms": ack["acknowledged_at_ms"],
+                "source": "云端→笔记本", "direction": "TX", "text": text,
+                "hex": " ".join("{:02x}".format(value) for value in encoded),
+                "byte_count": len(encoded), "command_id": command_id,
+            })
+        else:
+            state.bluetooth_control_state = pending["command"]
     return {"accepted": True, "vehicle_id": state.vehicle_id, "control": state.bluetooth_control_snapshot()}
 
 

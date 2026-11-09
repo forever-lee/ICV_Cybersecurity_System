@@ -7,6 +7,8 @@ import types
 from pathlib import Path
 from collections import OrderedDict
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -312,6 +314,54 @@ def test_notify_framing_and_ack_use_shared_crc_protocol(monkeypatch):
         pass
     else:
         raise AssertionError("corrupted control frame was accepted")
+
+
+def test_cloud_downlink_prints_tx_and_acknowledges_once(monkeypatch, capsys):
+    from jetson_edge.bluetooth_control_protocol import make_message, make_message_ack
+
+    sender = load_sender(monkeypatch)
+    frame = make_message(23, "云端 hello", 1791950000123, "A1B2C3D4E5F60708").encode("ascii")
+    assert sender.parse_message_frame(frame)["text"] == "云端 hello"
+    state = {"enabled": True, "revision": 0, "acknowledged_commands": OrderedDict(),
+             "lock": asyncio.Lock(), "write_lock": asyncio.Lock()}
+
+    class Characteristic:
+        max_write_without_response_size = 20
+        properties = ["write-without-response"]
+
+    class Client:
+        is_connected = True
+
+        def __init__(self):
+            self.writes = []
+
+        async def write_gatt_char(self, _characteristic, data, response):
+            self.writes.append(bytes(data))
+
+    async def exercise():
+        client = Client()
+        incoming = asyncio.Queue()
+        task = asyncio.create_task(sender.notify_control_loop(
+            state, client, Characteristic(), incoming))
+        await incoming.put(frame[:11])
+        await incoming.put(frame[11:])
+        await asyncio.sleep(0.35)
+        ack = b"".join(client.writes)
+        client.writes.clear()
+        await incoming.put(frame)
+        await asyncio.sleep(0.35)
+        assert b"".join(client.writes) == ack
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        return ack
+
+    ack = asyncio.run(exercise())
+    assert ack == make_message_ack(23, "A1B2C3D4E5F60708").encode("ascii")
+    assert capsys.readouterr().out.count("[TX 云端→笔记本]") == 1
+    assert state["enabled"] is True
+    assert state["revision"] == 0
+    with pytest.raises(ValueError):
+        sender.parse_message_frame(frame.replace(b"A1B2", b"A1B3"))
 
 
 def test_duplicate_notify_command_reuses_ack_without_reapplying(monkeypatch):

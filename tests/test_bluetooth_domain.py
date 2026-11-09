@@ -13,7 +13,8 @@ if str(ROOT) not in sys.path:
 
 import server
 from jetson_edge.bluetooth_edge_agent import ControlWorker, decode_ack_datagram, decode_datagram, is_recent_duplicate
-from jetson_edge.bluetooth_control_protocol import make_ack, make_command, parse_ack, parse_command
+from jetson_edge.bluetooth_control_protocol import (make_ack, make_command, make_message,
+    make_message_ack, parse_ack, parse_command, parse_message, parse_message_ack)
 from fastapi.testclient import TestClient
 
 
@@ -222,6 +223,46 @@ class BluetoothControlTests(unittest.TestCase):
         self.assertEqual(control["state"], "off")
         self.assertEqual(control["status"], "applied")
 
+    def test_cloud_message_is_tx_only_after_matching_laptop_ack(self):
+        state = server.registry.get(self.vehicle_id)
+        server.record_bluetooth_packet(state, {"text": "S32K344_HELLO_01", "source": "BLE-UDP"})
+        queued = self.client.post(self.path, json={"command": "message", "text": "测试 TX 1"})
+        self.assertEqual(queued.status_code, 200)
+        pending = self.client.get(self.path + "/next", headers=self.headers).json()["command"]
+        frame = make_message(pending["id"], pending["text"], pending["created_at_ms"], pending["nonce"])
+        self.assertEqual(parse_message(frame)["message"], "测试 TX 1")
+        self.assertEqual(state.bluetooth_traffic_history[0]["direction"], "RX")
+        raw = make_message_ack(pending["id"], pending["nonce"])
+        ack, restored = decode_ack_datagram(raw[:-1].encode("ascii"),
+                                             ("192.168.4.20", 62510), "192.168.4.20")
+        self.assertEqual(ack, parse_message_ack(raw))
+        self.assertEqual(restored, raw)
+        bad = self.client.post(self.path + "/ack", headers=self.headers, json={
+            "id": pending["id"], "nonce": pending["nonce"], "status": "applied",
+            "device_ack": make_message_ack(pending["id"], "0000000000000000"),
+        })
+        self.assertEqual(bad.status_code, 409)
+        self.assertEqual(len(state.bluetooth_traffic_history), 1)
+        confirmed = self.client.post(self.path + "/ack", headers=self.headers, json={
+            "id": pending["id"], "nonce": pending["nonce"], "status": "applied",
+            "device_ack": raw,
+        })
+        self.assertEqual(confirmed.status_code, 200)
+        self.assertEqual(state.bluetooth_traffic_history[0]["direction"], "TX")
+        self.assertEqual(state.bluetooth_traffic_history[0]["text"], "测试 TX 1")
+        self.assertEqual(state.bluetooth_traffic_history[1]["direction"], "RX")
+        self.assertEqual(state.bluetooth_control_state, "unknown")
+        self.assertEqual(state.bluetooth_sequence, 1)
+
+    def test_cloud_message_rejects_oversize_and_local_mode(self):
+        self.assertEqual(self.client.post(self.path, json={
+            "command": "message", "text": "中" * 22,
+        }).status_code, 400)
+        server.registry.get(self.vehicle_id).bluetooth_control_mode = "local_sender"
+        self.assertEqual(self.client.post(self.path, json={
+            "command": "message", "text": "hello",
+        }).status_code, 409)
+
     def test_delivering_does_not_change_state_and_expiry_does_not_fake_success(self):
         self.client.post(self.path, json={"command": "on"})
         pending = self.client.get(self.path + "/next", headers=self.headers).json()["command"]
@@ -280,6 +321,36 @@ class BluetoothControlTests(unittest.TestCase):
         self.assertEqual(events[0][2], ("192.168.4.20", 5001))
         self.assertEqual(events[-1][1]["status"], "applied")
         self.assertEqual(events[-1][1]["device_ack"], make_ack(8, "applied", "off", command["nonce"]))
+
+    def test_edge_worker_delivers_message_frame_and_waits_for_message_ack(self):
+        stop = threading.Event()
+        received = queue.Queue()
+        events = []
+        command = {"id": 9, "nonce": "A1B2C3D4E5F60708", "command": "message",
+                   "text": "TX hello", "created_at_ms": 1791950000123}
+
+        class Udp:
+            def sendto(self, data, address):
+                events.append(("udp", parse_message(data), address))
+                raw = make_message_ack(9, command["nonce"])
+                received.put((parse_message_ack(raw), raw, server.now_ms()))
+
+        class Worker(ControlWorker):
+            def request(self, method, suffix, payload=None):
+                if method == "GET":
+                    return {"command": command}
+                events.append(("cloud", payload))
+                if payload["status"] == "applied":
+                    stop.set()
+                return {"accepted": True}
+
+        worker = Worker("http://invalid", "unused", Udp(), "192.168.4.20", 5001,
+                        received, stop, 0.01, 1.0, 1.0)
+        worker.start()
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(events[0][1]["message"], "TX hello")
+        self.assertEqual(events[-1][1]["device_ack"], make_message_ack(9, command["nonce"]))
 
 
 class BluetoothLocalSenderTests(unittest.TestCase):

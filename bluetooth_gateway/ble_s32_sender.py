@@ -153,6 +153,39 @@ def make_ack_frame(command_id, state, nonce):
     return "{}|{:04X}#".format(body, binascii.crc_hqx(body.encode("ascii"), 0xFFFF))
 
 
+def parse_message_frame(frame):
+    """Decode a cloud downlink only after its frame CRC and UTF-8 are valid."""
+    if not isinstance(frame, bytes) or not frame.endswith(b"#") or len(frame) > MAX_CONTROL_FRAME_BYTES:
+        raise ValueError("云端报文不完整")
+    try:
+        fields = frame[:-1].decode("ascii").split("|")
+    except UnicodeDecodeError as exc:
+        raise ValueError("云端报文不是 ASCII 封装") from exc
+    if (len(fields) != 7 or fields[:2] != ["BTMSG", "1"] or
+            not fields[2].isdigit() or int(fields[2]) < 1 or
+            not re.fullmatch(r"(?:[0-9A-F]{2}){1,64}", fields[3]) or
+            not fields[4].isdigit() or not NONCE_PATTERN.fullmatch(fields[5]) or
+            not re.fullmatch(r"[0-9A-F]{4}", fields[6])):
+        raise ValueError("云端报文格式错误")
+    body = b"|".join(frame[:-1].split(b"|")[:-1])
+    if binascii.crc_hqx(body, 0xFFFF) != int(fields[6], 16):
+        raise ValueError("云端报文 CRC 错误")
+    try:
+        text = bytes.fromhex(fields[3]).decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("云端报文不是 UTF-8") from exc
+    if any(character in "\r\n\x00" for character in text):
+        raise ValueError("云端报文含控制字符")
+    return {"id": int(fields[2]), "text": text, "nonce": fields[5]}
+
+
+def make_message_ack_frame(command_id, nonce):
+    if command_id < 1 or not NONCE_PATTERN.fullmatch(nonce):
+        raise ValueError("云端报文 ACK 参数错误")
+    body = "BTMSGACK|1|{}|RECEIVED|{}".format(command_id, nonce)
+    return "{}|{:04X}#".format(body, binascii.crc_hqx(body.encode("ascii"), 0xFFFF))
+
+
 class NotifyFramer:
     """Reassemble '#' terminated frames across BLE notification boundaries."""
 
@@ -299,6 +332,27 @@ async def notify_control_loop(state, client, write_characteristic, notifications
                     await write_frame(client, write_characteristic, response[:-1])
                     state["sync_id"] = sync_id
                 print("[蓝牙对时响应已发出] sync_id={}".format(sync_id), flush=True)
+                continue
+            if frame.startswith(b"BTMSG|"):
+                try:
+                    message = parse_message_frame(frame)
+                except ValueError as exc:
+                    print("[云端下行报文已拒绝] {}".format(exc), flush=True)
+                    continue
+                key = (message["id"], message["nonce"])
+                async with state["lock"]:
+                    cached_ack = state["acknowledged_commands"].get(key)
+                    if cached_ack is None:
+                        cached_ack = make_message_ack_frame(message["id"], message["nonce"])
+                        state["acknowledged_commands"][key] = cached_ack
+                        if len(state["acknowledged_commands"]) > 128:
+                            state["acknowledged_commands"].popitem(last=False)
+                        print("[TX 云端→笔记本] id={} 内容={} UTF-8 HEX={}".format(
+                            message["id"], message["text"], message["text"].encode("utf-8").hex().upper()),
+                            flush=True)
+                async with state["write_lock"]:
+                    await write_frame(client, write_characteristic, cached_ack[:-1])
+                print("[TX 确认已发出] id={}".format(message["id"]), flush=True)
                 continue
             if not frame.startswith(b"BTCTL|"):
                 continue

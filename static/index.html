@@ -200,9 +200,15 @@
                   <button class="primary-button danger" id="bluetoothAnomalyTestButton" type="button">生成异常测试</button>
                 </div>
               </div>
+              <div class="bluetooth-message-bar">
+                <label for="bluetoothMessageText">云端下发报文（TX）</label>
+                <input id="bluetoothMessageText" type="text" maxlength="64" placeholder="输入要发到笔记本窗口的内容（最多 64 字节）" autocomplete="off">
+                <button class="primary-button blue" id="bluetoothMessageButton" type="button" disabled>发送报文</button>
+                <small id="bluetoothMessageStatus">等待蓝牙控制链路连接</small>
+              </div>
               <div class="telemetry-layout">
                 <div class="latest-packet"><span class="label">最新报文</span><strong id="bluetoothText">尚未收到蓝牙数据</strong><div class="packet-stats bluetooth-packet-stats"><span>累计 <b id="bluetoothPacketCount">0</b></span><span>RSSI <b id="bluetoothRssi">—</b></span><span>时间 <b id="bluetoothTime">—</b></span><span>链路延迟（估算） <b id="bluetoothLatency">待时间同步</b></span></div><div class="hex-view"><span>HEX</span><code id="bluetoothHex">—</code></div></div>
-                <div class="packet-history"><div class="history-head"><span>最近报文</span><small>最多显示 8 条</small></div><div id="bluetoothHistory" class="history-list"><div class="history-empty">等待蓝牙模块发送数据…</div></div></div>
+                <div class="packet-history"><div class="history-head"><span>最近收发报文（RX / TX）</span><small>最多显示 8 条</small></div><div id="bluetoothHistory" class="history-list"><div class="history-empty">等待蓝牙模块发送数据…</div></div></div>
               </div>
               <div class="abnormal-packet-panel" id="bluetoothAbnormalPanel">
                 <div class="abnormal-panel-head"><div><i>!</i><span><strong>异常报文监测</strong><small>S32K344 异常数据独立记录</small></span></div><span>异常累计 <b id="bluetoothAbnormalCount">0</b></span></div>
