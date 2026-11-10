@@ -59,6 +59,49 @@ python3 start_edge.py
 
 Jetson 不启动 `run_cloud.py`，也不在 Jetson 打开 Web 页面；Jetson 只需手动运行 `start_edge.py`。它会统一拉起并监管 `WiFi_Module.py`、`bluetooth_edge_agent.py`、`body_edge_agent.py`、GPS 和两路摄像头上传进程，不需要再单独启动这些子进程。
 
+### 摄像头不可达时指定车辆
+
+`start_edge.py` 会通过可达的摄像头自动判断当前 Jetson 对应的车辆：
+
+- 摄像头 `192.168.4.88` 对应 `VHC-001`；
+- 摄像头 `192.168.4.89` 对应 `VHC-002`。
+
+如果两路摄像头都不可达，程序无法自动确定车辆，会提示
+`Cannot determine vehicle_id` 并停止启动。确认 Jetson 所属车辆后，可通过
+`EDGE_VEHICLE_ID` 显式指定。例如，指定为 `VHC-001`：
+
+```bash
+EDGE_VEHICLE_ID=VHC-001 python3 start_edge.py
+```
+
+指定为 `VHC-002`：
+
+```bash
+EDGE_VEHICLE_ID=VHC-002 python3 start_edge.py
+```
+
+如果摄像头暂时不使用，可同时关闭两路摄像头组件，避免等待 RTSP 探测：
+
+```bash
+EDGE_VEHICLE_ID=VHC-001 \
+CAMERA_1_ENABLED=0 \
+CAMERA_2_ENABLED=0 \
+python3 start_edge.py
+```
+
+也可以先导出环境变量再启动：
+
+```bash
+export EDGE_VEHICLE_ID=VHC-001
+export CAMERA_1_ENABLED=0
+export CAMERA_2_ENABLED=0
+python3 start_edge.py
+```
+
+注意，单独执行 `EDGE_VEHICLE_ID=VHC-001` 但不加 `export`，后续启动的
+Python 进程无法读取该变量。车辆编号必须与实际部署一致，否则车身、WiFi、
+蓝牙和视频数据会上传到错误的车辆记录。
+
 `start_edge.py` 集中配置的默认云端地址为：
 
 ```text

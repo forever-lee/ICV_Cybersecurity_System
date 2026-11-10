@@ -10,6 +10,7 @@ All settings can be overridden with environment variables; see README.md.
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -26,8 +27,8 @@ BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 BLUETOOTH_AGENT_PATH = BASE_DIR / "bluetooth_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-DEFAULT_CLOUD_HTTP_URL = "http://5567b4e0.r7.nas.cpolar.cn"
-DEFAULT_CLOUD_WS_URL = "ws://5567b4e0.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_HTTP_URL = "http://771523b0.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "ws://771523b0.r7.nas.cpolar.cn"
 DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
@@ -244,6 +245,151 @@ def check_device_connectivity():
     return results
 
 
+def configured_cameras():
+    """Return the camera components configured for this edge deployment."""
+    return [
+        (
+            "camera_vhc001",
+            os.getenv("VEHICLE_1_ID", "VHC-001"),
+            os.getenv("CAMERA_1_RTSP_URL", "rtsp://192.168.4.88:8554/main"),
+        ),
+        (
+            "camera_vhc002",
+            os.getenv("VEHICLE_2_ID", "VHC-002"),
+            os.getenv("CAMERA_2_RTSP_URL", "rtsp://192.168.4.89:8554/main"),
+        ),
+    ]
+
+
+def rtsp_endpoint_reachable(rtsp_url, timeout=1.0):
+    """Check the RTSP TCP endpoint without starting a cloud uploader."""
+    try:
+        parsed = urlsplit(rtsp_url)
+        host = parsed.hostname
+        port = parsed.port or 554
+    except ValueError:
+        return False
+    if not host:
+        return False
+
+    try:
+        connection = socket.create_connection((host, port), timeout=timeout)
+    except OSError:
+        return False
+    try:
+        return True
+    finally:
+        connection.close()
+
+
+def discover_reachable_camera_indexes(cameras=None):
+    """Probe enabled cameras and return the one-based indexes that are online."""
+    cameras = cameras or configured_cameras()
+    enabled_cameras = [
+        (index, name, vehicle_id, rtsp_url)
+        for index, (name, vehicle_id, rtsp_url) in enumerate(cameras, start=1)
+        if enabled("CAMERA_{}_ENABLED".format(index))
+    ]
+    if not enabled_cameras:
+        print("[CAMERA DISCOVERY] no camera component is enabled")
+        return set()
+
+    try:
+        attempts = max(1, int(os.getenv("CAMERA_DISCOVERY_ATTEMPTS", "5")))
+        timeout = max(
+            0.1, float(os.getenv("CAMERA_RTSP_PROBE_TIMEOUT_SECONDS", "1"))
+        )
+        retry_interval = max(
+            0.0, float(os.getenv("CAMERA_DISCOVERY_INTERVAL_SECONDS", "1"))
+        )
+    except ValueError:
+        raise SystemExit(
+            "CAMERA_DISCOVERY_ATTEMPTS/CAMERA_RTSP_PROBE_TIMEOUT_SECONDS/"
+            "CAMERA_DISCOVERY_INTERVAL_SECONDS must be numeric"
+        )
+
+    reachable = set()
+    for attempt in range(1, attempts + 1):
+        for index, _name, vehicle_id, rtsp_url in enabled_cameras:
+            if index in reachable:
+                continue
+            if rtsp_endpoint_reachable(rtsp_url, timeout):
+                reachable.add(index)
+                print(
+                    "[CAMERA PROBE OK] attempt={}/{} vehicle={} url={}".format(
+                        attempt, attempts, vehicle_id, rtsp_url
+                    )
+                )
+            else:
+                print(
+                    "[CAMERA PROBE FAIL] attempt={}/{} vehicle={} url={}".format(
+                        attempt, attempts, vehicle_id, rtsp_url
+                    )
+                )
+        if reachable:
+            break
+        if attempt < attempts and retry_interval:
+            time.sleep(retry_interval)
+
+    if not reachable:
+        print(
+            "[CAMERA DISCOVERY] no RTSP endpoint is reachable; "
+            "camera uploaders will not start"
+        )
+    elif len(reachable) > 1:
+        print(
+            "[CAMERA DISCOVERY WARN] multiple RTSP endpoints are reachable; "
+            "all reachable camera uploaders will start"
+        )
+    return reachable
+
+
+def resolve_edge_vehicle_id(reachable_camera_indexes, cameras=None):
+    """Resolve the physical vehicle identity from the reachable camera IP."""
+    cameras = cameras or configured_cameras()
+    explicit_vehicle_id = os.getenv("EDGE_VEHICLE_ID", "").strip()
+
+    selected = [
+        (index, vehicle_id, rtsp_url)
+        for index, (_name, vehicle_id, rtsp_url) in enumerate(cameras, start=1)
+        if index in reachable_camera_indexes
+    ]
+    if len(selected) == 1:
+        _index, vehicle_id, rtsp_url = selected[0]
+        host = urlsplit(rtsp_url).hostname or rtsp_url
+        if explicit_vehicle_id and explicit_vehicle_id != vehicle_id:
+            raise SystemExit(
+                "EDGE_VEHICLE_ID={} conflicts with camera {} mapped to {}. "
+                "Remove the override or correct the camera mapping.".format(
+                    explicit_vehicle_id, host, vehicle_id
+                )
+            )
+        print(
+            "[EDGE IDENTITY] camera_ip={} vehicle_id={}".format(
+                host, vehicle_id
+            )
+        )
+        return vehicle_id
+
+    if not selected and explicit_vehicle_id:
+        print(
+            "[EDGE IDENTITY EXPLICIT] vehicle_id={} reachable_cameras={}".format(
+                explicit_vehicle_id, len(selected)
+            )
+        )
+        return explicit_vehicle_id
+
+    if not selected:
+        raise SystemExit(
+            "Cannot determine vehicle_id: no camera is reachable. "
+            "Check the camera connection or set EDGE_VEHICLE_ID explicitly."
+        )
+    raise SystemExit(
+        "Cannot determine one vehicle_id: multiple cameras are reachable. "
+        "Separate the camera networks or set EDGE_VEHICLE_ID explicitly."
+    )
+
+
 def print_domain_link_diagnostics():
     """Print expected body/Bluetooth packet paths in the supervisor terminal."""
     interface = os.getenv("BODY_NETWORK_INTERFACE", "eno1").strip() or "eno1"
@@ -297,10 +443,20 @@ def acquire_instance_lock():
     return handle
 
 
-def build_components(edge_session_id=None, edge_session_started_at_ms=None):
+def build_components(
+    edge_session_id=None,
+    edge_session_started_at_ms=None,
+    reachable_camera_indexes=None,
+    edge_vehicle_id=None,
+):
     cloud_http_url, cloud_ws_url, ingest_token = required_environment()
     edge_session_id = edge_session_id or uuid.uuid4().hex
     edge_session_started_at_ms = edge_session_started_at_ms or int(time.time() * 1000)
+    edge_vehicle_id = (
+        edge_vehicle_id
+        or os.getenv("EDGE_VEHICLE_ID", "").strip()
+        or os.getenv("VEHICLE_1_ID", "VHC-001")
+    )
     common_cloud_environment = {
         "CLOUD_HTTP_URL": cloud_http_url,
         "CLOUD_WS_URL": cloud_ws_url,
@@ -323,7 +479,9 @@ def build_components(edge_session_id=None, edge_session_started_at_ms=None):
         if not BODY_AGENT_PATH.is_file():
             raise SystemExit("缺少车身域程序：{}".format(BODY_AGENT_PATH))
         body_environment = dict(common_cloud_environment)
-        body_environment["VEHICLE_ID"] = os.getenv("BODY_VEHICLE_ID", "VHC-001")
+        body_environment["VEHICLE_ID"] = os.getenv(
+            "BODY_VEHICLE_ID", edge_vehicle_id
+        )
         components.append(Component(
             name="body",
             command=[
@@ -372,7 +530,7 @@ def build_components(edge_session_id=None, edge_session_started_at_ms=None):
                 "WIFI_DIAGNOSTIC_INTERVAL_SECONDS", "5"
             ),
             "VEHICLE_ID": os.getenv(
-                "WIFI_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
+                "WIFI_VEHICLE_ID", edge_vehicle_id
             ),
         })
         components.append(Component(
@@ -387,7 +545,7 @@ def build_components(edge_session_id=None, edge_session_started_at_ms=None):
         bluetooth_environment = dict(common_cloud_environment)
         bluetooth_environment.update({
             "VEHICLE_ID": os.getenv(
-                "BLUETOOTH_VEHICLE_ID", os.getenv("VEHICLE_1_ID", "VHC-001")
+                "BLUETOOTH_VEHICLE_ID", edge_vehicle_id
             ),
             "BLUETOOTH_UDP_HOST": os.getenv("BLUETOOTH_UDP_HOST", "0.0.0.0"),
             "BLUETOOTH_UDP_PORT": os.getenv("BLUETOOTH_UDP_PORT", "5000"),
@@ -419,15 +577,21 @@ def build_components(edge_session_id=None, edge_session_started_at_ms=None):
             environment=bluetooth_environment,
         ))
 
-    cameras = [
-        ("camera_vhc001", os.getenv("VEHICLE_1_ID", "VHC-001"),
-         os.getenv("CAMERA_1_RTSP_URL", "rtsp://192.168.4.88:8554/main")),
-        ("camera_vhc002", os.getenv("VEHICLE_2_ID", "VHC-002"),
-         os.getenv("CAMERA_2_RTSP_URL", "rtsp://192.168.4.89:8554/main")),
-    ]
+    cameras = configured_cameras()
     for index, (name, vehicle_id, rtsp_url) in enumerate(cameras, start=1):
         if not enabled("CAMERA_{}_ENABLED".format(index)):
             continue
+        if (
+            reachable_camera_indexes is not None
+            and index not in reachable_camera_indexes
+        ):
+            print(
+                "[CAMERA SKIP] {} RTSP endpoint is unreachable: {}".format(
+                    vehicle_id, rtsp_url
+                )
+            )
+            continue
+        print("[CAMERA SELECT] {} -> {}".format(vehicle_id, rtsp_url))
         environment = dict(common_vehicle_environment)
         environment.update({"VEHICLE_ID": vehicle_id, "RTSP_URL": rtsp_url})
         components.append(Component(
@@ -441,14 +605,23 @@ def build_components(edge_session_id=None, edge_session_started_at_ms=None):
 def main():
     check_expected_body_address()
     check_device_connectivity()
+    reachable_camera_indexes = discover_reachable_camera_indexes()
+    edge_vehicle_id = resolve_edge_vehicle_id(reachable_camera_indexes)
     LOG_DIR.mkdir(exist_ok=True)
     lock_handle = acquire_instance_lock()
     pid_path = BASE_DIR / "edge_supervisor.pid"
     pid_path.write_text(str(os.getpid()), encoding="ascii")
     edge_session_id = uuid.uuid4().hex
     edge_session_started_at_ms = int(time.time() * 1000)
-    components = build_components(edge_session_id, edge_session_started_at_ms)
-    print("Edge session: {}".format(edge_session_id))
+    components = build_components(
+        edge_session_id,
+        edge_session_started_at_ms,
+        reachable_camera_indexes,
+        edge_vehicle_id,
+    )
+    print("Edge session: {} vehicle_id={}".format(
+        edge_session_id, edge_vehicle_id
+    ))
     print_domain_link_diagnostics()
     stopping = False
 

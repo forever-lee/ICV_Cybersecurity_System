@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 import server
+from jetson_edge import bluetooth_edge_agent
 from jetson_edge.bluetooth_edge_agent import (
     CloudClockMonitor, decode_datagram, decode_sync_datagram,
 )
@@ -20,6 +21,14 @@ from jetson_edge.bluetooth_time_sync import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_python36_clock_helpers_use_second_resolution_apis(monkeypatch):
+    monkeypatch.setattr(bluetooth_edge_agent.time, "time", lambda: 1234.567)
+    monkeypatch.setattr(bluetooth_edge_agent.time, "monotonic", lambda: 89.125)
+
+    assert bluetooth_edge_agent.epoch_time_ms() == pytest.approx(1234567.0)
+    assert bluetooth_edge_agent.monotonic_time_ms() == pytest.approx(89125.0)
 
 
 def test_sync_protocol_crc_and_source_validation():

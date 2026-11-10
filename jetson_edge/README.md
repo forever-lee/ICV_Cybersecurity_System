@@ -152,6 +152,30 @@ Jetson 蓝牙代理会独立使用云端 `/healthz` 测量两机时钟偏差，�
 设置 `BODY_ENABLED=0`、`BLUETOOTH_ENABLED=0`、`WIFI_ENABLED=0`、`GPS_ENABLED=0`、
 `CAMERA_1_ENABLED=0` 或 `CAMERA_2_ENABLED=0` 可单独关闭组件。
 
+## 摄像头自动选择
+
+`start_edge.py` 在创建视频上传进程前会探测摄像头 RTSP TCP 端口。默认最多
+探测 5 次，只启动 RTSP 端点可达的摄像头；不可达摄像头不会建立云端 WebSocket，
+避免部署在不同交换机上的两块 Jetson 争抢同一个车辆视频连接。探测结果同时决定
+整台 Jetson 的 `vehicle_id`：
+
+- 摄像头 `192.168.4.88` → `VHC-001`；
+- 摄像头 `192.168.4.89` → `VHC-002`。
+
+选出的 `vehicle_id` 会统一传给车身域、WiFi、蓝牙和对应的视频上传进程，避免同一套
+系统的视频属于 `VHC-002`、其他域却误传给 `VHC-001`。GNSS 融合坐标由所选视频
+进程携带，因此也归属于同一车辆。可用以下变量调整：
+
+- `CAMERA_DISCOVERY_ATTEMPTS`：探测次数，默认 `5`；
+- `CAMERA_RTSP_PROBE_TIMEOUT_SECONDS`：单次 TCP 超时，默认 `1` 秒；
+- `CAMERA_DISCOVERY_INTERVAL_SECONDS`：全部失败后的重试间隔，默认 `1` 秒。
+
+如果两路摄像头都可达，或者全部不可达，程序无法唯一判断当前 Jetson 属于哪套系统，
+因此会停止启动，防止数据串车。此时应先检查摄像头网络；确需无摄像头运行时，可设置
+`EDGE_VEHICLE_ID=VHC-001` 或 `EDGE_VEHICLE_ID=VHC-002` 明确指定。原有
+`BODY_VEHICLE_ID`、`WIFI_VEHICLE_ID`、`BLUETOOTH_VEHICLE_ID` 仍可单独覆盖，
+但正常的两套系统部署不应设置这些覆盖变量。
+
 ## 已排除的旧文件
 
 - `gps_monitor.py`：只打印串口状态，不生成云端使用的导航数据，已由 `navigation_gps.py` 完整替代。

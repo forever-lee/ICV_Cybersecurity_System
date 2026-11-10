@@ -3,6 +3,11 @@ import subprocess
 from jetson_edge import start_edge
 
 
+class FakeConnection:
+    def close(self):
+        pass
+
+
 def test_supervisor_uses_central_cloud_defaults(monkeypatch):
     monkeypatch.delenv("CLOUD_HTTP_URL", raising=False)
     monkeypatch.delenv("CLOUD_WS_URL", raising=False)
@@ -78,6 +83,117 @@ def test_body_address_check_auto_detects_eno1(monkeypatch, capsys):
 
     assert start_edge.check_expected_body_address() is True
     assert "eno1 地址正确：192.168.4.100/24" in capsys.readouterr().out
+
+
+def test_rtsp_endpoint_reachable_uses_url_host_and_port(monkeypatch):
+    calls = []
+
+    def fake_create_connection(address, timeout):
+        calls.append((address, timeout))
+        return FakeConnection()
+
+    monkeypatch.setattr(start_edge.socket, "create_connection", fake_create_connection)
+
+    assert start_edge.rtsp_endpoint_reachable(
+        "rtsp://192.168.4.89:8554/main", timeout=0.5
+    ) is True
+    assert calls == [(('192.168.4.89', 8554), 0.5)]
+
+
+def test_camera_discovery_selects_only_reachable_camera(monkeypatch, capsys):
+    monkeypatch.setenv("CAMERA_DISCOVERY_ATTEMPTS", "2")
+    monkeypatch.setenv("CAMERA_DISCOVERY_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("CAMERA_RTSP_PROBE_TIMEOUT_SECONDS", "0.25")
+    calls = []
+
+    def fake_probe(url, timeout):
+        calls.append((url, timeout))
+        return "192.168.4.89" in url
+
+    monkeypatch.setattr(start_edge, "rtsp_endpoint_reachable", fake_probe)
+
+    reachable = start_edge.discover_reachable_camera_indexes()
+
+    assert reachable == {2}
+    assert calls == [
+        ("rtsp://192.168.4.88:8554/main", 0.25),
+        ("rtsp://192.168.4.89:8554/main", 0.25),
+    ]
+    output = capsys.readouterr().out
+    assert "[CAMERA PROBE FAIL]" in output
+    assert "[CAMERA PROBE OK]" in output
+
+
+def test_edge_vehicle_id_is_resolved_from_reachable_camera_ip(monkeypatch, capsys):
+    monkeypatch.delenv("EDGE_VEHICLE_ID", raising=False)
+
+    first_vehicle_id = start_edge.resolve_edge_vehicle_id({1})
+    second_vehicle_id = start_edge.resolve_edge_vehicle_id({2})
+
+    assert first_vehicle_id == "VHC-001"
+    assert second_vehicle_id == "VHC-002"
+    output = capsys.readouterr().out
+    assert "camera_ip=192.168.4.88" in output
+    assert "vehicle_id=VHC-001" in output
+    assert "camera_ip=192.168.4.89" in output
+    assert "vehicle_id=VHC-002" in output
+
+
+def test_edge_vehicle_id_requires_explicit_value_without_camera(monkeypatch):
+    monkeypatch.delenv("EDGE_VEHICLE_ID", raising=False)
+
+    try:
+        start_edge.resolve_edge_vehicle_id(set())
+    except SystemExit as exc:
+        assert "no camera is reachable" in str(exc)
+    else:
+        raise AssertionError("missing camera identity must stop startup")
+
+
+def test_edge_vehicle_id_allows_explicit_fallback_without_camera(monkeypatch):
+    monkeypatch.setenv("EDGE_VEHICLE_ID", "VHC-002")
+
+    assert start_edge.resolve_edge_vehicle_id(set()) == "VHC-002"
+
+
+def test_build_components_starts_only_reachable_camera(monkeypatch):
+    for name in ("BODY_ENABLED", "GPS_ENABLED", "WIFI_ENABLED", "BLUETOOTH_ENABLED"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setenv("CAMERA_1_ENABLED", "1")
+    monkeypatch.setenv("CAMERA_2_ENABLED", "1")
+
+    components = start_edge.build_components(
+        "edge-session-test",
+        1234567890,
+        reachable_camera_indexes={2},
+    )
+
+    assert [component.name for component in components] == ["camera_vhc002"]
+    assert components[0].environment["VEHICLE_ID"] == "VHC-002"
+    assert components[0].environment["RTSP_URL"] == "rtsp://192.168.4.89:8554/main"
+
+
+def test_camera_identity_is_shared_by_body_wifi_and_bluetooth(monkeypatch):
+    monkeypatch.delenv("BODY_VEHICLE_ID", raising=False)
+    monkeypatch.delenv("WIFI_VEHICLE_ID", raising=False)
+    monkeypatch.delenv("BLUETOOTH_VEHICLE_ID", raising=False)
+    monkeypatch.setenv("GPS_ENABLED", "0")
+    monkeypatch.setenv("CAMERA_1_ENABLED", "1")
+    monkeypatch.setenv("CAMERA_2_ENABLED", "1")
+
+    components = start_edge.build_components(
+        "edge-session-test",
+        1234567890,
+        reachable_camera_indexes={2},
+        edge_vehicle_id="VHC-002",
+    )
+
+    by_name = {component.name: component for component in components}
+    assert set(by_name) == {"body", "wifi", "bluetooth", "camera_vhc002"}
+    assert {
+        by_name[name].environment["VEHICLE_ID"]
+        for name in by_name
+    } == {"VHC-002"}
 
 
 def test_device_connectivity_checks_camera_body_wifi_and_bluetooth(monkeypatch, capsys):

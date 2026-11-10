@@ -159,7 +159,7 @@ def preflight_report():
     checks = []
     architecture = platform.machine().lower()
     python_version = "{}.{}.{}".format(*sys.version_info[:3])
-    checks.append(("Python 版本", sys.version_info >= (3, 8), python_version, True))
+    checks.append(("Python 版本", sys.version_info >= (3, 6), python_version, True))
     checks.append(("AArch64 架构", architecture in {"aarch64", "arm64"}, architecture, True))
     checks.append(
         (
