@@ -1438,6 +1438,18 @@ registry = Registry()
 app = FastAPI(title="V-SHIELD Vehicle Cybersecurity Platform", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# WebScan 独立部署，通过测试工具页面中的同源入口跳转到实际服务。
+WEBSCAN_PUBLIC_URL = os.getenv(
+    "WEBSCAN_PUBLIC_URL", ""
+).strip()
+
+
+@app.get("/webscan", include_in_schema=False)
+async def open_webscan():
+    if not WEBSCAN_PUBLIC_URL:
+        raise HTTPException(status_code=503, detail="WebScan service is not configured")
+    return RedirectResponse(url=WEBSCAN_PUBLIC_URL, status_code=302)
+
 
 @app.on_event("startup")
 async def start_hmi_comparison_runtime():
@@ -1507,7 +1519,8 @@ async def security_headers(request: Request, call_next):
             return HTMLResponse(login_page(), status_code=401)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    if request.url.path != "/webscan":
+        response.headers["X-Frame-Options"] = "DENY"
     # 高德 JS API 的域名白名单校验需要跨域请求携带当前站点来源。
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"

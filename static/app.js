@@ -31,6 +31,7 @@
     overview: "全局安全态势", telematics: "车联网域", bluetooth: "蓝牙域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
     attack: "攻击验证", defense: "检测防御", events: "安全事件",
+    tools: "蓝牙测试工具", "tools-wifi": "WiFi测试工具", "tools-webscan": "Web扫描工具",
   };
   const DOMAIN_CONFIG = {
     chassis: {
@@ -373,6 +374,9 @@
     document.title = `${VIEW_NAMES[view]} · V-SHIELD`;
     if (updateHash) history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${view}`);
     closeMobileNav();
+    const toolBridge = toolBridges[view];
+    if (toolBridge) toolBridge.ensureFrame();
+    else Object.values(toolBridges).forEach((instance) => instance.stop());
     if (view === "adas") requestAnimationFrame(() => {
       resizeChart();
       if (state.vehicleMap) state.vehicleMap.resize();
@@ -388,6 +392,7 @@
   function setupNavigation() {
     document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
     document.querySelectorAll("[data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
+    setupToolBridges();
     $("mobileMenu").addEventListener("click", () => { $("sidebar").classList.toggle("open"); $("sidebarBackdrop").classList.toggle("show"); });
     $("sidebarBackdrop").addEventListener("click", closeMobileNav);
     const initial = location.hash.replace("#", "");
@@ -1332,6 +1337,218 @@
   function setBodyField(root, name, value) {
     const element = root.querySelector(`[data-body-field="${name}"]`);
     if (element) element.textContent = value;
+  }
+
+  // ===== 外部测试工具嵌入与执行日志桥接 =====
+  const TOOL_SOURCE_HINT = "bluetooth-test-tools";
+
+  function createToolBridge({ view, frameId, logs = true }) {
+    const instance = {
+      view,
+      frameId,
+      logs,
+      timer: null,
+      follow: false,
+      context: { taskId: null, caseId: null, resultId: null },
+    };
+
+    instance.panel = () => document.querySelector(`[data-view-panel="${view}"]`);
+    instance.frame = () => $(frameId) || instance.panel()?.querySelector("[data-tool-frame]");
+    instance.node = (selector) => instance.panel()?.querySelector(selector) || null;
+    instance.active = () => Boolean(instance.panel()?.classList.contains("active"));
+    instance.expectedOrigin = () => {
+      try { return new URL(instance.frame()?.dataset.src, location.href).origin; }
+      catch (_) { return ""; }
+    };
+    instance.apiBase = () => {
+      const origin = instance.expectedOrigin();
+      return origin ? `${origin}/api` : "";
+    };
+    instance.setLabel = (text) => {
+      const label = instance.node("[data-btlog-context]");
+      if (label) label.textContent = text;
+    };
+    instance.formatContext = () => {
+      const { taskId, caseId, resultId } = instance.context;
+      if (taskId == null && caseId == null && resultId == null) return "暂无执行中任务";
+      const parts = [];
+      if (taskId != null) parts.push(`任务 ${taskId}`);
+      if (caseId != null) parts.push(`用例 ${caseId}`);
+      if (resultId != null) parts.push(`结果 ${resultId}`);
+      return parts.join(" · ");
+    };
+    instance.renderEmpty = (text) => {
+      const body = instance.node("[data-btlog-body]");
+      if (body) body.innerHTML = `<div class="tool-logs-empty">${escapeHtml(text)}</div>`;
+      const count = instance.node("[data-btlog-count]");
+      if (count) count.textContent = "0 条";
+    };
+    instance.render = (rows) => {
+      const body = instance.node("[data-btlog-body]");
+      if (!body) return;
+      const limit = 300;
+      const visible = rows.slice(-limit);
+      if (!visible.length) {
+        instance.renderEmpty("当前任务暂无日志");
+        return;
+      }
+      const stickToBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+      body.innerHTML = visible.map((row) => {
+        const type = String(row.type || "").trim() || "信息";
+        const stamp = String(row.logTime || "");
+        const time = stamp.length >= 19 ? stamp.slice(11, 19) : stamp;
+        return `<div class="tool-log-row" data-type="${escapeHtml(type)}"><time>${escapeHtml(time)}</time><i>${escapeHtml(type)}</i><p>${escapeHtml(row.content || "")}</p></div>`;
+      }).join("");
+      const count = instance.node("[data-btlog-count]");
+      if (count) count.textContent = rows.length > limit ? `${limit} / ${rows.length} 条` : `${rows.length} 条`;
+      if (stickToBottom) body.scrollTop = body.scrollHeight;
+    };
+    instance.fetchLogs = async () => {
+      const base = instance.apiBase();
+      if (!base) return;
+      if (instance.follow) {
+        const response = await fetch(`${base}/embed/listTestLog?pageNum=1&pageSize=300&asc=0`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        const latest = rows.find((row) => Number(row.taskId) > 0);
+        if (!latest) {
+          instance.context = { taskId: null, caseId: null, resultId: null };
+          instance.setLabel("暂无执行中任务");
+          instance.renderEmpty("暂无执行中任务");
+          return;
+        }
+        const hasCase = latest.caseId != null || latest.resultId != null;
+        instance.context = {
+          taskId: latest.taskId,
+          caseId: hasCase ? (latest.caseId ?? null) : null,
+          resultId: hasCase ? (latest.resultId ?? null) : null,
+        };
+        instance.setLabel(`${instance.formatContext()} · 跟随最新`);
+        const { taskId, caseId, resultId } = instance.context;
+        instance.render(rows.filter((row) => Number(row.taskId) === Number(taskId)
+          && (caseId == null || row.caseId === caseId)
+          && (resultId == null || row.resultId === resultId)).reverse());
+        return;
+      }
+      const { taskId, caseId, resultId } = instance.context;
+      if (taskId == null && resultId == null) {
+        instance.renderEmpty("暂无执行中任务");
+        return;
+      }
+      const query = new URLSearchParams({ pageNum: "1", pageSize: "500", asc: "1" });
+      if (taskId != null) query.set("taskId", taskId);
+      if (caseId != null) query.set("caseId", caseId);
+      if (resultId != null) query.set("resultId", resultId);
+      const response = await fetch(`${base}/embed/listTestLog?${query}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!data?.success) throw new Error(data?.message || "日志查询失败");
+      instance.render(Array.isArray(data.rows) ? data.rows : []);
+    };
+    instance.start = () => {
+      if (!instance.logs || instance.timer) return;
+      const tick = () => {
+        if (document.hidden || !instance.active()) return;
+        instance.fetchLogs().catch((error) => console.warn(`[tool-embed:${view}] 日志拉取失败`, error));
+      };
+      tick();
+      instance.timer = setInterval(tick, 3000);
+    };
+    instance.stop = () => {
+      if (!instance.timer) return;
+      clearInterval(instance.timer);
+      instance.timer = null;
+    };
+    instance.requestContext = () => {
+      const frame = instance.frame();
+      const origin = instance.expectedOrigin();
+      if (!frame?.contentWindow || !origin) return;
+      frame.contentWindow.postMessage(
+        { source: TOOL_SOURCE_HINT, type: "bt-request-log-context", payload: {}, ts: Date.now() },
+        origin,
+      );
+    };
+    instance.ensureFrame = () => {
+      const frame = instance.frame();
+      if (!frame) return;
+      const url = frame.dataset.src;
+      instance.panel()?.querySelectorAll("[data-tool-url]").forEach((node) => {
+        if (node.tagName === "A") node.href = url;
+        else node.textContent = url;
+      });
+      if (!frame.getAttribute("src")) {
+        frame.addEventListener("load", instance.requestContext, { once: true });
+        frame.src = url;
+      }
+      instance.start();
+    };
+    instance.reload = () => {
+      const frame = instance.frame();
+      if (!frame) return;
+      frame.src = "about:blank";
+      setTimeout(() => { frame.src = frame.dataset.src; }, 60);
+    };
+    instance.applyContext = (payload) => {
+      instance.context = {
+        taskId: payload.taskId ?? null,
+        caseId: payload.caseId ?? null,
+        resultId: payload.resultId ?? null,
+      };
+      instance.setLabel(instance.formatContext());
+    };
+    return instance;
+  }
+
+  const toolBridges = {
+    tools: createToolBridge({ view: "tools", frameId: "bt-tool-frame" }),
+    "tools-wifi": createToolBridge({ view: "tools-wifi", frameId: "wifi-tool-frame" }),
+    "tools-webscan": createToolBridge({ view: "tools-webscan", frameId: "webscan-tool-frame", logs: false }),
+  };
+
+  function toolBridgeForWindow(sourceWindow) {
+    return Object.values(toolBridges).find((instance) => instance.frame()?.contentWindow === sourceWindow) || null;
+  }
+
+  function setupToolBridges() {
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      const instance = toolBridgeForWindow(event.source)
+        || (data?.source === TOOL_SOURCE_HINT ? toolBridges.tools : null);
+      if (!instance || !data || typeof data !== "object") return;
+      const expectedOrigin = instance.expectedOrigin();
+      if (expectedOrigin && event.origin !== expectedOrigin) return;
+      if (data.type === "bt-embed-ready") {
+        if (instance.active()) instance.start();
+      } else if (data.type === "bt-log-context") {
+        instance.follow = false;
+        instance.applyContext(data.payload || {});
+        instance.start();
+      } else if (data.type === "bt-log-context-clear") {
+        instance.follow = false;
+        instance.applyContext({});
+        instance.renderEmpty("暂无执行中任务");
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      Object.values(toolBridges).forEach((instance) => {
+        if (instance.active() && instance.timer) {
+          instance.fetchLogs().catch((error) => console.warn(`[tool-embed:${instance.view}] 刷新失败`, error));
+        }
+      });
+    });
+    Object.values(toolBridges).forEach((instance) => {
+      instance.node("[data-tool-reload]")?.addEventListener("click", instance.reload);
+      instance.node("[data-btlog-bootstrap]")?.addEventListener("click", () => {
+        instance.follow = true;
+        instance.start();
+        instance.fetchLogs().catch((error) => {
+          console.warn(`[tool-embed:${instance.view}] 跟随最新任务失败`, error);
+          instance.renderEmpty("跟随失败，请检查工具接口是否可达");
+        });
+      });
+    });
   }
 
   function synchronizeBodyHazardBlink(root, hazardOn) {

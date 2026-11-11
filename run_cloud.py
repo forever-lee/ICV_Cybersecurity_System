@@ -9,7 +9,12 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "http://2c2ef9da.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "https://3e199a97.r7.nas.cpolar.cn"
+
+# WebScan 平台公网地址。测试工具页面通过后端 /webscan 入口内嵌该服务。
+WEBSCAN_PUBLIC_URL = os.getenv(
+    "WEBSCAN_PUBLIC_URL", "https://108f151a.r7.nas.cpolar.cn"
+)
 
 # 必须与 jetson_edge 中配置的 VEHICLE_INGEST_TOKEN 完全一致。
 # 部署到公网前请替换为足够长的随机字符串。
@@ -61,6 +66,7 @@ os.environ["FMP4_BUFFER_SEGMENTS"] = str(FMP4_BUFFER_SEGMENTS)
 os.environ["AMAP_JS_KEY"] = AMAP_JS_KEY
 os.environ["AMAP_SECURITY_JS_CODE"] = AMAP_SECURITY_JS_CODE
 os.environ["AMAP_SERVICE_HOST"] = AMAP_SERVICE_HOST
+os.environ["WEBSCAN_PUBLIC_URL"] = WEBSCAN_PUBLIC_URL
 
 import uvicorn
 

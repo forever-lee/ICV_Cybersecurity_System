@@ -36,6 +36,10 @@
           <button class="side-link" data-view="attack"><i class="attack-icon">攻</i><span>攻击验证</span><em class="nav-state plan">规划</em></button>
           <button class="side-link" data-view="defense"><i class="defense-icon">防</i><span>检测防御</span><em class="nav-state plan">规划</em></button>
           <button class="side-link" data-view="events"><i>事</i><span>安全事件</span><em class="nav-count muted">0</em></button>
+          <p class="nav-section-title">测试工具</p>
+          <button class="side-link external-link" data-view="tools" title="在右侧内容区内嵌打开蓝牙测试工具"><i>具</i><span>蓝牙测试工具</span></button>
+          <button class="side-link external-link" data-view="tools-wifi" title="在右侧内容区内嵌打开 WiFi 测试工具"><i>W</i><span>WiFi测试工具</span></button>
+          <button class="side-link external-link" data-view="tools-webscan" title="在右侧内容区内嵌打开 Web 扫描工具"><i>扫</i><span>Web扫描工具</span></button>
         </nav>
 
         <div class="sidebar-foot">
@@ -294,6 +298,63 @@
             <div class="page-heading"><div><p class="eyebrow">SECURITY EVENTS</p><h1>安全事件中心</h1><p>统一汇聚检测告警、攻击验证结果与响应处置记录</p></div><div class="domain-summary"><span class="status-chip active">实时监听</span><span class="status-chip">0 条事件</span></div></div>
             <div class="event-toolbar"><div class="fake-search">⌕ <span>搜索事件 ID、车辆或资产</span></div><div><button class="filter-active">全部</button><button>高危</button><button>中危</button><button>低危</button></div></div>
             <article class="panel event-table"><div class="event-table-head"><span>事件时间</span><span>风险等级</span><span>事件类型</span><span>目标资产</span><span>来源模块</span><span>处置状态</span></div><div class="event-table-empty"><div class="empty-radar"><i></i></div><strong>暂无安全事件</strong><p>攻击验证或检测防御模块接入后，告警将在这里统一呈现。</p></div></article>
+          </section>
+
+          <section class="content-view" data-view-panel="tools">
+            <div class="page-heading">
+              <div><p class="eyebrow">SECURITY TEST TOOLKIT</p><h1>蓝牙测试工具</h1><p>蓝牙安全测试工具 · 内嵌运行，向下滚动查看用例执行日志</p></div>
+              <div class="domain-summary"><span class="status-chip active">内嵌运行</span><a class="status-chip" data-tool-url href="http://192.168.1.200:8000/blueTooth/testObject?embed=1" target="_blank" rel="noopener noreferrer">新窗口打开 ↗</a></div>
+            </div>
+            <div class="tool-split">
+              <div class="tool-split-top">
+                <article class="panel tool-embed">
+                  <div class="tool-embed-bar"><i class="tool-embed-dot"></i><b>蓝牙安全测试工具</b><code data-tool-url>http://192.168.1.200:8000/blueTooth/testObject?embed=1</code><button type="button" class="tool-embed-reload" data-tool-reload>重新加载</button></div>
+                  <div class="tool-embed-frame"><iframe id="bt-tool-frame" data-tool-frame data-src="http://192.168.1.200:8000/blueTooth/testObject?embed=1" title="蓝牙安全测试工具" allow="clipboard-write; fullscreen"></iframe></div>
+                </article>
+              </div>
+              <div class="tool-split-bottom">
+                <article class="panel tool-logs">
+                  <div class="tool-logs-head"><b>用例执行日志</b><span class="tool-logs-sub" data-btlog-context>暂无执行中任务</span><button type="button" class="tool-logs-debug" data-btlog-bootstrap title="调试用：从全局日志中载入最近一次任务的执行日志">载入最近任务</button><em class="tool-logs-count" data-btlog-count>0 条</em></div>
+                  <div class="tool-logs-body" data-btlog-body><div class="tool-logs-empty">暂无执行中任务<br><span>在上方工具中进入用例执行页后，这里会自动采集执行日志</span></div></div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="tools-wifi">
+            <div class="page-heading">
+              <div><p class="eyebrow">WIFI TEST TOOLKIT</p><h1>WiFi测试工具</h1><p>WiFi 安全测试工具 · 内嵌运行，向下滚动查看用例执行日志</p></div>
+              <div class="domain-summary"><span class="status-chip active">内嵌运行</span><a class="status-chip" data-tool-url href="http://192.168.1.101:8000/wifi/testObject?embed=1" target="_blank" rel="noopener noreferrer">新窗口打开 ↗</a></div>
+            </div>
+            <div class="tool-split">
+              <div class="tool-split-top">
+                <article class="panel tool-embed">
+                  <div class="tool-embed-bar"><i class="tool-embed-dot"></i><b>WiFi 安全测试工具</b><code data-tool-url>http://192.168.1.101:8000/wifi/testObject?embed=1</code><button type="button" class="tool-embed-reload" data-tool-reload>重新加载</button></div>
+                  <div class="tool-embed-frame"><iframe id="wifi-tool-frame" data-tool-frame data-src="http://192.168.1.101:8000/wifi/testObject?embed=1" title="WiFi 安全测试工具" allow="clipboard-write; fullscreen"></iframe></div>
+                </article>
+              </div>
+              <div class="tool-split-bottom">
+                <article class="panel tool-logs">
+                  <div class="tool-logs-head"><b>用例执行日志</b><span class="tool-logs-sub" data-btlog-context>暂无执行中任务</span><button type="button" class="tool-logs-debug" data-btlog-bootstrap title="调试用：从全局日志中载入最近一次任务的执行日志">载入最近任务</button><em class="tool-logs-count" data-btlog-count>0 条</em></div>
+                  <div class="tool-logs-body" data-btlog-body><div class="tool-logs-empty">暂无执行中任务<br><span>在上方工具中进入用例执行页后，这里会自动采集执行日志</span></div></div>
+                </article>
+              </div>
+            </div>
+          </section>
+
+          <section class="content-view" data-view-panel="tools-webscan">
+            <div class="page-heading">
+              <div><p class="eyebrow">WEBSCAN TOOLKIT</p><h1>Web扫描工具</h1><p>WebScan 平台 · 内嵌运行，扫描任务与结果在工具内查看</p></div>
+              <div class="domain-summary"><span class="status-chip active">内嵌运行</span><a class="status-chip" data-tool-url href="/webscan" target="_blank" rel="noopener noreferrer">新窗口打开 ↗</a></div>
+            </div>
+            <div class="tool-split">
+              <div class="tool-split-top">
+                <article class="panel tool-embed">
+                  <div class="tool-embed-bar"><i class="tool-embed-dot"></i><b>WebScan 平台</b><code data-tool-url>/webscan</code><button type="button" class="tool-embed-reload" data-tool-reload>重新加载</button></div>
+                  <div class="tool-embed-frame"><iframe id="webscan-tool-frame" data-tool-frame data-src="/webscan" title="WebScan 平台" allow="clipboard-write; fullscreen"></iframe></div>
+                </article>
+              </div>
+            </div>
           </section>
         </div>
       </main>
