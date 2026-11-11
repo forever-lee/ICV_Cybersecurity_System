@@ -840,6 +840,21 @@ registry = Registry()
 app = FastAPI(title="V-SHIELD Vehicle Cybersecurity Platform", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+# WebScan 部署在远程服务器（127.0.0.1:3000，经 cpolar 隧道对外提供）。
+# 平台左侧“Web扫描工具”以 iframe 方式打开该入口，地址变化只改 WEBSCAN_PUBLIC_URL。
+WEBSCAN_PUBLIC_URL = os.getenv(
+    "WEBSCAN_PUBLIC_URL",
+    "https://7ce61e08.r7.cpolar.cn",
+).strip()
+
+
+@app.get("/webscan", include_in_schema=False)
+async def open_webscan():
+    return RedirectResponse(
+        url=WEBSCAN_PUBLIC_URL,
+        status_code=302,
+    )
+
 
 @app.on_event("startup")
 async def start_hmi_comparison_runtime():
@@ -890,7 +905,9 @@ async def security_headers(request: Request, call_next):
             return HTMLResponse(login_page(), status_code=401)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    # /webscan 是平台自己 iframe 内嵌用的入口，不能带 X-Frame-Options。
+    if request.url.path != "/webscan":
+        response.headers["X-Frame-Options"] = "DENY"
     # 高德 JS API 的域名白名单校验需要跨域请求携带当前站点来源。
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"

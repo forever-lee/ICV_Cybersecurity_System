@@ -17,7 +17,9 @@
   const VIEW_NAMES = {
     overview: "全局安全态势", telematics: "车联网域", bluetooth: "蓝牙域", adas: "智能驾驶域",
     chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
-    attack: "攻击验证", defense: "检测防御", events: "安全事件",
+    attack: "攻击验证", defense: "检测防御", events: "安全事件", tools: "蓝牙测试工具",
+    "tools-wifi": "WIFI测试工具",
+    "tools-webscan": "Web扫描工具",
   };
   const DOMAIN_CONFIG = {
     chassis: {
@@ -318,6 +320,9 @@
     document.title = `${VIEW_NAMES[view]} · V-SHIELD`;
     if (updateHash) history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${view}`);
     closeMobileNav();
+    const toolBridge = toolBridges[view];
+    if (toolBridge) toolBridge.ensureFrame();
+    else Object.values(toolBridges).forEach((inst) => inst.stop());
     if (view === "adas") requestAnimationFrame(() => {
       resizeChart();
       if (state.vehicleMap) state.vehicleMap.resize();
@@ -333,6 +338,7 @@
   function setupNavigation() {
     document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
     document.querySelectorAll("[data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
+    setupToolBridges();
     $("mobileMenu").addEventListener("click", () => { $("sidebar").classList.toggle("open"); $("sidebarBackdrop").classList.toggle("show"); });
     $("sidebarBackdrop").addEventListener("click", closeMobileNav);
     const initial = location.hash.replace("#", "");
@@ -956,6 +962,262 @@
   function setBodyField(root, name, value) {
     const element = root.querySelector(`[data-body-field="${name}"]`);
     if (element) element.textContent = value;
+  }
+
+  // ===== 测试工具嵌入对接（依据《嵌入对接接口文档》） =====
+  // 每个工具一个实例：上半区 iframe 内嵌工具，下半区由宿主轮询 /api/embed/listTestLog。
+  // API 根地址从 iframe 的 data-src 推导，换域名只改 data-src 一处。
+  const TOOL_SOURCE_HINT = "bluetooth-test-tools";   // 文档约定的来源标识（兼容用）
+
+  function createToolBridge({ view, frameId, logs = true }) {
+    const inst = {
+      view,
+      frameId,
+      logs,
+      timer: null,
+      follow: false,   // true = 自动跟随最新任务（调试/兜底）；工具下发上下文时自动关闭
+      context: { taskId: null, caseId: null, resultId: null },
+    };
+
+    inst.panel = () => document.querySelector(`[data-view-panel="${view}"]`);
+    inst.frame = () => $(frameId) || (inst.panel() && inst.panel().querySelector("[data-tool-frame]"));
+    inst.node = (selector) => {
+      const panel = inst.panel();
+      return panel ? panel.querySelector(selector) : null;
+    };
+    inst.active = () => {
+      const panel = inst.panel();
+      return Boolean(panel && panel.classList.contains("active"));
+    };
+    inst.setLabel = (text) => {
+      const label = inst.node("[data-btlog-context]");
+      if (label) label.textContent = text;
+    };
+    inst.apiBase = () => {
+      const frame = inst.frame();
+      try {
+        return new URL(frame.dataset.src).origin + "/api";
+      } catch (error) {
+        return "";
+      }
+    };
+    inst.formatContext = () => {
+      const { taskId, caseId, resultId } = inst.context;
+      if (taskId == null && caseId == null && resultId == null) return "暂无执行中任务";
+      const parts = [];
+      if (taskId != null) parts.push(`任务 ${taskId}`);
+      if (caseId != null) parts.push(`用例 ${caseId}`);
+      if (resultId != null) parts.push(`结果 ${resultId}`);
+      return parts.join(" · ");
+    };
+    inst.renderEmpty = (text) => {
+      const body = inst.node("[data-btlog-body]");
+      if (body) body.innerHTML = `<div class="tool-logs-empty">${escapeHtml(text)}</div>`;
+      const count = inst.node("[data-btlog-count]");
+      if (count) count.textContent = "0 条";
+    };
+    inst.render = (rows) => {
+      const body = inst.node("[data-btlog-body]");
+      if (!body) return;
+      const limit = 300;   // 只渲染最近 300 条，避免日志过多拖慢页面
+      const visible = rows.slice(-limit);
+      if (!visible.length) {
+        inst.renderEmpty("当前任务暂无日志");
+        return;
+      }
+      const stickToBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+      body.innerHTML = visible.map((row) => {
+        const type = String(row.type || "").trim() || "信息";
+        const stamp = String(row.logTime || "");
+        const time = stamp.length >= 19 ? stamp.slice(11, 19) : stamp;
+        return `<div class="tool-log-row" data-type="${escapeHtml(type)}"><time>${escapeHtml(time)}</time><i>${escapeHtml(type)}</i><p>${escapeHtml(row.content || "")}</p></div>`;
+      }).join("");
+      const count = inst.node("[data-btlog-count]");
+      if (count) count.textContent = rows.length > limit ? `${limit} / ${rows.length} 条` : `${rows.length} 条`;
+      if (stickToBottom) body.scrollTop = body.scrollHeight;   // asc=1：新日志滚到底部
+    };
+    // 跟随模式：取最新一条带 taskId 的日志，把上下文对齐到"当前正在跑的那次用例执行"，
+    inst.fetchLogs = async () => {
+      const base = inst.apiBase();
+      if (!base) return;
+      // 跟随模式：只发一次请求（拉最新日志），本地锁定最新三元组并只渲染它，
+      // 省掉"先查上下文再查日志"的第二次往返——公网隧道下这一次很值钱。
+      if (inst.follow) {
+        const response = await fetch(`${base}/embed/listTestLog?pageNum=1&pageSize=300&asc=0`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const rows = (data && data.rows) || [];
+        const pick = rows.find((row) => Number(row.taskId) > 0);
+        if (!pick) {
+          inst.context = { taskId: null, caseId: null, resultId: null };
+          inst.setLabel("暂无执行中任务");
+          inst.renderEmpty("暂无执行中任务");
+          return;
+        }
+        const hasCase = pick.caseId != null || pick.resultId != null;
+        inst.context = {
+          taskId: pick.taskId,
+          caseId: hasCase ? (pick.caseId ?? null) : null,
+          resultId: hasCase ? (pick.resultId ?? null) : null,
+        };
+        inst.setLabel(`${inst.formatContext()} · 跟随最新`);
+        const { taskId, caseId, resultId } = inst.context;
+        const scoped = rows.filter((row) => Number(row.taskId) === taskId
+          && (caseId == null || row.caseId === caseId)
+          && (resultId == null || row.resultId === resultId));
+        inst.render(scoped.slice().reverse());   // 接口按倒序返回，渲染需要正序
+        return;
+      }
+      const { taskId, caseId, resultId } = inst.context;
+      // 未拿到任务上下文时不拉全局历史日志，下半区保持空态（文档要求）
+      if (taskId == null && resultId == null) {
+        inst.renderEmpty("暂无执行中任务");
+        return;
+      }
+      const query = new URLSearchParams({ pageNum: "1", pageSize: "500", asc: "1" });
+      if (taskId != null) query.set("taskId", taskId);
+      if (caseId != null) query.set("caseId", caseId);
+      if (resultId != null) query.set("resultId", resultId);
+      const response = await fetch(`${base}/embed/listTestLog?${query}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!data || !data.success) throw new Error((data && data.message) || "日志查询失败");
+      inst.render(data.rows || []);
+    };
+    inst.start = () => {
+      // 没有日志接口的工具（如 WebScan）不轮询，避免持续 404
+      if (!inst.logs) return;
+      if (inst.timer) return;
+      const tick = () => {
+        // 标签页在后台时不轮询，避免和页面自身请求争抢隧道带宽
+        if (document.hidden) return;
+        inst.fetchLogs().catch((error) => console.warn(`[tool-embed:${view}] 日志拉取失败`, error));
+      };
+      tick();
+      inst.timer = setInterval(tick, 3000);   // 公网隧道下 3 秒足够，降低带宽占用
+    };
+    inst.stop = () => {
+      if (!inst.timer) return;
+      clearInterval(inst.timer);
+      inst.timer = null;
+    };
+    // 「跟随最新任务」：开启后每次轮询都重新对齐任务，工具里切换用例会自动跟上。
+    inst.bootstrap = async () => {
+      inst.follow = true;
+      inst.start();
+    };
+    // 可选步骤 A：iframe 载入后主动向工具索要一次当前日志上下文，防漏消息。
+    inst.requestContext = () => {
+      const frame = inst.frame();
+      if (!frame || !frame.contentWindow) return;
+      let target = "*";
+      try {
+        target = new URL(frame.dataset.src).origin;
+      } catch (error) {
+        target = "*";
+      }
+      frame.contentWindow.postMessage(
+        { source: TOOL_SOURCE_HINT, type: "bt-request-log-context", payload: {}, ts: Date.now() },
+        target,
+      );
+    };
+    inst.ensureFrame = () => {
+      const frame = inst.frame();
+      if (!frame) return;
+      const url = frame.dataset.src;
+      const panel = inst.panel();
+      if (panel) {
+        panel.querySelectorAll("[data-tool-url]").forEach((node) => {
+          if (node.tagName === "A") node.href = url;
+          else node.textContent = url;
+        });
+      }
+      if (!frame.getAttribute("src")) {
+        frame.addEventListener("load", inst.requestContext, { once: true });
+        frame.src = url;
+      }
+      inst.start();
+    };
+    inst.reload = () => {
+      const frame = inst.frame();
+      if (!frame) return;
+      frame.src = "about:blank";
+      setTimeout(() => { frame.src = frame.dataset.src; }, 60);
+    };
+    inst.applyContext = (payload) => {
+      inst.context = {
+        taskId: payload.taskId ?? null,
+        caseId: payload.caseId ?? null,
+        resultId: payload.resultId ?? null,
+      };
+      inst.setLabel(inst.formatContext());
+    };
+    return inst;
+  }
+
+  const toolBridges = {
+    tools: createToolBridge({ view: "tools", frameId: "bt-tool-frame" }),
+    "tools-wifi": createToolBridge({ view: "tools-wifi", frameId: "wifi-tool-frame" }),
+    "tools-webscan": createToolBridge({ view: "tools-webscan", frameId: "webscan-tool-frame", logs: false }),
+  };
+
+  function toolBridgeForWindow(sourceWindow) {
+    return Object.values(toolBridges).find((inst) => {
+      const frame = inst.frame();
+      return Boolean(frame && frame.contentWindow && frame.contentWindow === sourceWindow);
+    }) || null;
+  }
+
+  function setupToolBridges() {
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+      // 优先按 iframe 窗口归属判断（蓝牙/WiFi 两个工具的 source 标识可能不同），
+      // 同时兼容文档约定的 source 标识。
+      const inst = toolBridgeForWindow(event.source)
+        || (data.source === TOOL_SOURCE_HINT ? toolBridges.tools : null);
+      if (!inst) return;
+      if (data.type === "bt-embed-ready") {
+        if (inst.active()) inst.start();
+        return;
+      }
+      if (data.type === "bt-log-context") {
+        // 工具主动下发的上下文最权威，关闭跟随模式，锚定到工具指定的用例
+        inst.follow = false;
+        inst.applyContext(data.payload || {});
+        inst.start();
+        return;
+      }
+      if (data.type === "bt-log-context-clear") {
+        inst.follow = false;
+        inst.applyContext({});
+        inst.renderEmpty("暂无执行中任务");
+      }
+    });
+
+    // 标签页切回前台时立刻补一次，避免看到过期的日志
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      Object.values(toolBridges).forEach((inst) => {
+        if (inst.active() && inst.timer) {
+          inst.fetchLogs().catch((error) => console.warn(`[tool-embed:${inst.view}] 刷新失败`, error));
+        }
+      });
+    });
+
+    Object.values(toolBridges).forEach((inst) => {
+      const reload = inst.node("[data-tool-reload]");
+      if (reload) reload.addEventListener("click", inst.reload);
+      const bootstrap = inst.node("[data-btlog-bootstrap]");
+      if (bootstrap) {
+        bootstrap.addEventListener("click", () => {
+          inst.bootstrap().catch((error) => {
+            console.warn(`[tool-embed:${inst.view}] 跟随最新任务失败`, error);
+            inst.renderEmpty("跟随失败，请检查工具接口是否可达");
+          });
+        });
+      }
+    });
   }
 
   function synchronizeBodyHazardBlink(root, hazardOn) {

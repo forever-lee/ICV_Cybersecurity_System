@@ -1,0 +1,1907 @@
+(() => {
+  "use strict";
+
+  const HEADER_SIZE = 29;
+  const FMP4_HEADER_SIZE = 17;
+  const H264_MIME = 'video/mp4; codecs="avc1.640029"';
+  const HEVC_MIMES = [
+    'video/mp4; codecs="hvc1"',
+    'video/mp4; codecs="hvc1.1.6.L93.B0"',
+    'video/mp4; codecs="hvc1.1.6.L120.B0"',
+    'video/mp4; codecs="hvc1.1.6.L123.B0"',
+    'video/mp4; codecs="hev1"',
+  ];
+  const H264_TARGET_BUFFER_SECONDS = 1;
+  const H264_RESUME_BUFFER_SECONDS = 0.5;
+  const H264_MAX_LIVE_LATENCY_MS = 5000;
+  const VIEW_NAMES = {
+    overview: "全局安全态势", telematics: "车联网域", bluetooth: "蓝牙域", adas: "智能驾驶域",
+    chassis: "底盘域", powertrain: "动力域", body: "车身域", cockpit: "智能座舱域",
+    attack: "攻击验证", defense: "检测防御", events: "安全事件", tools: "蓝牙测试工具",
+    "tools-wifi": "WIFI测试工具",
+  };
+  const DOMAIN_CONFIG = {
+    chassis: {
+      title: "底盘域安全", en: "CHASSIS DOMAIN", icon: "底",
+      subtitle: "制动、转向与车身稳定系统运行数据及车载网络安全监测",
+      assets: "EPS / ESC / EBS", surface: "CAN 报文注入、信号重放、诊断越权",
+      fields: [["车辆速度", "speed_kph", "— km/h"], ["方向盘转角", "steering_deg", "— °"], ["制动状态", "brake_status", "—"], ["横摆角速度", "yaw_rate", "— °/s"]],
+      capabilities: [["CAN", "CAN 异常报文检测", "识别频率突变、越界与伪造帧"], ["UDS", "诊断会话防护", "监测未授权会话与敏感服务"], ["SAFE", "安全状态联动", "异常条件下进入受控降级状态"]],
+    },
+    powertrain: {
+      title: "动力域安全", en: "POWERTRAIN DOMAIN", icon: "动",
+      subtitle: "整车控制、电池管理与电驱系统数据及关键控制指令安全监测",
+      assets: "VCU / BMS / MCU", surface: "扭矩指令篡改、BMS 数据欺骗、诊断滥用",
+      fields: [["电池 SOC", "soc_percent", "— %"], ["输出扭矩", "torque_nm", "— N·m"], ["母线电压", "voltage_v", "— V"], ["电驱温度", "motor_temp_c", "— °C"]],
+      capabilities: [["CMD", "关键指令完整性", "校验扭矩与能量控制指令"], ["BMS", "电池数据一致性", "识别电压、温度与 SOC 异常"], ["UDS", "刷写与诊断防护", "限制高风险诊断服务调用"]],
+    },
+    body: {
+      title: "车身域安全", en: "BODY DOMAIN", icon: "身",
+      subtitle: "门锁、灯光、无钥匙进入与车身舒适控制系统安全监测",
+      assets: "BCM / PEPS / TPMS", surface: "无线重放、非法解锁、车身控制报文伪造",
+      fields: [["车门状态", "door_status", "—"], ["锁车状态", "lock_status", "—"], ["灯光状态", "light_status", "—"]],
+      capabilities: [["PEPS", "无钥匙进入防护", "监测中继与重放攻击特征"], ["CAN", "车身控制白名单", "限制异常控制报文与频率"], ["AUD", "敏感操作审计", "记录解锁与远程控制行为"]],
+    },
+    cockpit: {
+      title: "智能座舱域安全", en: "COCKPIT DOMAIN", icon: "舱",
+      subtitle: "车机应用、蓝牙互联、信息娱乐与用户数据安全监测",
+      assets: "IVI / HU / APP", surface: "应用漏洞、组件暴露、权限滥用、隐私泄露",
+      fields: [["系统版本", "system_version", "—"], ["应用数量", "app_count", "—"], ["用户会话", "user_session", "—"], ["存储占用", "storage_percent", "— %"]],
+      capabilities: [["APP", "应用运行时检测", "识别高危权限与异常调用"], ["DATA", "敏感数据防护", "监测隐私数据访问与外发"], ["BOOT", "启动与系统完整性", "验证系统镜像及关键组件"]],
+    },
+  };
+
+  const state = {
+    vehicleId: new URLSearchParams(location.search).get("vehicle") || "VHC-001",
+    liveSocket: null, metricsSocket: null, reconnectTimer: null,
+    frameTimes: [], latencyHistory: [], rateHistory: [], lastFrameAt: 0,
+    latestMetrics: {}, currentView: "overview",
+    frameQueue: [], decoderBusy: false, playbackTimer: null,
+    lastPresentedCaptureAt: 0, lastPlaybackWallAt: 0, playbackLatency: 0,
+    playbackStarted: false, bufferingStartedAt: 0,
+    amap: null, vehicleMap: null, vehicleMarker: null, routeLine: null,
+    routePoints: [], pendingNavigation: null, navigationUpdateId: 0,
+    navigationSourceKind: null,
+    mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
+    mediaMime: null,
+    h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
+    h264Rebuffering: false,
+    wifiClearBeforeMs: 0, wifiClearBaseCount: 0, wifiClearBaseAlertCount: 0,
+  };
+
+  if (!window.VShieldBody?.BodyStatusDataSource) {
+    throw new Error("V-SHIELD BodyStatus module is not available");
+  }
+  const bodyStatusDataSource = new window.VShieldBody.BodyStatusDataSource();
+
+  const $ = (id) => document.getElementById(id);
+  const canvas = $("videoCanvas");
+  const video = document.createElement("video");
+  video.id = "videoElement";
+  video.className = "video-element hidden";
+  video.muted = true;
+  video.autoplay = true;
+  video.playsInline = true;
+  $("videoStage").insertBefore(video, canvas);
+  const context = canvas.getContext("2d", { alpha: false, desynchronized: true });
+  const chart = $("trendChart");
+  const chartContext = chart.getContext("2d");
+
+  function escapeHtml(value) {
+    return String(value ?? "").replace(/[&<>'"]/g, (char) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
+    })[char]);
+  }
+
+  function renderBodyPage(root) {
+    root.classList.add("body-monitor-page");
+    root.innerHTML = `
+      <div class="page-heading body-monitor-heading">
+        <div>
+          <p class="eyebrow">BODY DOMAIN CONTROLLER</p>
+          <h1>车身域控制器实时状态</h1>
+          <p>集中监测 BDC、车门、中央门锁与车灯的实时运行状态</p>
+        </div>
+        <div class="domain-summary">
+          <span class="status-chip" data-domain-chip="body">数据接口待接入</span>
+          <span class="status-chip" data-body-edge-chip>等待 Jetson 上传</span>
+        </div>
+      </div>
+
+      <article class="panel body-controller-panel">
+        <div class="panel-title">
+          <div><p class="eyebrow">CONTROLLER STATUS</p><h2>车身域控制器状态</h2></div>
+          <div class="body-controller-toolbar">
+            <span class="body-controller-state" data-domain-state="body">设备未接入</span>
+            <div class="body-transmission-controls">
+              <button class="start" data-body-transmission="start">启动发送</button>
+              <button class="stop" data-body-transmission="stop">停止发送</button>
+            </div>
+            <small data-body-transmission-state>等待控制</small>
+          </div>
+        </div>
+        <div class="body-controller-overview">
+          <div class="body-controller-identity">
+            <i>BDC</i>
+            <span><b>Body Domain Controller</b><small>车身域主控制器 · CAN 数据节点</small></span>
+          </div>
+          <div class="body-controller-metrics">
+            <div class="body-metric-card can">
+              <span>CAN 通信状态</span><strong data-body-field="can_status">未连接</strong>
+              <em class="body-can-indicator"><i></i>CAN BUS</em>
+            </div>
+            <div class="body-metric-card updated">
+              <span>最后数据更新</span><strong data-body-field="updated_at_ms">--</strong>
+              <em>REAL-TIME DATA</em>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <div class="body-demo-grid">
+        <article class="panel body-demo-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">LIVE EVENT DEMO</p><h2>车身操作联调</h2></div>
+            <span class="tag live">可点击演示</span>
+          </div>
+          <div class="body-action-grid">
+            <button data-body-action="door_fl"><i>门</i><span>左前门</span><small>开 / 关</small></button>
+            <button data-body-action="door_fr"><i>门</i><span>右前门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rl"><i>门</i><span>左后门</span><small>开 / 关</small></button>
+            <button data-body-action="door_rr"><i>门</i><span>右后门</span><small>开 / 关</small></button>
+            <button data-body-action="central_lock"><i>锁</i><span>中央门锁</span><small>锁止 / 解锁</small></button>
+            <button data-body-action="low_beam"><i>近</i><span>近光灯</span><small>ON / OFF</small></button>
+            <button data-body-action="high_beam"><i>远</i><span>远光灯</span><small>ON / OFF</small></button>
+            <button data-body-action="turn_left"><i>←</i><span>左转灯</span><small>ON / OFF</small></button>
+            <button data-body-action="turn_right"><i>→</i><span>右转灯</span><small>ON / OFF</small></button>
+            <button data-body-action="hazard"><i>△</i><span>双闪</span><small>ON / OFF</small></button>
+          </div>
+        </article>
+        <article class="panel body-protocol-summary">
+          <div class="panel-title">
+            <div><p class="eyebrow">MESSAGE OVERVIEW</p><h2>最新报文概览</h2></div>
+            <span class="body-live-badge"><i></i> LIVE</span>
+          </div>
+          <div class="body-protocol-kpis">
+            <div><span>CAN ID</span><strong data-body-protocol="can_id">—</strong><small data-body-protocol="frame_name">等待报文</small></div>
+            <div><span>发送策略</span><strong data-body-protocol="cycle">—</strong><small data-body-protocol="send_type">周期 / 事件触发</small></div>
+            <div><span>累计报文</span><strong data-body-protocol="frame_count">0</strong><small>云端已接收</small></div>
+            <div><span>报文接收耗时</span><strong data-body-protocol="latency">—</strong></div>
+          </div>
+        </article>
+      </div>
+
+      <div class="body-cloud-grid">
+        <article class="panel body-diagnostic-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">STATUS DIAGNOSTICS</p><h2>状态诊断</h2></div>
+            <span class="tag" data-body-alert-count>0 条异常</span>
+          </div>
+          <div class="body-change-time"><span>最近状态变化</span><strong data-body-change-time>—</strong></div>
+          <div class="body-alert-list" data-body-alert-list><div class="body-alert-empty">暂无异常或状态冲突</div></div>
+        </article>
+      </div>
+
+      <div class="body-monitor-layout">
+        <article class="panel body-door-panel">
+          <div class="panel-title">
+            <div><p class="eyebrow">DOOR MONITOR</p><h2>车门状态</h2></div>
+            <span class="tag">4 DOORS</span>
+          </div>
+          <div class="body-door-stage">
+            <div class="body-door-card door-fl" data-body-door="Door_FL">
+              <span><b>左前门</b><small>Door_FL</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-fr" data-body-door="Door_FR">
+              <span><b>右前门</b><small>Door_FR</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-rl" data-body-door="Door_RL">
+              <span><b>左后门</b><small>Door_RL</small></span><em>未接入</em>
+            </div>
+            <div class="body-door-card door-rr" data-body-door="Door_RR">
+              <span><b>右后门</b><small>Door_RR</small></span><em>未接入</em>
+            </div>
+            <div class="body-car-visual" aria-hidden="true">
+              <div class="body-car-model" data-body-car-model>
+                <span class="body-car-direction">车头</span>
+                <i class="body-beam body-beam-low left"></i>
+                <i class="body-beam body-beam-low right"></i>
+                <i class="body-beam body-beam-high left"></i>
+                <i class="body-beam body-beam-high right"></i>
+                <div class="body-car-shell">
+                  <span class="body-windshield front"></span>
+                  <span class="body-windshield rear"></span>
+                  <span class="body-car-cabin"><b>BDC</b><small>BODY</small></span>
+                  <i class="body-model-door fl" data-body-model-door="Door_FL"></i>
+                  <i class="body-model-door fr" data-body-model-door="Door_FR"></i>
+                  <i class="body-model-door rl" data-body-model-door="Door_RL"></i>
+                  <i class="body-model-door rr" data-body-model-door="Door_RR"></i>
+                  <i class="body-model-lamp headlamp left"></i>
+                  <i class="body-model-lamp headlamp right"></i>
+                  <i class="body-model-lamp turn front-left"></i>
+                  <i class="body-model-lamp turn front-right"></i>
+                  <i class="body-model-lamp turn rear-left"></i>
+                  <i class="body-model-lamp turn rear-right"></i>
+                </div>
+              </div>
+              <b>车辆模型实时状态</b>
+            </div>
+          </div>
+        </article>
+
+        <div class="body-side-stack">
+          <article class="panel body-lock-panel">
+            <div class="panel-title">
+              <div><p class="eyebrow">CENTRAL LOCK</p><h2>中央门锁</h2></div>
+              <span class="tag">CentralLockState</span>
+            </div>
+            <div class="body-lock-state" data-body-lock="CentralLockState">
+              <i class="body-lock-icon"><span></span></i>
+              <div><span>当前门锁状态</span><strong>未接入</strong><small>等待真实车身域数据</small></div>
+            </div>
+          </article>
+
+          <article class="panel body-light-panel">
+            <div class="panel-title">
+              <div><p class="eyebrow">LIGHT SIGNALS</p><h2>车灯状态</h2></div>
+              <span class="tag">5 SIGNALS</span>
+            </div>
+            <div class="body-light-grid">
+              <div class="body-light-item" data-body-light="LowBeam"><i>近</i><span><b>近光灯</b><small>LowBeam</small></span><em>未接入</em></div>
+              <div class="body-light-item" data-body-light="HighBeam"><i>远</i><span><b>远光灯</b><small>HighBeam</small></span><em>未接入</em></div>
+              <div class="body-light-item turn" data-body-light="TurnLeft"><i>←</i><span><b>左转向灯</b><small>TurnLeft</small></span><em>未接入</em></div>
+              <div class="body-light-item turn" data-body-light="TurnRight"><i>→</i><span><b>右转向灯</b><small>TurnRight</small></span><em>未接入</em></div>
+              <div class="body-light-item hazard" data-body-light="Hazard"><i>△</i><span><b>双闪</b><small>Hazard</small></span><em>未接入</em></div>
+            </div>
+          </article>
+        </div>
+      </div>
+
+      <article class="panel body-frame-panel">
+        <div class="panel-title">
+          <div><p class="eyebrow">CAN MESSAGE STREAM</p><h2>实时车身报文</h2></div>
+          <span class="tag">最近 8 条</span>
+        </div>
+        <div class="body-frame-table">
+          <div class="body-frame-row head"><span>车端时间</span><span>CAN ID / 帧名</span><span>原始数据 HEX</span><span>信号变化</span><span>耗时</span></div>
+          <div class="body-frame-empty" data-body-frame-list>操作车门或灯光后，报文将实时出现在这里</div>
+        </div>
+      </article>
+
+      `;
+  }
+
+  function renderDomainPages() {
+    document.querySelectorAll("[data-domain-page]").forEach((root) => {
+      const key = root.dataset.domainPage;
+      const config = DOMAIN_CONFIG[key];
+      if (key === "body") {
+        renderBodyPage(root);
+        return;
+      }
+      if (key === "cockpit" && window.VShieldCockpit) {
+        window.VShieldCockpit.render(root, {
+          vehicleId: () => state.vehicleId,
+          toast,
+        });
+        return;
+      }
+      root.innerHTML = `
+        <div class="page-heading">
+          <div><p class="eyebrow">${config.en}</p><h1>${config.title}</h1><p>${config.subtitle}</p></div>
+          <div class="domain-summary"><span class="status-chip" data-domain-chip="${key}">数据接口待接入</span><span class="status-chip">安全能力规划中</span></div>
+        </div>
+        <div class="domain-hero">
+          <article class="panel domain-asset-panel">
+            <div class="panel-title"><div><p class="eyebrow">DOMAIN ASSETS</p><h2>域控资产与实时数据</h2></div><span class="tag" data-domain-label="${key}">待接入</span></div>
+            <div class="asset-summary">
+              <div class="asset-status"><i>${config.icon}</i><span><b>${config.assets}</b><small>${config.subtitle}</small></span><em data-domain-state="${key}">OFFLINE</em></div>
+              <div class="domain-fields">${config.fields.map(([label, field, fallback]) => `<div><span>${label}</span><b data-domain-field="${key}.${field}">${fallback}</b></div>`).join("")}</div>
+            </div>
+          </article>
+          <article class="panel domain-security-panel">
+            <div class="panel-title"><div><p class="eyebrow">SECURITY CAPABILITY</p><h2>域安全能力规划</h2></div><span class="tag plan">待建设</span></div>
+            <div class="security-cap-list">${config.capabilities.map(([icon, title, desc]) => `<div><i>${icon}</i><span><b>${title}</b><small>${desc}</small></span><em>未接入</em></div>`).join("")}</div>
+          </article>
+        </div>
+        <article class="panel domain-data-empty">
+          <div><i>↗</i><strong>等待 ${config.title.replace("安全", "")}数据源</strong><p>后端接口已经预留。数据接入后，这里将实时显示资产遥测、通信状态与安全告警；当前攻击面重点为：${config.surface}。</p><code class="endpoint-code">POST /api/vehicles/${escapeHtml(state.vehicleId)}/domains/${key}</code></div>
+        </article>`;
+    });
+  }
+
+  function navigate(view, updateHash = true) {
+    if (!VIEW_NAMES[view]) view = "overview";
+    state.currentView = view;
+    document.querySelectorAll("[data-view-panel]").forEach((panel) => panel.classList.toggle("active", panel.dataset.viewPanel === view));
+    document.querySelectorAll(".side-link[data-view]").forEach((link) => link.classList.toggle("active", link.dataset.view === view));
+    $("currentViewName").textContent = VIEW_NAMES[view];
+    document.title = `${VIEW_NAMES[view]} · V-SHIELD`;
+    if (updateHash) history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${view}`);
+    closeMobileNav();
+    const toolBridge = toolBridges[view];
+    if (toolBridge) toolBridge.ensureFrame();
+    else Object.values(toolBridges).forEach((inst) => inst.stop());
+    if (view === "adas") requestAnimationFrame(() => {
+      resizeChart();
+      if (state.vehicleMap) state.vehicleMap.resize();
+    });
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function closeMobileNav() {
+    $("sidebar").classList.remove("open");
+    $("sidebarBackdrop").classList.remove("show");
+  }
+
+  function setupNavigation() {
+    document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
+    document.querySelectorAll("[data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
+    setupToolBridges();
+    $("mobileMenu").addEventListener("click", () => { $("sidebar").classList.toggle("open"); $("sidebarBackdrop").classList.toggle("show"); });
+    $("sidebarBackdrop").addEventListener("click", closeMobileNav);
+    const initial = location.hash.replace("#", "");
+    navigate(VIEW_NAMES[initial] ? initial : "overview", false);
+  }
+
+  function wsUrl(path) {
+    return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${path}`;
+  }
+
+  function setMapPlaceholder(title, detail, isError = false) {
+    const placeholder = $("mapPlaceholder");
+    placeholder.classList.remove("hidden");
+    placeholder.classList.toggle("error", isError);
+    placeholder.querySelector("strong").textContent = title;
+    placeholder.querySelector("p").textContent = detail;
+  }
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = src;
+      script.async = true;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error("script load failed"));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function initializeVehicleMap() {
+    try {
+      const response = await fetch("/api/config/map");
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const config = await response.json();
+      if (!config.enabled || !config.key) {
+        setMapPlaceholder(
+          "高德地图 Key 未配置",
+          "请在云端设置 AMAP_JS_KEY，并同时设置 AMAP_SECURITY_JS_CODE 或安全代理地址后重启服务。",
+          true,
+        );
+        return;
+      }
+      window._AMapSecurityConfig = config.service_host
+        ? { serviceHost: config.service_host }
+        : { securityJsCode: config.security_js_code || "" };
+      const source = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(config.key)}&plugin=AMap.Scale`;
+      await loadScript(source);
+      if (!window.AMap) throw new Error("AMap unavailable");
+      state.amap = window.AMap;
+      state.vehicleMap = new window.AMap.Map("vehicleMap", {
+        viewMode: "2D",
+        zoom: 4,
+        center: [104.1954, 35.8617],
+        mapStyle: "amap://styles/normal",
+        resizeEnable: true,
+      });
+      state.vehicleMap.addControl(new window.AMap.Scale());
+      $("mapPlaceholder").classList.add("hidden");
+      if (state.pendingNavigation) renderNavigationOnMap(state.pendingNavigation);
+    } catch (_) {
+      setMapPlaceholder(
+        "高德地图加载失败",
+        "请检查 Web 端 Key、安全密钥、绑定域名和云端网络，然后刷新页面重试。",
+        true,
+      );
+    }
+  }
+
+  function navigationPosition(navigation, callback) {
+    const raw = [Number(navigation.longitude), Number(navigation.latitude)];
+    if (navigation.coordinate_system === "GCJ02") {
+      callback(raw);
+      return;
+    }
+    state.amap.convertFrom(raw, "gps", (status, result) => {
+      if (status === "complete" && result && result.info === "ok" && result.locations && result.locations[0]) {
+        callback(result.locations[0]);
+      } else {
+        callback(raw);
+      }
+    });
+  }
+
+  function renderNavigationOnMap(navigation) {
+    state.pendingNavigation = navigation;
+    if (!state.vehicleMap || !state.amap) return;
+    const updateId = ++state.navigationUpdateId;
+    navigationPosition(navigation, (position) => {
+      if (updateId !== state.navigationUpdateId) return;
+      if (!state.vehicleMarker) {
+        const markerContent = document.createElement("div");
+        markerContent.className = "vehicle-map-marker";
+        markerContent.innerHTML = '<i class="vehicle-heading"></i>';
+        state.vehicleMarker = new state.amap.Marker({
+          position,
+          content: markerContent,
+          offset: new state.amap.Pixel(-13, -13),
+          zIndex: 120,
+        });
+        state.routeLine = new state.amap.Polyline({
+          path: [position],
+          strokeColor: "#20d6e7",
+          strokeWeight: 4,
+          strokeOpacity: 0.72,
+          lineJoin: "round",
+          showDir: true,
+        });
+        state.vehicleMap.add([state.routeLine, state.vehicleMarker]);
+        state.vehicleMap.setZoomAndCenter(17, position);
+      } else {
+        state.vehicleMarker.setPosition(position);
+        state.vehicleMap.panTo(position);
+      }
+      const heading = state.vehicleMarker.getContent().querySelector(".vehicle-heading");
+      heading.style.transform = `rotate(${Number(navigation.heading_deg || 0)}deg)`;
+      state.routePoints.push(position);
+      state.routePoints = state.routePoints.slice(-80);
+      state.routeLine.setPath(state.routePoints);
+    });
+  }
+
+  function formatNavigationAge(epoch) {
+    if (!epoch) return "—";
+    const ageSeconds = Math.max(0, Math.round((Date.now() - Number(epoch)) / 1000));
+    return ageSeconds < 2 ? "刚刚更新" : `${ageSeconds} 秒前`;
+  }
+
+  function navigationIsFresh(navigation) {
+    if (!navigation) return false;
+    const capturedAt = Number(navigation.captured_at_ms || 0);
+    return navigation.status === "online"
+      && capturedAt > 0
+      && Date.now() - capturedAt < 15000;
+  }
+
+  function updateNavigation(navigation, domains) {
+    const chassisSpeed = domains && domains.chassis && domains.chassis.speed_kph != null
+      ? Number(domains.chassis.speed_kph) : NaN;
+    const hasPosition = navigation
+      && Number.isFinite(Number(navigation.latitude))
+      && Number.isFinite(Number(navigation.longitude));
+    const navigationSpeed = hasPosition && navigation.speed_kph != null
+      ? Number(navigation.speed_kph) : NaN;
+    const speed = Number.isFinite(navigationSpeed) ? navigationSpeed : chassisSpeed;
+    $("vehicleSpeed").textContent = Number.isFinite(speed) ? Math.max(0, speed).toFixed(1) : "—";
+    $("speedSource").textContent = Number.isFinite(navigationSpeed)
+      ? "边缘端 GNSS / CAN"
+      : Number.isFinite(chassisSpeed) ? "底盘域 CAN" : "等待边缘端";
+    if (!hasPosition) return;
+
+    const sourceKind = "edge";
+    if (state.navigationSourceKind && state.navigationSourceKind !== sourceKind) {
+      state.routePoints = [];
+      if (state.vehicleMap) {
+        if (state.vehicleMarker) state.vehicleMap.remove(state.vehicleMarker);
+        if (state.routeLine) state.vehicleMap.remove(state.routeLine);
+      }
+      state.vehicleMarker = null;
+      state.routeLine = null;
+    }
+    state.navigationSourceKind = sourceKind;
+
+    const online = navigationIsFresh(navigation);
+    $("navigationDataSourceTag").textContent = "数据源：边缘端 GNSS / CAN";
+    $("vehicleLongitude").textContent = Number(navigation.longitude).toFixed(6);
+    $("vehicleLatitude").textContent = Number(navigation.latitude).toFixed(6);
+    $("vehicleHeading").textContent = navigation.heading_deg == null ? "—" : `${Number(navigation.heading_deg).toFixed(1)}°`;
+    $("vehicleAccuracy").textContent = navigation.accuracy_m == null ? "—" : `± ${Number(navigation.accuracy_m).toFixed(1)} m`;
+    $("coordinateSystem").textContent = navigation.coordinate_system === "GCJ02" ? "GCJ-02" : "WGS-84 → GCJ-02";
+    $("navigationSource").textContent = `${navigation.source || "GNSS"} · ${navigation.coordinate_system || "WGS84"}`;
+    $("navigationTime").textContent = formatFrameTime(navigation.captured_at_ms);
+    $("navigationAge").textContent = formatNavigationAge(navigation.captured_at_ms);
+    $("navigationPulse").classList.toggle("online", online);
+    $("navigationStatus").className = `tag ${online ? "online" : "stale"}`;
+    $("navigationStatus").textContent = online ? "边缘端定位在线" : "定位数据已过期";
+    $("navigationHeadingStatus").classList.toggle("active", online);
+    $("navigationHeadingStatus").textContent = online ? "实时定位" : "定位已过期";
+    renderNavigationOnMap(navigation);
+  }
+
+  function preferredNavigation() {
+    return state.latestMetrics.navigation || null;
+  }
+
+  function applyPreferredNavigation() {
+    updateNavigation(preferredNavigation(), state.latestMetrics.domains || {});
+  }
+
+  function resetNavigationView() {
+    state.pendingNavigation = null;
+    state.navigationUpdateId += 1;
+    state.routePoints = [];
+    if (state.vehicleMap) {
+      if (state.vehicleMarker) state.vehicleMap.remove(state.vehicleMarker);
+      if (state.routeLine) state.vehicleMap.remove(state.routeLine);
+      state.vehicleMap.setZoomAndCenter(4, [104.1954, 35.8617]);
+    }
+    state.vehicleMarker = null;
+    state.routeLine = null;
+    state.navigationSourceKind = null;
+    $("vehicleSpeed").textContent = "—";
+    $("speedSource").textContent = "等待边缘端";
+    $("vehicleLongitude").textContent = "—";
+    $("vehicleLatitude").textContent = "—";
+    $("vehicleHeading").textContent = "—";
+    $("vehicleAccuracy").textContent = "—";
+    $("coordinateSystem").textContent = "—";
+    $("navigationSource").textContent = "GNSS / CAN 数据待接入";
+    $("navigationDataSourceTag").textContent = "数据源：边缘端 GNSS / CAN";
+    $("navigationTime").textContent = "--:--:--";
+    $("navigationAge").textContent = "—";
+    $("navigationPulse").classList.remove("online");
+    $("navigationStatus").className = "tag";
+    $("navigationStatus").textContent = "等待定位数据";
+    $("navigationHeadingStatus").classList.remove("active");
+    $("navigationHeadingStatus").textContent = "定位待接入";
+  }
+
+  function destroyMediaSource() {
+    state.mediaQueue = [];
+    state.sourceBuffer = null;
+    state.mediaSource = null;
+    state.mediaMime = null;
+    state.h264Active = false;
+    state.h264Started = false;
+    state.latestMediaCreatedAt = 0;
+    state.h264Rebuffering = false;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.classList.add("hidden");
+    canvas.style.display = "block";
+    if (state.mediaUrl) URL.revokeObjectURL(state.mediaUrl);
+    state.mediaUrl = null;
+  }
+
+  function initContainsFourCc(buffer, fourCc) {
+    const bytes = new Uint8Array(buffer);
+    const target = [...fourCc].map((character) => character.charCodeAt(0));
+    for (let index = 0; index <= bytes.length - target.length; index += 1) {
+      if (target.every((value, offset) => bytes[index + offset] === value)) return true;
+    }
+    return false;
+  }
+
+  function mediaMimeFromInit(buffer) {
+    if (initContainsFourCc(buffer, "hvcC") || initContainsFourCc(buffer, "hvc1") || initContainsFourCc(buffer, "hev1")) {
+      return HEVC_MIMES.find((mime) => MediaSource.isTypeSupported(mime)) || null;
+    }
+    return MediaSource.isTypeSupported(H264_MIME) ? H264_MIME : null;
+  }
+
+  function ensureMediaSourceBuffer() {
+    if (
+      state.sourceBuffer
+      || !state.mediaMime
+      || !state.mediaSource
+      || state.mediaSource.readyState !== "open"
+    ) return;
+    try {
+      state.sourceBuffer = state.mediaSource.addSourceBuffer(state.mediaMime);
+      state.sourceBuffer.mode = "segments";
+      state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
+      appendNextMediaSegment();
+    } catch (_) {
+      setConnection(false, state.mediaMime.includes("hvc1") || state.mediaMime.includes("hev1")
+        ? "浏览器不支持 H.265/HEVC 播放"
+        : "浏览器不支持 H.264 播放");
+    }
+  }
+
+  function prepareMediaSource(mime = null) {
+    destroyMediaSource();
+    state.mediaMime = mime;
+    state.mediaSource = new MediaSource();
+    state.mediaUrl = URL.createObjectURL(state.mediaSource);
+    video.src = state.mediaUrl;
+    state.mediaSource.addEventListener("sourceopen", () => {
+      ensureMediaSourceBuffer();
+    }, { once: true });
+  }
+
+  function enqueueFmp4(event) {
+    const buffer = event.data;
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= FMP4_HEADER_SIZE) return;
+    const view = new DataView(buffer);
+    const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    if (magic !== "FMP4") return;
+    const item = {
+      kind: view.getUint8(4),
+      sequence: view.getUint32(5, false),
+      createdAt: Number(view.getBigUint64(9, false)),
+      payload: buffer.slice(FMP4_HEADER_SIZE),
+    };
+    if (item.kind === 0) {
+      const mime = mediaMimeFromInit(item.payload);
+      if (!mime) {
+        state.mediaQueue = [];
+        setConnection(false, "当前浏览器不支持摄像头的 H.265/HEVC 格式");
+        return;
+      }
+      // FFmpeg or the edge uplink restarted. Rebuild MSE so an old timestamp
+      // range cannot leave playback stalled in a discontinuity.
+      if (state.h264Started || state.h264Active || (state.mediaMime && state.mediaMime !== mime)) {
+        prepareMediaSource(mime);
+      } else {
+        state.mediaMime = mime;
+        ensureMediaSourceBuffer();
+      }
+      state.mediaQueue = [];
+    }
+    state.mediaQueue.push(item);
+    // Do not discard an intermediate media segment here. Dropping one creates
+    // a timestamp hole in MSE and causes exactly the stop-at-each-segment issue.
+    appendNextMediaSegment();
+  }
+
+  function appendNextMediaSegment() {
+    const sourceBuffer = state.sourceBuffer;
+    if (!sourceBuffer || sourceBuffer.updating || !state.mediaQueue.length) return;
+    const item = state.mediaQueue.shift();
+    state.appendingMedia = item;
+    try {
+      sourceBuffer.appendBuffer(item.payload);
+    } catch (_) {
+      state.appendingMedia = null;
+      if (state.mediaQueue.length) setTimeout(appendNextMediaSegment, 100);
+    }
+  }
+
+  function onMediaUpdateEnd() {
+    const item = state.appendingMedia;
+    state.appendingMedia = null;
+    if (item && item.kind === 1) {
+      state.latestMediaCreatedAt = item.createdAt;
+      state.lastFrameAt = Date.now();
+      $("sequenceTag").textContent = `SEG ${item.sequence.toLocaleString()}`;
+      $("overlayTimestamp").textContent = formatFrameTime(item.createdAt);
+    }
+    if (state.sourceBuffer && state.sourceBuffer.buffered.length) {
+      const ranges = state.sourceBuffer.buffered;
+      const start = ranges.start(0);
+      const end = ranges.end(ranges.length - 1);
+      const ahead = Math.max(0, end - (video.currentTime || start));
+      const bufferedDuration = end - start;
+      if (!state.h264Started && bufferedDuration >= H264_TARGET_BUFFER_SECONDS) {
+        video.currentTime = Math.max(start, end - Math.min(H264_TARGET_BUFFER_SECONDS, bufferedDuration - 0.2));
+        state.h264Started = true;
+        state.h264Rebuffering = false;
+        video.play().catch(() => {});
+      } else if (state.h264Started && state.h264Rebuffering && ahead >= H264_RESUME_BUFFER_SECONDS) {
+        state.h264Rebuffering = false;
+        video.play().catch(() => {});
+      }
+      if (
+        state.h264Started
+        && state.latestMediaCreatedAt > 0
+        && Date.now() - state.latestMediaCreatedAt > H264_MAX_LIVE_LATENCY_MS
+        && end - start > 0.5
+      ) {
+        // Stay within the user's five-second live-latency ceiling. Seeking
+        // inside the existing continuous MSE range avoids decoder resets.
+        video.currentTime = Math.max(start, end - 0.35);
+      }
+      if (state.h264Started && start < video.currentTime - 10 && !state.sourceBuffer.updating) {
+        state.sourceBuffer.remove(start, video.currentTime - 8);
+        return;
+      }
+    }
+    appendNextMediaSegment();
+  }
+
+  video.addEventListener("playing", () => {
+    state.h264Active = true;
+    state.h264Rebuffering = false;
+    video.classList.remove("hidden");
+    canvas.style.display = "none";
+    $("videoPlaceholder").classList.add("hidden");
+    $("videoStage").classList.add("has-video");
+    setConnection(true, "压缩码流连续播放");
+  });
+
+  video.addEventListener("waiting", () => {
+    if (!state.h264Started) return;
+    state.h264Rebuffering = true;
+    setConnection(true, "网络抖动，正在补充连续缓冲");
+  });
+
+  video.addEventListener("stalled", () => {
+    if (state.h264Started) state.h264Rebuffering = true;
+  });
+
+  video.addEventListener("error", () => {
+    const code = video.error ? video.error.code : 0;
+    const labels = {
+      1: "视频加载被中止",
+      2: "视频网络读取失败",
+      3: "浏览器无法解码 H.265/HEVC",
+      4: "浏览器不支持该视频格式",
+    };
+    setConnection(false, labels[code] || "视频播放失败");
+  });
+
+  video.addEventListener("timeupdate", () => {
+    if (!state.h264Active || !state.latestMediaCreatedAt) return;
+    let ahead = 0;
+    if (video.buffered.length) ahead = Math.max(0, video.buffered.end(video.buffered.length - 1) - video.currentTime);
+    const latency = Math.max(0, Date.now() - state.latestMediaCreatedAt + ahead * 1000);
+    state.playbackLatency = latency;
+    $("latencyValue").textContent = Math.round(latency);
+    updateLatencyState(latency);
+  });
+
+  function connect() {
+    clearTimeout(state.reconnectTimer);
+    closeSockets();
+    resetPlayback();
+    setConnection(false, "正在连接");
+    const fmp4Supported = "MediaSource" in window;
+    if (fmp4Supported) prepareMediaSource();
+    const livePath = fmp4Supported ? "/ws/live-fmp4/" : "/ws/live/";
+    state.liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
+    state.liveSocket.binaryType = "arraybuffer";
+    state.liveSocket.onmessage = fmp4Supported ? enqueueFmp4 : enqueueFrame;
+    state.liveSocket.onopen = () => setConnection(false, "等待车端");
+    state.liveSocket.onclose = scheduleReconnect;
+    state.liveSocket.onerror = () => state.liveSocket.close();
+    state.metricsSocket = new WebSocket(wsUrl(`/ws/metrics/${encodeURIComponent(state.vehicleId)}`));
+    state.metricsSocket.onmessage = (event) => {
+      try { updateMetrics(JSON.parse(event.data)); } catch (_) { /* Ignore malformed telemetry. */ }
+    };
+    state.metricsSocket.onclose = scheduleReconnect;
+    state.metricsSocket.onerror = () => state.metricsSocket.close();
+  }
+
+  function closeSockets() {
+    for (const socket of [state.liveSocket, state.metricsSocket]) {
+      if (socket) { socket.onclose = null; socket.close(); }
+    }
+  }
+
+  function scheduleReconnect() {
+    setConnection(false, "连接中断");
+    clearTimeout(state.reconnectTimer);
+    state.reconnectTimer = setTimeout(connect, 1800);
+  }
+
+  function enqueueFrame(event) {
+    const buffer = event.data;
+    if (!(buffer instanceof ArrayBuffer) || buffer.byteLength <= HEADER_SIZE) return;
+    const view = new DataView(buffer);
+    const magic = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2), view.getUint8(3));
+    if (magic !== "VCS1") return;
+    const frame = {
+      jpeg: buffer.slice(HEADER_SIZE),
+      sequence: view.getUint32(4, false),
+      capturedAt: Number(view.getBigUint64(8, false)),
+      width: view.getUint16(24, false),
+      height: view.getUint16(26, false),
+      quality: view.getUint8(28),
+    };
+    state.frameQueue.push(frame);
+    if (!state.bufferingStartedAt) state.bufferingStartedAt = performance.now();
+    // 浏览器只承担短抖动整形，不再囤积长时间旧画面。
+    while (
+      state.frameQueue.length > 1
+      && frame.capturedAt - state.frameQueue[0].capturedAt > 6000
+    ) {
+      state.frameQueue.shift();
+    }
+    schedulePlayback();
+  }
+
+  function resetPlayback() {
+    destroyMediaSource();
+    state.frameQueue = [];
+    state.decoderBusy = false;
+    state.lastPresentedCaptureAt = 0;
+    state.lastPlaybackWallAt = 0;
+    state.playbackLatency = 0;
+    state.playbackStarted = false;
+    state.bufferingStartedAt = 0;
+    clearTimeout(state.playbackTimer);
+    state.playbackTimer = null;
+  }
+
+  function schedulePlayback() {
+    if (state.decoderBusy || state.playbackTimer != null || !state.frameQueue.length) return;
+    if (!state.playbackStarted) {
+      const bufferedDuration = state.frameQueue.length > 1
+        ? state.frameQueue[state.frameQueue.length - 1].capturedAt - state.frameQueue[0].capturedAt
+        : 0;
+      const bufferingTime = performance.now() - state.bufferingStartedAt;
+      if (bufferedDuration < 1000 && bufferingTime < 1500) {
+        state.playbackTimer = setTimeout(() => {
+          state.playbackTimer = null;
+          schedulePlayback();
+        }, 80);
+        return;
+      }
+      state.playbackStarted = true;
+    }
+    const nextFrame = state.frameQueue[0];
+    let delay = 0;
+    if (state.lastPresentedCaptureAt && state.lastPlaybackWallAt) {
+      const captureInterval = Math.max(10, Math.min(200, nextFrame.capturedAt - state.lastPresentedCaptureAt));
+      const elapsed = performance.now() - state.lastPlaybackWallAt;
+      delay = Math.max(0, captureInterval - elapsed);
+    }
+    state.playbackTimer = setTimeout(playbackTick, delay);
+  }
+
+  function playbackTick() {
+    state.playbackTimer = null;
+    if (state.decoderBusy) return;
+    const frame = state.frameQueue.shift();
+    if (!frame) return;
+    decodeAndDraw(frame);
+  }
+
+  async function decodeAndDraw(frame) {
+    state.decoderBusy = true;
+    const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
+    try {
+      if ("createImageBitmap" in window) {
+        const bitmap = await createImageBitmap(blob);
+        drawFrame(bitmap, frame);
+        bitmap.close();
+      } else {
+        await drawFrameWithImage(blob, frame);
+      }
+    } catch (_) {
+      // 损坏帧直接跳过，下一播放节拍会继续使用最新帧。
+    } finally {
+      state.decoderBusy = false;
+      schedulePlayback();
+    }
+  }
+
+  function drawFrame(source, frame) {
+    if (canvas.width !== frame.width || canvas.height !== frame.height) {
+      canvas.width = frame.width;
+      canvas.height = frame.height;
+    }
+    context.drawImage(source, 0, 0, canvas.width, canvas.height);
+    const now = Date.now();
+    const latency = Math.max(0, now - frame.capturedAt);
+    state.playbackLatency = latency;
+    state.lastFrameAt = now;
+    state.lastPresentedCaptureAt = frame.capturedAt;
+    state.lastPlaybackWallAt = performance.now();
+    state.frameTimes.push(now);
+    state.frameTimes = state.frameTimes.filter((value) => now - value < 1000);
+    $("videoPlaceholder").classList.add("hidden");
+    $("videoStage").classList.add("has-video");
+    $("sequenceTag").textContent = `SEQ ${frame.sequence.toLocaleString()}`;
+    $("overlayTimestamp").textContent = formatFrameTime(frame.capturedAt);
+    const bufferedSeconds = Number(state.latestMetrics.send_queue_seconds || 0);
+    $("streamProfile").textContent = `${frame.width} × ${frame.height} · JPEG Q${frame.quality} · ${bufferedSeconds.toFixed(1)}s 缓冲`;
+    $("latencyValue").textContent = Math.round(latency);
+    updateLatencyState(latency);
+    setConnection(true, "车端在线");
+  }
+
+  function drawFrameWithImage(blob, frame) {
+    return new Promise((resolve, reject) => {
+      const image = new Image();
+      const objectUrl = URL.createObjectURL(blob);
+      image.onload = () => { drawFrame(image, frame); URL.revokeObjectURL(objectUrl); resolve(); };
+      image.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("jpeg decode failed")); };
+      image.src = objectUrl;
+    });
+  }
+
+  function updateMetrics(metrics) {
+    state.latestMetrics = metrics;
+    window.VShieldCockpit?.updateMetrics(metrics);
+    const online = metrics.status === "online";
+    if (online) setConnection(true, "车端在线");
+    else if (Date.now() - state.lastFrameAt > 3500) setConnection(false, "等待车端");
+    const fps = Number(metrics.fps || metrics.encoded_fps || state.frameTimes.length || 0);
+    const kbps = Number(metrics.upload_kbps || 0);
+    const latency = Math.max(Number(metrics.ingest_latency_ms || 0), state.playbackLatency || 0);
+    $("fpsValue").textContent = fps ? fps.toFixed(1) : "—";
+    $("bitrateValue").textContent = kbps ? (kbps / 1000).toFixed(2) : "—";
+    const h264 = String(metrics.stream_mode || "").includes("fmp4");
+    const passthrough = metrics.encoder === "copy";
+    const codecLabel = metrics.codec || "H.264/H.265";
+    $("qualityLabel").textContent = h264 ? `${codecLabel} ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
+    $("frameSizeLabel").textContent = h264 && metrics.segment_bytes
+      ? `${(metrics.segment_bytes / 1024).toFixed(0)} KB/片段`
+      : metrics.frame_bytes ? `${(metrics.frame_bytes / 1024).toFixed(0)} KB/帧` : "— KB/帧";
+    if (h264) {
+      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · ${codecLabel} · ${metrics.encoded_fps || 20} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
+    }
+    const droppedFrames = Number(metrics.cloud_dropped_frames || 0)
+      + Number(metrics.queue_dropped_frames || 0)
+      + Number(metrics.stale_dropped_frames || 0);
+    $("dropValue").textContent = droppedFrames.toLocaleString();
+    $("viewerValue").textContent = metrics.viewer_count || 0;
+    $("reconnectValue").textContent = Number(metrics.agent_reconnects || 0) + Number(metrics.capture_reconnects || 0);
+    $("overlayTransport").textContent = (metrics.transport || "WS / JPEG").toUpperCase();
+    const total = Math.max(1, Number(metrics.received_frames || 0) + droppedFrames);
+    const dropRate = droppedFrames / total;
+    const health = online ? Math.max(0, Math.round(100 - dropRate * 100 - Math.min(latency / 50, 8))) : 0;
+    $("healthValue").textContent = online ? `${health}%` : "离线";
+    $("healthBar").style.width = `${health}%`;
+    state.latencyHistory.push(latency);
+    state.rateHistory.push(kbps / 1000);
+    state.latencyHistory = state.latencyHistory.slice(-40);
+    state.rateHistory = state.rateHistory.slice(-40);
+    updateFpsBars(fps);
+    updateDomains(metrics.domains || {});
+    applyPreferredNavigation();
+    updateBluetooth(metrics.bluetooth || {});
+    updateWifi(metrics.wifi || {});
+    $("lastRefresh").textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    drawChart();
+  }
+
+  function setBodyField(root, name, value) {
+    const element = root.querySelector(`[data-body-field="${name}"]`);
+    if (element) element.textContent = value;
+  }
+
+  // ===== 测试工具嵌入对接（依据《嵌入对接接口文档》） =====
+  // 每个工具一个实例：上半区 iframe 内嵌工具，下半区由宿主轮询 /api/embed/listTestLog。
+  // API 根地址从 iframe 的 data-src 推导，换域名只改 data-src 一处。
+  const TOOL_SOURCE_HINT = "bluetooth-test-tools";   // 文档约定的来源标识（兼容用）
+
+  function createToolBridge({ view, frameId }) {
+    const inst = {
+      view,
+      frameId,
+      timer: null,
+      follow: false,   // true = 自动跟随最新任务（调试/兜底）；工具下发上下文时自动关闭
+      context: { taskId: null, caseId: null, resultId: null },
+    };
+
+    inst.panel = () => document.querySelector(`[data-view-panel="${view}"]`);
+    inst.frame = () => $(frameId) || (inst.panel() && inst.panel().querySelector("[data-tool-frame]"));
+    inst.node = (selector) => {
+      const panel = inst.panel();
+      return panel ? panel.querySelector(selector) : null;
+    };
+    inst.active = () => {
+      const panel = inst.panel();
+      return Boolean(panel && panel.classList.contains("active"));
+    };
+    inst.setLabel = (text) => {
+      const label = inst.node("[data-btlog-context]");
+      if (label) label.textContent = text;
+    };
+    inst.apiBase = () => {
+      const frame = inst.frame();
+      try {
+        return new URL(frame.dataset.src).origin + "/api";
+      } catch (error) {
+        return "";
+      }
+    };
+    inst.formatContext = () => {
+      const { taskId, caseId, resultId } = inst.context;
+      if (taskId == null && caseId == null && resultId == null) return "暂无执行中任务";
+      const parts = [];
+      if (taskId != null) parts.push(`任务 ${taskId}`);
+      if (caseId != null) parts.push(`用例 ${caseId}`);
+      if (resultId != null) parts.push(`结果 ${resultId}`);
+      return parts.join(" · ");
+    };
+    inst.renderEmpty = (text) => {
+      const body = inst.node("[data-btlog-body]");
+      if (body) body.innerHTML = `<div class="tool-logs-empty">${escapeHtml(text)}</div>`;
+      const count = inst.node("[data-btlog-count]");
+      if (count) count.textContent = "0 条";
+    };
+    inst.render = (rows) => {
+      const body = inst.node("[data-btlog-body]");
+      if (!body) return;
+      const limit = 300;   // 只渲染最近 300 条，避免日志过多拖慢页面
+      const visible = rows.slice(-limit);
+      if (!visible.length) {
+        inst.renderEmpty("当前任务暂无日志");
+        return;
+      }
+      const stickToBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
+      body.innerHTML = visible.map((row) => {
+        const type = String(row.type || "").trim() || "信息";
+        const stamp = String(row.logTime || "");
+        const time = stamp.length >= 19 ? stamp.slice(11, 19) : stamp;
+        return `<div class="tool-log-row" data-type="${escapeHtml(type)}"><time>${escapeHtml(time)}</time><i>${escapeHtml(type)}</i><p>${escapeHtml(row.content || "")}</p></div>`;
+      }).join("");
+      const count = inst.node("[data-btlog-count]");
+      if (count) count.textContent = rows.length > limit ? `${limit} / ${rows.length} 条` : `${rows.length} 条`;
+      if (stickToBottom) body.scrollTop = body.scrollHeight;   // asc=1：新日志滚到底部
+    };
+    // 跟随模式：取最新一条带 taskId 的日志，把上下文对齐到"当前正在跑的那次用例执行"，
+    inst.fetchLogs = async () => {
+      const base = inst.apiBase();
+      if (!base) return;
+      // 跟随模式：只发一次请求（拉最新日志），本地锁定最新三元组并只渲染它，
+      // 省掉"先查上下文再查日志"的第二次往返——公网隧道下这一次很值钱。
+      if (inst.follow) {
+        const response = await fetch(`${base}/embed/listTestLog?pageNum=1&pageSize=300&asc=0`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const rows = (data && data.rows) || [];
+        const pick = rows.find((row) => Number(row.taskId) > 0);
+        if (!pick) {
+          inst.context = { taskId: null, caseId: null, resultId: null };
+          inst.setLabel("暂无执行中任务");
+          inst.renderEmpty("暂无执行中任务");
+          return;
+        }
+        const hasCase = pick.caseId != null || pick.resultId != null;
+        inst.context = {
+          taskId: pick.taskId,
+          caseId: hasCase ? (pick.caseId ?? null) : null,
+          resultId: hasCase ? (pick.resultId ?? null) : null,
+        };
+        inst.setLabel(`${inst.formatContext()} · 跟随最新`);
+        const { taskId, caseId, resultId } = inst.context;
+        const scoped = rows.filter((row) => Number(row.taskId) === taskId
+          && (caseId == null || row.caseId === caseId)
+          && (resultId == null || row.resultId === resultId));
+        inst.render(scoped.slice().reverse());   // 接口按倒序返回，渲染需要正序
+        return;
+      }
+      const { taskId, caseId, resultId } = inst.context;
+      // 未拿到任务上下文时不拉全局历史日志，下半区保持空态（文档要求）
+      if (taskId == null && resultId == null) {
+        inst.renderEmpty("暂无执行中任务");
+        return;
+      }
+      const query = new URLSearchParams({ pageNum: "1", pageSize: "500", asc: "1" });
+      if (taskId != null) query.set("taskId", taskId);
+      if (caseId != null) query.set("caseId", caseId);
+      if (resultId != null) query.set("resultId", resultId);
+      const response = await fetch(`${base}/embed/listTestLog?${query}`, { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (!data || !data.success) throw new Error((data && data.message) || "日志查询失败");
+      inst.render(data.rows || []);
+    };
+    inst.start = () => {
+      if (inst.timer) return;
+      const tick = () => {
+        // 标签页在后台时不轮询，避免和页面自身请求争抢隧道带宽
+        if (document.hidden) return;
+        inst.fetchLogs().catch((error) => console.warn(`[tool-embed:${view}] 日志拉取失败`, error));
+      };
+      tick();
+      inst.timer = setInterval(tick, 3000);   // 公网隧道下 3 秒足够，降低带宽占用
+    };
+    inst.stop = () => {
+      if (!inst.timer) return;
+      clearInterval(inst.timer);
+      inst.timer = null;
+    };
+    // 「跟随最新任务」：开启后每次轮询都重新对齐任务，工具里切换用例会自动跟上。
+    inst.bootstrap = async () => {
+      inst.follow = true;
+      inst.start();
+    };
+    // 可选步骤 A：iframe 载入后主动向工具索要一次当前日志上下文，防漏消息。
+    inst.requestContext = () => {
+      const frame = inst.frame();
+      if (!frame || !frame.contentWindow) return;
+      let target = "*";
+      try {
+        target = new URL(frame.dataset.src).origin;
+      } catch (error) {
+        target = "*";
+      }
+      frame.contentWindow.postMessage(
+        { source: TOOL_SOURCE_HINT, type: "bt-request-log-context", payload: {}, ts: Date.now() },
+        target,
+      );
+    };
+    inst.ensureFrame = () => {
+      const frame = inst.frame();
+      if (!frame) return;
+      const url = frame.dataset.src;
+      const panel = inst.panel();
+      if (panel) {
+        panel.querySelectorAll("[data-tool-url]").forEach((node) => {
+          if (node.tagName === "A") node.href = url;
+          else node.textContent = url;
+        });
+      }
+      if (!frame.getAttribute("src")) {
+        frame.addEventListener("load", inst.requestContext, { once: true });
+        frame.src = url;
+      }
+      inst.start();
+    };
+    inst.reload = () => {
+      const frame = inst.frame();
+      if (!frame) return;
+      frame.src = "about:blank";
+      setTimeout(() => { frame.src = frame.dataset.src; }, 60);
+    };
+    inst.applyContext = (payload) => {
+      inst.context = {
+        taskId: payload.taskId ?? null,
+        caseId: payload.caseId ?? null,
+        resultId: payload.resultId ?? null,
+      };
+      inst.setLabel(inst.formatContext());
+    };
+    return inst;
+  }
+
+  const toolBridges = {
+    tools: createToolBridge({ view: "tools", frameId: "bt-tool-frame" }),
+    "tools-wifi": createToolBridge({ view: "tools-wifi", frameId: "wifi-tool-frame" }),
+  };
+
+  function toolBridgeForWindow(sourceWindow) {
+    return Object.values(toolBridges).find((inst) => {
+      const frame = inst.frame();
+      return Boolean(frame && frame.contentWindow && frame.contentWindow === sourceWindow);
+    }) || null;
+  }
+
+  function setupToolBridges() {
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || typeof data !== "object") return;
+      // 优先按 iframe 窗口归属判断（蓝牙/WiFi 两个工具的 source 标识可能不同），
+      // 同时兼容文档约定的 source 标识。
+      const inst = toolBridgeForWindow(event.source)
+        || (data.source === TOOL_SOURCE_HINT ? toolBridges.tools : null);
+      if (!inst) return;
+      if (data.type === "bt-embed-ready") {
+        if (inst.active()) inst.start();
+        return;
+      }
+      if (data.type === "bt-log-context") {
+        // 工具主动下发的上下文最权威，关闭跟随模式，锚定到工具指定的用例
+        inst.follow = false;
+        inst.applyContext(data.payload || {});
+        inst.start();
+        return;
+      }
+      if (data.type === "bt-log-context-clear") {
+        inst.follow = false;
+        inst.applyContext({});
+        inst.renderEmpty("暂无执行中任务");
+      }
+    });
+
+    // 标签页切回前台时立刻补一次，避免看到过期的日志
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      Object.values(toolBridges).forEach((inst) => {
+        if (inst.active() && inst.timer) {
+          inst.fetchLogs().catch((error) => console.warn(`[tool-embed:${inst.view}] 刷新失败`, error));
+        }
+      });
+    });
+
+    Object.values(toolBridges).forEach((inst) => {
+      const reload = inst.node("[data-tool-reload]");
+      if (reload) reload.addEventListener("click", inst.reload);
+      const bootstrap = inst.node("[data-btlog-bootstrap]");
+      if (bootstrap) {
+        bootstrap.addEventListener("click", () => {
+          inst.bootstrap().catch((error) => {
+            console.warn(`[tool-embed:${inst.view}] 跟随最新任务失败`, error);
+            inst.renderEmpty("跟随失败，请检查工具接口是否可达");
+          });
+        });
+      }
+    });
+  }
+
+  function synchronizeBodyHazardBlink(root, hazardOn) {
+    const targets = root.querySelectorAll([
+      ".body-car-model .body-model-lamp.turn",
+      '[data-body-light="TurnLeft"]',
+      '[data-body-light="TurnRight"]',
+      '[data-body-light="Hazard"]',
+    ].join(","));
+    const wasOn = root.dataset.bodyHazardActive === "true";
+
+    if (!hazardOn) {
+      targets.forEach((element) => element.classList.remove("body-hazard-sync"));
+      root.dataset.bodyHazardActive = "false";
+      return;
+    }
+
+    if (!wasOn) {
+      targets.forEach((element) => element.classList.remove("body-hazard-sync"));
+      // Force one shared animation start so the left and right lamps keep the same phase.
+      void root.offsetWidth;
+      targets.forEach((element) => element.classList.add("body-hazard-sync"));
+    }
+    root.dataset.bodyHazardActive = "true";
+  }
+
+  function renderBodyStatus(bodyStatus) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+
+    const connected = bodyStatus.connected;
+    root.classList.toggle("is-stale", !connected);
+
+    setBodyField(root, "can_status", bodyStatus.canConnected ? "已连接" : "未连接");
+    const canCard = root.querySelector(".body-metric-card.can");
+    if (canCard) {
+      canCard.classList.toggle("is-normal", bodyStatus.canConnected);
+    }
+
+    const updateTime = bodyStatus.timestamp == null ? "--" : formatFrameTime(bodyStatus.timestamp);
+    setBodyField(root, "updated_at_ms", updateTime);
+    const doors = [
+      ["Door_FL", bodyStatus.doors.fl],
+      ["Door_FR", bodyStatus.doors.fr],
+      ["Door_RL", bodyStatus.doors.rl],
+      ["Door_RR", bodyStatus.doors.rr],
+    ];
+    doors.forEach(([name, doorState]) => {
+      const element = root.querySelector(`[data-body-door="${name}"]`);
+      if (element) {
+        element.classList.toggle("is-open", doorState === "OPEN");
+        element.classList.toggle("is-closed", doorState === "CLOSED");
+        element.querySelector("em").textContent = doorState === "OPEN" ? "开启" : doorState === "CLOSED" ? "关闭" : "未接入";
+      }
+      const modelDoor = root.querySelector(`[data-body-model-door="${name}"]`);
+      if (modelDoor) {
+        modelDoor.classList.toggle("is-open", doorState === "OPEN");
+        modelDoor.classList.toggle("is-closed", doorState === "CLOSED");
+      }
+    });
+
+    const lockElement = root.querySelector('[data-body-lock="CentralLockState"]');
+    if (lockElement) {
+      const isLocked = bodyStatus.centralLock === "LOCKED";
+      const isUnlocked = bodyStatus.centralLock === "UNLOCKED";
+      lockElement.classList.toggle("is-locked", isLocked);
+      lockElement.classList.toggle("is-unlocked", isUnlocked);
+      lockElement.querySelector("strong").textContent = isLocked ? "已锁止" : isUnlocked ? "已解锁" : "未接入";
+      lockElement.querySelector("small").textContent = isLocked || isUnlocked ? "中央门锁实时状态" : "等待真实车身域数据";
+    }
+
+    const lights = [
+      ["LowBeam", bodyStatus.lights.lowBeam],
+      ["HighBeam", bodyStatus.lights.highBeam],
+      ["TurnLeft", bodyStatus.lights.turnLeft],
+      ["TurnRight", bodyStatus.lights.turnRight],
+      ["Hazard", bodyStatus.lights.hazard],
+    ];
+    lights.forEach(([name, isOn]) => {
+      const element = root.querySelector(`[data-body-light="${name}"]`);
+      if (!element) return;
+      element.classList.toggle("is-on", isOn === true);
+      element.querySelector("em").textContent = isOn == null ? "未接入" : isOn ? "ON" : "OFF";
+    });
+
+    const hazardOn = bodyStatus.lights.hazard === true;
+    const carModel = root.querySelector("[data-body-car-model]");
+    if (carModel) {
+      carModel.classList.toggle("is-low-beam", bodyStatus.lights.lowBeam === true);
+      carModel.classList.toggle("is-high-beam", bodyStatus.lights.highBeam === true);
+      carModel.classList.toggle("is-turn-left", bodyStatus.lights.turnLeft === true);
+      carModel.classList.toggle("is-turn-right", bodyStatus.lights.turnRight === true);
+      carModel.classList.toggle("is-hazard", hazardOn);
+      carModel.classList.toggle("is-disconnected", !connected);
+    }
+    synchronizeBodyHazardBlink(root, hazardOn);
+
+  }
+
+  function renderBodyCloudStatus(payload) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+    const validity = payload.signal_validity || {};
+    ["Door_FL", "Door_FR", "Door_RL", "Door_RR"].forEach((name) => {
+      const element = root.querySelector(`[data-body-door="${name}"]`);
+      const invalid = Object.prototype.hasOwnProperty.call(validity, name) && validity[name] === false;
+      if (!element) return;
+      element.classList.toggle("is-invalid", invalid);
+      if (invalid) element.querySelector("em").textContent = "无效";
+    });
+    const lockElement = root.querySelector('[data-body-lock="CentralLockState"]');
+    const lockInvalid = validity.CentralLockState === false;
+    if (lockElement) {
+      lockElement.classList.toggle("is-invalid", lockInvalid);
+      if (lockInvalid) {
+        lockElement.querySelector("strong").textContent = "无效";
+        lockElement.querySelector("small").textContent = payload.signal_invalid_reasons?.CentralLockState || "信号有效性校验失败";
+      }
+    }
+    ["LowBeam", "HighBeam", "TurnLeft", "TurnRight", "Hazard"].forEach((name) => {
+      const element = root.querySelector(`[data-body-light="${name}"]`);
+      const invalid = validity[name] === false;
+      if (!element) return;
+      element.classList.toggle("is-invalid", invalid);
+      if (invalid) element.querySelector("em").textContent = "无效";
+    });
+
+    const link = payload.link || {};
+    const onlineValues = ["online", "active", "ok", "connected"];
+    const updateLink = (name, value, onlineText = "在线") => {
+      const element = root.querySelector(`[data-body-link="${name}"]`);
+      if (!element) return;
+      const online = onlineValues.includes(String(value || "").toLowerCase());
+      element.classList.toggle("online", online);
+      element.classList.toggle("offline", !online);
+      element.querySelector("em").textContent = online ? onlineText : (value === "timeout" ? "超时" : "离线");
+    };
+    updateLink("mcu", link.mcu_status);
+    updateLink("edge", link.edge_status);
+    updateLink("upload", link.cloud_status || link.upload_status, "正常");
+    const ageElement = root.querySelector('[data-body-link="age"]');
+    if (ageElement) {
+      const ageMs = Number(link.age_ms);
+      const fresh = Number.isFinite(ageMs) && ageMs <= 10000;
+      ageElement.classList.toggle("online", fresh);
+      ageElement.classList.toggle("offline", !fresh);
+      ageElement.querySelector("em").textContent = Number.isFinite(ageMs) ? `${(ageMs / 1000).toFixed(1)} s` : "—";
+    }
+    const interfaceElement = root.querySelector("[data-body-interface]");
+    if (interfaceElement) interfaceElement.textContent = link.interface_path || "等待接口数据";
+    const modeElement = root.querySelector("[data-body-mode]");
+    if (modeElement) {
+      modeElement.textContent = payload.data_mode === "real" ? "真实数据" : payload.data_mode === "test" ? "测试数据" : "等待数据";
+      modeElement.classList.toggle("live", payload.data_mode === "real");
+    }
+    const edgeChip = root.querySelector("[data-body-edge-chip]");
+    if (edgeChip) {
+      const edgeOnline = onlineValues.includes(String(link.edge_status || "").toLowerCase()) && payload.connected;
+      edgeChip.textContent = edgeOnline ? "Jetson链路正常" : "等待 Jetson 上传";
+      edgeChip.classList.toggle("active", edgeOnline);
+    }
+    const changeTime = root.querySelector("[data-body-change-time]");
+    if (changeTime) changeTime.textContent = formatFrameTime(payload.latest_change_at_ms);
+    const alerts = Array.isArray(payload.alerts) ? payload.alerts : [];
+    const alertCount = root.querySelector("[data-body-alert-count]");
+    if (alertCount) {
+      alertCount.textContent = `${alerts.length} 条异常`;
+      alertCount.classList.toggle("warning", alerts.length > 0);
+    }
+    const alertList = root.querySelector("[data-body-alert-list]");
+    if (alertList) alertList.innerHTML = alerts.length ? alerts.slice(0, 4).map((alert) => `
+      <div class="body-alert-item ${escapeHtml(alert.level || "warning")}"><i>!</i><span><b>${escapeHtml(alert.title)}</b><small>${escapeHtml(alert.detail)}</small></span><time>${escapeHtml(formatFrameTime(alert.created_at_ms))}</time></div>
+    `).join("") : '<div class="body-alert-empty">暂无异常或状态冲突</div>';
+  }
+
+  function bodySignalText(changes) {
+    const labels = {
+      Door_FL: "左前门", Door_FR: "右前门", Door_RL: "左后门", Door_RR: "右后门",
+      CentralLockState: "中央门锁", LowBeam: "近光灯", HighBeam: "远光灯",
+      TurnLeft: "左转灯", TurnRight: "右转灯", Hazard: "双闪",
+    };
+    return Object.entries(changes || {}).map(([key, value]) => {
+      const active = value === true || ["open", "opened", "locked", "on"].includes(String(value).toLowerCase());
+      return `${labels[key] || key}=${active ? "ON" : "OFF"}`;
+    }).join(" · ") || "状态刷新";
+  }
+
+  function setBodyProtocol(root, name, value) {
+    const element = root.querySelector(`[data-body-protocol="${name}"]`);
+    if (element) element.textContent = value;
+  }
+
+  function renderBodyProtocol(payload) {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+    const frames = Array.isArray(payload.frame_history) ? payload.frame_history.slice(0, 8) : [];
+    const latest = payload.latest_frame || frames[0];
+    setBodyProtocol(root, "frame_count", Number(payload.frame_count || 0).toLocaleString());
+    if (!latest) return;
+
+    setBodyProtocol(root, "can_id", latest.can_id || "—");
+    setBodyProtocol(root, "frame_name", latest.frame_name || "等待报文");
+    setBodyProtocol(root, "cycle", latest.cycle_ms ? `${latest.cycle_ms} ms` : "事件触发");
+    setBodyProtocol(root, "send_type", latest.send_type || "—");
+    setBodyProtocol(root, "latency", `${Math.round(Number(latest.latency_ms || 0))} ms`);
+    const frameList = root.querySelector("[data-body-frame-list]");
+    if (!frameList) return;
+    frameList.classList.remove("body-frame-empty");
+    frameList.classList.add("body-frame-list");
+    frameList.innerHTML = frames.map((frame) => `
+      <div class="body-frame-row${frame.test ? " test" : ""}${frame.valid === false ? " invalid" : ""}">
+        <span><b>${escapeHtml(formatFrameTime(frame.vehicle_time_ms))}</b><small>SEQ ${Number(frame.sequence || 0)}</small></span>
+        <span><b>${escapeHtml(frame.can_id || "—")}</b><small>${escapeHtml(frame.frame_name || "—")}</small></span>
+        <code>${escapeHtml(frame.data_hex || "—")}</code>
+        <span><b>${escapeHtml(bodySignalText(frame.signal_changes))}</b></span>
+        <span><b class="body-latency">${Math.round(Number(frame.latency_ms || 0))} ms</b><small>${frame.valid === false ? "无效报文" : frame.test ? "演示报文" : "真实报文"}</small></span>
+      </div>`).join("");
+  }
+
+  function updateDomains(domains) {
+    let activeCount = 1;
+    Object.keys(DOMAIN_CONFIG).forEach((key) => {
+      const payload = domains[key] || {};
+      const bodyStatus = key === "body" ? bodyStatusDataSource.ingest(payload) : null;
+      if (key === "body") {
+        renderBodyProtocol(payload);
+        renderBodyCloudStatus(payload);
+        renderBodyTransmissionControl(payload);
+      }
+      const active = bodyStatus
+        ? bodyStatus.connected
+        : payload.status === "active" || payload.status === "online";
+      if (active) activeCount += 1;
+      document.querySelectorAll(`[data-domain-indicator="${key}"]`).forEach((element) => element.classList.toggle("online", active));
+      document.querySelectorAll(`[data-domain-label="${key}"]`).forEach((element) => { element.textContent = active ? "已接入" : "待接入"; });
+      document.querySelectorAll(`[data-domain-state="${key}"]`).forEach((element) => {
+        element.textContent = key === "body" ? active ? "设备已接入" : "设备未接入" : active ? "ONLINE" : "OFFLINE";
+        element.classList.toggle("online", active);
+      });
+      document.querySelectorAll(`[data-domain-chip="${key}"]`).forEach((element) => { element.textContent = active ? "实时数据已接入" : "数据接口待接入"; element.classList.toggle("active", active); });
+      if (key !== "body") {
+        for (const [, field, fallback] of DOMAIN_CONFIG[key].fields) {
+          const element = document.querySelector(`[data-domain-field="${key}.${field}"]`);
+          if (element) element.textContent = payload[field] ?? fallback;
+        }
+      }
+    });
+    $("activeDomainCount").textContent = activeCount;
+  }
+
+  function updateBluetooth(bluetooth) {
+    const latest = bluetooth.latest;
+    const online = bluetooth.status === "online" && latest;
+    const status = $("bluetoothStatus");
+    if (!status) return;
+    updateBluetoothControl(bluetooth.control || {});
+    status.classList.toggle("online", Boolean(online));
+    status.classList.toggle("offline", !online);
+    status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
+    $("bluetoothPacketCount").textContent = Number(bluetooth.packet_count || 0).toLocaleString();
+    const domainPacketTotal = $("bluetoothDomainPacketTotal");
+    if (domainPacketTotal) domainPacketTotal.textContent = Number(bluetooth.packet_count || 0).toLocaleString();
+    updateBluetoothAbnormal(bluetooth);
+    updateWirelessTotal(bluetooth, state.latestMetrics.wifi || {});
+    if (!latest) {
+      $("bluetoothText").textContent = "尚未收到蓝牙数据"; $("bluetoothHex").textContent = "—"; $("bluetoothRssi").textContent = "—"; $("bluetoothTime").textContent = "—"; $("bluetoothLatency").textContent = "待接入";
+      $("bluetoothHistory").innerHTML = '<div class="history-empty">等待蓝牙模块发送数据…</div>'; return;
+    }
+    $("bluetoothText").textContent = latest.text || "（空报文）";
+    $("bluetoothHex").textContent = latest.hex || "—";
+    $("bluetoothRssi").textContent = latest.rssi == null ? "—" : `${latest.rssi} dBm`;
+    $("bluetoothTime").textContent = formatFrameTime(latest.received_at_ms);
+    $("bluetoothLatency").textContent = "待接入";
+    $("bluetoothHistory").innerHTML = renderHistory(bluetooth.history, "BLE-UDP", "等待蓝牙模块发送数据…");
+  }
+
+  function updateBluetoothControl(_control) {
+    const label = $("bluetoothControlStatus");
+    const onButton = $("bluetoothOnButton");
+    const offButton = $("bluetoothOffButton");
+    if (!label || !onButton || !offButton) return;
+    label.className = "offline";
+    label.textContent = "启停功能待接入";
+    label.title = "等待 Jetson、K3、nRF52840 与 BLE 的完整控制闭环";
+    onButton.classList.remove("active");
+    offButton.classList.remove("active");
+    onButton.disabled = true;
+    offButton.disabled = true;
+  }
+
+  function updateBluetoothAbnormal(bluetooth) {
+    const panel = $("bluetoothAbnormalPanel");
+    const history = $("bluetoothAbnormalHistory");
+    if (!panel || !history) return;
+    const records = Array.isArray(bluetooth.abnormal_history)
+      ? bluetooth.abnormal_history.slice(0, 8) : [];
+    const count = Number(bluetooth.abnormal_count || 0);
+    $("bluetoothAbnormalCount").textContent = count.toLocaleString();
+    panel.classList.toggle("active", count > 0);
+    history.innerHTML = records.map((record) => `
+      <div class="abnormal-row">
+        <div class="abnormal-meta"><b>#${escapeHtml(record.sequence)} · ${escapeHtml(formatFrameTime(record.received_at_ms))}</b>${escapeHtml(record.abnormal_reason || "设备上报异常")} · ${escapeHtml(record.source || "BLE-UDP")}</div>
+        <code title="${escapeHtml(record.text || "")}">${escapeHtml(record.text || "（空报文）")}</code>
+        <div class="abnormal-hex" title="${escapeHtml(record.hex || "")}"><span>HEX</span>${escapeHtml(record.hex || "—")}</div>
+      </div>`).join("") || '<div class="abnormal-empty">尚未检测到异常报文</div>';
+  }
+
+  function updateWifi(wifi) {
+    wifi = wifiDisplaySnapshot(wifi || {});
+    const latest = wifi.latest;
+    const online = wifi.status === "online" && latest;
+    const status = $("wifiStatus");
+    status.classList.toggle("online", Boolean(online));
+    status.classList.toggle("offline", !online);
+    status.querySelector("span").textContent = online ? "数据在线" : "等待数据";
+    $("wifiPacketCount").textContent = Number(wifi.packet_count || 0).toLocaleString();
+    updateWifiIds(wifi.ids || {});
+    updateChargingSimulation(wifi);
+    if (!latest) {
+      $("wifiText").textContent = "尚未收到 WiFi 数据"; $("wifiHex").textContent = "—"; $("wifiSeq").textContent = "—"; $("wifiState").textContent = "—"; $("wifiTime").textContent = "—"; $("wifiLatency").textContent = "—";
+      $("wifiHistory").innerHTML = '<div class="history-empty">等待 WiFi 充电报文…</div>'; return;
+    }
+    const charge = parseChargingPacket(latest.text || "");
+    $("wifiText").textContent = latest.text || "（空报文）";
+    $("wifiHex").textContent = latest.hex || "—";
+    $("wifiSeq").textContent = charge.sequence === null ? "—" : String(charge.sequence).padStart(4, "0");
+    $("wifiState").textContent = charge.state || "—";
+    $("wifiTime").textContent = formatFrameTime(latest.received_at_ms);
+    $("wifiLatency").textContent = formatEstimatedLatency(latest.e2e_latency_ms);
+    $("wifiHistory").innerHTML = renderHistory(wifi.history, "WIFI-UDP", "等待 WiFi 充电报文…");
+  }
+
+  function wifiDisplaySnapshot(wifi) {
+    if (!state.wifiClearBeforeMs) return wifi;
+    const isNew = (record) => Number(record && record.received_at_ms || 0) > state.wifiClearBeforeMs;
+    const history = (wifi.history || []).filter(isNew);
+    const latest = isNew(wifi.latest) ? wifi.latest : null;
+    const rawIds = wifi.ids || {};
+    const latestAlert = rawIds.latest_alert && Number(rawIds.latest_alert.detected_at_ms || 0) > state.wifiClearBeforeMs
+      ? rawIds.latest_alert : null;
+    return {
+      ...wifi,
+      status: latest ? wifi.status : "offline",
+      packet_count: Math.max(0, Number(wifi.packet_count || 0) - state.wifiClearBaseCount),
+      latest,
+      history,
+      ids: {
+        ...rawIds,
+        status: latestAlert ? "alert" : "normal",
+        alert_count: Math.max(0, Number(rawIds.alert_count || 0) - state.wifiClearBaseAlertCount),
+        latest_alert: latestAlert,
+      },
+    };
+  }
+
+  function updateWifiIds(ids) {
+    const container = $("wifiIdsAlert");
+    if (!container) return;
+    const alert = ids && ids.latest_alert;
+    container.classList.toggle("idle", !alert);
+    const icon = $("wifiIdsAlertIcon");
+    if (!alert) {
+      icon.textContent = "✓";
+      $("wifiIdsAlertTitle").textContent = "当前未发现 SOC 突变";
+      $("wifiIdsAlertHint").textContent = "持续对比每条充电报文与可信 SOC 变化趋势。";
+      $("wifiIdsSequence").textContent = "----";
+      $("wifiIdsBaseline").textContent = "--%";
+      $("wifiIdsObserved").textContent = "--%";
+      $("wifiIdsDelta").textContent = "--%";
+      $("wifiIdsTime").textContent = "--:--:--";
+      $("wifiIdsCount").textContent = String(Number(ids.alert_count || 0));
+      return;
+    }
+    icon.textContent = "!";
+    const delta = Number(alert.delta_soc);
+    $("wifiIdsAlertTitle").textContent = alert.title || "SOC 数据突变攻击";
+    $("wifiIdsAlertHint").textContent = "检测到充电状态数据与可信变化趋势不一致，原始报文已保留。";
+    $("wifiIdsSequence").textContent = String(Number(alert.sequence || 0)).padStart(4, "0");
+    $("wifiIdsBaseline").textContent = `${Number(alert.baseline_soc).toFixed(1)}%`;
+    $("wifiIdsObserved").textContent = `${Number(alert.observed_soc).toFixed(1)}%`;
+    $("wifiIdsDelta").textContent = `${delta >= 0 ? "+" : ""}${delta.toFixed(1)}%`;
+    $("wifiIdsTime").textContent = formatFrameTime(alert.detected_at_ms);
+    $("wifiIdsCount").textContent = String(Number(ids.alert_count || 0));
+  }
+
+  function parseChargingPacket(text) {
+    const source = String(text || "");
+    const socMatch = source.match(/(?:^|,)SOC=([0-9]+(?:\.[0-9]+)?)(?:,|$)/i);
+    const sequenceMatch = source.match(/(?:^|,)SEQ=(\d+)(?:,|$)/i);
+    const stateMatch = source.match(/(?:^|,)STATE=([A-Z_]+)(?:,|$)/i);
+    return {
+      soc: socMatch ? Math.max(0, Math.min(100, Number(socMatch[1]))) : null,
+      sequence: sequenceMatch ? Number(sequenceMatch[1]) : null,
+      state: stateMatch ? stateMatch[1].toUpperCase() : "",
+    };
+  }
+
+  function updateChargingSimulation(wifi) {
+    const latest = wifi.latest;
+    const charge = latest ? parseChargingPacket(latest.text || "") : { soc: null, sequence: null, state: "" };
+    const hasSoc = Number.isFinite(charge.soc);
+    const stateText = charge.state === "FULL" ? "充电完成" : charge.state === "CHARGING" ? "充电中" : latest ? "报文待识别" : "等待启动";
+    const socText = hasSoc ? `${charge.soc.toFixed(1)}%` : "--%";
+    const progress = $("chargeProgress");
+    progress.style.width = hasSoc ? `${charge.soc}%` : "0%";
+    progress.parentElement.setAttribute("aria-valuenow", hasSoc ? String(charge.soc) : "0");
+    $("chargeSocValue").textContent = socText;
+    $("chargeSocStat").innerHTML = hasSoc ? `${charge.soc.toFixed(1)}<small>%</small>` : "--<small>%</small>";
+    $("chargeStateStat").textContent = stateText;
+    $("chargeSeqStat").textContent = charge.sequence === null ? "--" : String(charge.sequence).padStart(4, "0");
+    $("chargeStateLabel").textContent = charge.state ? `${stateText} · ${charge.state}` : "等待合法 START 报文";
+    $("chargeHeaderState").textContent = stateText;
+    $("chargeUpdateTime").textContent = latest ? formatFrameTime(latest.received_at_ms) : "--:--:--";
+    $("chargeRing").style.setProperty("--soc", hasSoc ? String(charge.soc) : "0");
+    $("chargeRingValue").textContent = hasSoc ? charge.soc.toFixed(1) + "%" : "--";
+    const chargePile = $("chargePile");
+    if (chargePile) {
+      chargePile.classList.toggle("charging", charge.state === "CHARGING");
+      chargePile.classList.toggle("full", charge.state === "FULL");
+    }
+    const latency = latest && latest.e2e_latency_ms !== null && latest.e2e_latency_ms !== undefined && Number.isFinite(Number(latest.e2e_latency_ms)) ? Number(latest.e2e_latency_ms) : null;
+    $("chargeLatencyStat").innerHTML = latency === null ? "--<small>ms</small>" : `${Math.abs(latency).toFixed(0)}<small>ms</small>`;
+    $("chargeLatencyHint").textContent = latency === null ? "等待带 TS 的报文" : latency < 0 ? "时钟偏差：A/B 未校时" : "含 A/B 系统时钟偏差";
+    $("chargeLatencyStat").closest("article").classList.toggle("clock-skew", latency !== null && latency < 0);
+  }
+
+  function formatEstimatedLatency(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    const latency = Number(value);
+    if (!Number.isFinite(latency)) return "—";
+    return latency < 0 ? `时钟偏差 ${latency.toFixed(0)} ms` : `${latency.toFixed(0)} ms（估算）`;
+  }
+
+  function updateWirelessTotal(bluetooth, wifi) {
+    const total = $("wirelessPacketTotal");
+    if (total) total.textContent = (Number(bluetooth.packet_count || 0) + Number(wifi.packet_count || 0)).toLocaleString();
+  }
+
+  function renderHistory(history, source, emptyText) {
+    const records = Array.isArray(history) ? history.slice(0, 8) : [];
+    return records.map((record) => {
+      const anomaly = record.ids_verdict === "anomaly";
+      return `
+      <div class="history-row ${record.test ? "test" : ""} ${anomaly ? "anomaly" : ""}">
+        <span>#${escapeHtml(record.sequence)}</span><span>${escapeHtml(formatFrameTime(record.received_at_ms))}</span>
+        <span class="history-source">${escapeHtml(record.source || source)}</span>
+        <code title="${escapeHtml(record.hex || "")}">${anomaly ? '<b class="history-alert-badge">异常</b>' : ""}${escapeHtml(record.text || "（空报文）")}</code>
+        <span class="history-size">${escapeHtml(record.byte_count || 0)} B</span>
+      </div>`;
+    }).join("") || `<div class="history-empty">${emptyText}</div>`;
+  }
+
+  function updateLatencyState(latency) {
+    const element = $("latencyState");
+    element.className = latency < 15000 ? "good" : "warn";
+    element.textContent = latency < 15000 ? "连续播放稳定" : "质量优先缓冲中";
+  }
+
+  function setConnection(online, label) {
+    $("connectionPill").classList.toggle("online", online);
+    $("connectionPill").classList.toggle("offline", !online);
+    $("connectionText").textContent = label;
+  }
+
+  function updateFpsBars(fps) {
+    const values = Array.from({ length: 30 }, (_, index) => Math.max(12, Math.min(100, (fps / 30) * 75 + Math.sin(index * .9 + Date.now() / 500) * 12)));
+    $("fpsBars").innerHTML = values.map((height) => `<i style="height:${height.toFixed(0)}%"></i>`).join("");
+  }
+
+  function resizeChart() {
+    const rect = chart.getBoundingClientRect();
+    const ratio = Math.min(devicePixelRatio || 1, 2);
+    chart.width = Math.max(1, Math.round(rect.width * ratio));
+    chart.height = Math.max(1, Math.round(rect.height * ratio));
+    drawChart();
+  }
+
+  function drawChart() {
+    const width = chart.width; const height = chart.height;
+    if (!width || !height) return;
+    chartContext.clearRect(0, 0, width, height);
+    chartContext.strokeStyle = "rgba(111, 171, 219, .09)"; chartContext.lineWidth = 1;
+    for (let i = 1; i < 5; i += 1) { const y = (height / 5) * i; chartContext.beginPath(); chartContext.moveTo(0, y); chartContext.lineTo(width, y); chartContext.stroke(); }
+    drawSeries(state.latencyHistory, 20000, "#20d6e7", width, height);
+    drawSeries(state.rateHistory, Math.max(20, ...state.rateHistory), "#f2b84b", width, height);
+  }
+
+  function drawSeries(values, max, color, width, height) {
+    if (values.length < 2) return;
+    chartContext.beginPath();
+    values.forEach((value, index) => { const x = (index / 39) * width; const y = height - Math.min(1, value / Math.max(1, max)) * height * .82 - height * .08; if (index === 0) chartContext.moveTo(x, y); else chartContext.lineTo(x, y); });
+    chartContext.strokeStyle = color; chartContext.lineWidth = Math.max(1.3, devicePixelRatio || 1); chartContext.shadowColor = color; chartContext.shadowBlur = 6; chartContext.stroke(); chartContext.shadowBlur = 0;
+  }
+
+  function updateClock() {
+    const now = new Date();
+    $("clock").textContent = now.toLocaleTimeString("zh-CN", { hour12: false });
+    $("date").textContent = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, "0")}/${String(now.getDate()).padStart(2, "0")} · CST`;
+  }
+
+  function formatFrameTime(epoch) {
+    if (!epoch) return "—";
+    const date = new Date(epoch);
+    return `${date.toLocaleTimeString("zh-CN", { hour12: false })}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+  }
+
+  function toast(message) {
+    const element = $("toast"); element.textContent = message; element.classList.add("show");
+    setTimeout(() => element.classList.remove("show"), 1800);
+  }
+
+  $("snapshotButton").addEventListener("click", () => {
+    if (!state.lastFrameAt) { toast("当前还没有可保存的画面"); return; }
+    if (state.h264Active && video.videoWidth) {
+      canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+    }
+    const link = document.createElement("a"); link.download = `${state.vehicleId}-${Date.now()}.jpg`; link.href = canvas.toDataURL("image/jpeg", .94); link.click(); toast("当前画面已保存");
+  });
+  $("fullscreenButton").addEventListener("click", () => { const target = $("videoStage"); if (document.fullscreenElement) document.exitFullscreen(); else target.requestFullscreen().catch(() => toast("浏览器未允许全屏显示")); });
+  $("vehicleSelect").addEventListener("change", (event) => {
+    state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
+    state.wifiClearBeforeMs = 0; state.wifiClearBaseCount = 0; state.wifiClearBaseAlertCount = 0;
+    resetNavigationView();
+    bodyStatusDataSource.reset();
+    history.replaceState(null, "", `${location.pathname}?vehicle=${encodeURIComponent(state.vehicleId)}#${state.currentView}`);
+    renderDomainPages(); setupDomainOpenButtons(); setupBodyDemo(); setupBodyTransmissionControls(); connect();
+  });
+
+  function setupDomainOpenButtons() {
+    document.querySelectorAll(".domain-page [data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
+  }
+
+  function setupBodyDemo() {
+    document.querySelectorAll("[data-body-action]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const action = button.dataset.bodyAction;
+        button.disabled = true;
+        button.classList.add("loading");
+        try {
+          const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/test`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action }),
+          });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          state.latestMetrics.domains = { ...(state.latestMetrics.domains || {}), body: data.body };
+          updateDomains(state.latestMetrics.domains);
+          toast(`${data.label}状态已切换，CAN 报文已上传云端`);
+        } catch (_) {
+          toast("车身报文发送失败，请检查云端服务");
+        } finally {
+          button.disabled = false;
+          button.classList.remove("loading");
+        }
+      });
+    });
+  }
+
+  function renderBodyTransmissionControl(body) {
+    const control = body?.transmission_control || {};
+    const desiredState = control.desired_state
+      || (body?.transmission_enabled === false ? "stopped" : "running");
+    const pending = control.status === "pending";
+    const root = document.querySelector('[data-domain-page="body"]');
+    const status = document.querySelector("[data-body-transmission-state]");
+    const startButton = document.querySelector('[data-body-transmission="start"]');
+    const stopButton = document.querySelector('[data-body-transmission="stop"]');
+    if (status) {
+      status.textContent = pending
+        ? desiredState === "running" ? "启动命令待下发" : "停止命令待下发"
+        : desiredState === "running" ? "板端发送中" : "板端已停止";
+      status.classList.toggle("pending", pending);
+      status.classList.toggle("running", !pending && desiredState === "running");
+      status.classList.toggle("stopped", !pending && desiredState === "stopped");
+    }
+    if (startButton) startButton.classList.toggle("active", desiredState === "running");
+    if (stopButton) stopButton.classList.toggle("active", desiredState === "stopped");
+    if (root) root.classList.toggle("is-transmission-stopped", desiredState === "stopped");
+  }
+
+  function setupBodyTransmissionControls() {
+    document.querySelectorAll("[data-body-transmission]").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const action = button.dataset.bodyTransmission;
+        const buttons = document.querySelectorAll("[data-body-transmission]");
+        buttons.forEach((item) => { item.disabled = true; });
+        try {
+          const response = await fetch(
+            `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/transmission`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action }),
+            },
+          );
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const data = await response.json();
+          state.latestMetrics.domains = {
+            ...(state.latestMetrics.domains || {}),
+            body: data.body,
+          };
+          updateDomains(state.latestMetrics.domains);
+          toast(action === "start" ? "启动命令已提交，等待板端执行" : "停止命令已提交，等待板端执行");
+        } catch (_) {
+          toast("板端发送控制失败，请检查云端与串口转发程序");
+        } finally {
+          buttons.forEach((item) => { item.disabled = false; });
+        }
+      });
+    });
+  }
+
+  async function createTestData(kind, abnormal = false) {
+    const button = abnormal ? $("bluetoothAnomalyTestButton") : $(`${kind}TestButton`);
+    if (!button) return;
+    const originalLabel = button.textContent;
+    button.disabled = true; button.textContent = "生成中…";
+    try {
+      const suffix = abnormal ? "?abnormal=true" : "";
+      const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/${kind}/test${suffix}`, { method: "POST" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json(); const record = data[kind]; const current = state.latestMetrics[kind] || {};
+      const isBluetoothAbnormal = kind === "bluetooth" && record.abnormal;
+      const next = {
+        ...current,
+        status: "online",
+        packet_count: record.sequence,
+        latest: isBluetoothAbnormal ? current.latest : record,
+        history: isBluetoothAbnormal
+          ? (current.history || [])
+          : [record, ...(current.history || []).filter((item) => item.sequence !== record.sequence)],
+      };
+      if (isBluetoothAbnormal && !record.abnormal_duplicate) {
+        next.abnormal_count = Number(current.abnormal_count || 0) + 1;
+        next.latest_abnormal = record;
+        next.abnormal_history = [record, ...(current.abnormal_history || []).filter((item) => item.sequence !== record.sequence)];
+      }
+      state.latestMetrics[kind] = next;
+      if (kind === "bluetooth") updateBluetooth(next); else updateWifi(next);
+      toast(abnormal ? "已生成一条蓝牙异常测试报文" : `已生成一条随机${kind === "bluetooth" ? "蓝牙" : " WiFi"}测试数据`);
+    } catch (_) { toast("测试数据发送失败，请检查云端服务"); }
+    finally { button.disabled = false; button.textContent = originalLabel; }
+  }
+
+  const bluetoothTestButton = $("bluetoothTestButton");
+  const bluetoothAnomalyTestButton = $("bluetoothAnomalyTestButton");
+  const wifiTestButton = $("wifiTestButton");
+  if (bluetoothTestButton) bluetoothTestButton.addEventListener("click", () => createTestData("bluetooth"));
+  if (bluetoothAnomalyTestButton) bluetoothAnomalyTestButton.addEventListener("click", () => createTestData("bluetooth", true));
+  if (wifiTestButton) wifiTestButton.addEventListener("click", () => createTestData("wifi"));
+
+  const wifiClearButton = $("wifiClearButton");
+  if (wifiClearButton) wifiClearButton.addEventListener("click", async () => {
+    const wifi = state.latestMetrics.wifi || {};
+    state.wifiClearBeforeMs = Date.now();
+    state.wifiClearBaseCount = Number(wifi.packet_count || 0);
+    state.wifiClearBaseAlertCount = Number((wifi.ids || {}).alert_count || 0);
+    updateWifi(wifi);
+    toast("页面 WiFi 数据已清零，设备与后端记录未改动");
+  });
+
+  async function loadVehicles() {
+    try {
+      const response = await fetch("/api/vehicles"); const data = await response.json(); const select = $("vehicleSelect");
+      select.innerHTML = data.vehicles.map((vehicle) => `<option value="${escapeHtml(vehicle.vehicle_id)}">${escapeHtml(vehicle.vehicle_id)}</option>`).join("");
+      if (![...select.options].some((option) => option.value === state.vehicleId)) select.add(new Option(state.vehicleId, state.vehicleId));
+      select.value = state.vehicleId;
+    } catch (_) { /* Default vehicle remains usable. */ }
+  }
+
+  renderDomainPages();
+  bodyStatusDataSource.subscribe(renderBodyStatus);
+  initializeVehicleMap();
+  setupNavigation();
+  setupDomainOpenButtons();
+  setupBodyDemo();
+  setupBodyTransmissionControls();
+  setTimeout(() => {
+    if (!navigationIsFresh(state.latestMetrics.navigation)) startBrowserLocationFallback();
+  }, 1500);
+  window.addEventListener("resize", () => { if (state.currentView === "adas") resizeChart(); });
+  window.addEventListener("beforeunload", () => {
+    closeSockets();
+  });
+  setInterval(updateClock, 1000);
+  setInterval(() => { if (state.lastFrameAt && Date.now() - state.lastFrameAt > 4000) setConnection(false, "画面中断"); }, 1000);
+  updateClock();
+  $("overlayVehicle").textContent = state.vehicleId;
+  loadVehicles().finally(connect);
+})();
