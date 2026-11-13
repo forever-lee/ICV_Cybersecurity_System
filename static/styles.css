@@ -366,6 +366,25 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 .body-action-grid button > small { align-self: start; color: #668195; font-size: 8px; }
 .body-action-grid button.loading > i { animation: radar .8s linear infinite; }
 .body-intrusion-panel { margin-top: 14px; overflow: hidden; border-color: rgba(255,100,124,.22); }
+.body-canoe-tools-grid { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap:14px; margin-top:14px; align-items:stretch; }
+.body-canoe-tools-grid .body-intrusion-panel { margin-top:0; min-width:0; }
+.body-canoe-tools-grid .body-intrusion-content { grid-template-columns:1fr; }
+.body-canoe-tools-grid .body-intrusion-actions { grid-template-columns:1fr; }
+.body-blf-panel { min-width:0; overflow:hidden; }
+.body-blf-content { padding:15px 16px; }
+.body-blf-content p, .body-blf-status { color:#7893a5; font-size:10px; line-height:1.5; }
+.body-blf-controls { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:12px 0; }
+.body-blf-controls button, .body-blf-upload { padding:8px 10px; color:#b9e8eb; background:#10283a; border:1px solid rgba(32,214,231,.3); border-radius:6px; cursor:pointer; font-size:10px; }
+.body-blf-controls label { color:#91b5c4; font-size:10px; }
+.body-blf-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; margin-top:12px; }
+.body-blf-card { min-width:0; padding:10px; background:rgba(14,39,57,.6); border:1px solid rgba(111,171,219,.18); border-radius:7px; }
+.body-blf-card strong { color:#46dbe5; font-size:15px; }
+.body-blf-card small { float:right; color:#6f9aa9; font-size:9px; }
+.body-blf-card > div { display:flex; justify-content:space-between; gap:8px; margin-top:8px; font-size:10px; }
+.body-blf-card span { color:#718fa2; }.body-blf-card b,.body-blf-card code { color:#c4e4e7; font-weight:500; }
+.body-blf-card .body-blf-data { display:block; }.body-blf-data code { display:block; margin-top:5px; overflow-wrap:anywhere; font:9px Consolas,monospace; }
+@media(max-width:1100px) { .body-canoe-tools-grid { grid-template-columns:1fr; } }
+@media(max-width:520px) { .body-blf-cards { grid-template-columns:1fr; } }
 .body-intrusion-panel .tag.danger { color: #ff8da0; border-color: rgba(255,100,124,.32); background: rgba(255,100,124,.08); }
 .body-intrusion-content { display: grid; grid-template-columns: minmax(210px,.8fr) minmax(480px,1.6fr); gap: 14px 22px; align-items: center; padding: 15px 16px 17px; }
 .body-intrusion-copy b, .body-intrusion-copy small { display: block; }

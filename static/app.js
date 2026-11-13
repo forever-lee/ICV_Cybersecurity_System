@@ -189,6 +189,7 @@
         </article>
       </div>
 
+      <div class="body-canoe-tools-grid">
       <article class="panel body-intrusion-panel">
         <div class="panel-title">
           <div><p class="eyebrow">CANOE TAMPER ATTACK</p><h2>CANoe 报文篡改攻击</h2></div>
@@ -197,7 +198,6 @@
         <div class="body-intrusion-content">
           <div class="body-intrusion-copy">
             <b>CAN相关攻击类型</b>
-            <small>CAN与UDS测试统一归入CAN入侵演示；只有 K3、Jetson 真实回传后才判定检测成功。</small>
           </div>
           <div class="body-intrusion-actions">
             <label class="body-intrusion-type-picker">
@@ -225,6 +225,19 @@
           </div>
         </div>
       </article>
+      <article class="panel body-blf-panel">
+        <div class="panel-title"><div><p class="eyebrow">CAN FRAME INSPECTOR</p><h2>实车报文解析</h2></div></div>
+        <div class="body-blf-content">
+          <div class="body-blf-controls">
+            <label class="body-blf-upload">上传 BLF<input type="file" accept=".blf" data-body-blf-file hidden></label>
+            <button type="button" data-body-vector-start>开始实时监听</button>
+            <button type="button" data-body-vector-stop>停止</button>
+          </div>
+          <div class="body-blf-status" data-body-blf-status>请选择 BLF 文件，或连接 Vector 接口开始监听</div>
+          <div class="body-blf-cards" data-body-blf-cards></div>
+        </div>
+      </article>
+      </div>
 
       <div class="body-cloud-grid">
         <article class="panel body-diagnostic-panel">
@@ -2399,13 +2412,17 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ action }),
           });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          if (!response.ok) {
+            const error = await response.json().catch(() => ({}));
+            throw new Error(error.detail || `HTTP ${response.status}`);
+          }
           const data = await response.json();
           accepted = true;
-          renderBodyStatus(data.body || {});
-          toast(`${data.label}命令已提交，等待K3真实CAN回读`);
-        } catch (_) {
-          toast("车身报文发送失败，请检查云端服务");
+          renderBodyProtocol(data.body || {});
+        } catch (error) {
+          const root = button.closest('[data-domain-page="body"]');
+          const eventState = root?.querySelector('[data-body-event-state]');
+          if (eventState) eventState.textContent = `事件未提交：${error.message || "连接云端失败"}`;
         } finally {
           if (!accepted) button.disabled = false;
           button.classList.remove("loading");
@@ -2448,6 +2465,72 @@
         }
       });
     });
+  }
+
+  function setupBodyFrameInspector() {
+    const root = document.querySelector('[data-domain-page="body"]');
+    if (!root) return;
+    const cards = root.querySelector('[data-body-blf-cards]');
+    const status = root.querySelector('[data-body-blf-status]');
+    const file = root.querySelector('[data-body-blf-file]');
+    const url = () => `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/vector-monitor`;
+    let mode = "idle";
+    const display = (result, source) => {
+      cards.innerHTML = (result.frames || []).map((frame) => `<div class="body-blf-card">
+        <strong>${escapeHtml(frame.id)}</strong><small>${escapeHtml(source)}</small>
+        <div><span>报文数量</span><b>${Number(frame.count || 0).toLocaleString()}</b></div>
+        <div><span>周期</span><b>${frame.cycle_ms == null ? "—" : `${escapeHtml(frame.cycle_ms)} ms`}</b></div>
+        <div><span>DLC</span><b>${frame.dlc ?? "—"}</b></div>
+        <div><span>CAN 类型</span><b>${escapeHtml(frame.can_type || "—")}</b></div>
+        <div><span>方向</span><b>${escapeHtml(frame.direction || "—")}</b></div>
+        <div class="body-blf-data"><span>最新数据</span><code>${escapeHtml(frame.data || "—")}</code></div>
+      </div>`).join("");
+    };
+    const showError = async (response) => {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${response.status}`);
+    };
+    file.addEventListener("change", async () => {
+      const selected = file.files?.[0];
+      if (!selected) return;
+      if (selected.size > 64 * 1024 * 1024) { status.textContent = "文件超过 64 MB"; return; }
+      status.textContent = `正在解析 ${selected.name}…`;
+      try {
+        const response = await fetch(`/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/blf`, {
+          method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: selected,
+        });
+        if (!response.ok) await showError(response);
+        const result = await response.json();
+        mode = "file";
+        display(result, "BLF 文件");
+        status.textContent = `${selected.name} · 共 ${Number(result.total_frames).toLocaleString()} 帧`;
+      } catch (error) { status.textContent = `解析失败：${error.message}`; }
+      file.value = "";
+    });
+    root.querySelector('[data-body-vector-start]').addEventListener("click", async () => {
+      try {
+        const response = await fetch(url(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "start" }) });
+        if (!response.ok) await showError(response);
+        mode = "live";
+        status.textContent = "正在连接 Vector 接口…";
+      } catch (error) { status.textContent = `监听失败：${error.message}`; }
+    });
+    root.querySelector('[data-body-vector-stop]').addEventListener("click", async () => {
+      try { await fetch(url(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) }); }
+      finally { mode = "idle"; status.textContent = "实时监听已停止"; }
+    });
+    window.setInterval(async () => {
+      if (mode !== "live") return;
+      try {
+        const response = await fetch(url());
+        if (!response.ok) return;
+        const result = await response.json();
+        display(result, "Vector 实时");
+        status.textContent = result.error ? `监听失败：${result.error}` : result.running ? "实时监听中" : "实时监听已停止";
+        if (!result.running) mode = "idle";
+      } catch (_) { status.textContent = "实时状态获取失败"; }
+    }, 1000);
+    display({ frames: [{ id: "0x290" }, { id: "0x1D1" }] }, "等待数据");
   }
 
   function renderBodyTransmissionControl(body) {
@@ -2588,6 +2671,7 @@
   setupDomainOpenButtons();
   setupBodyDemo();
   setupBodyCanoeAttack();
+  setupBodyFrameInspector();
   setupBodyTransmissionControls();
   setTimeout(() => {
     if (!MAP_DEMO_MODE
