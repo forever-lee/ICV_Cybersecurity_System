@@ -132,6 +132,29 @@ def test_k3_ack_drives_event_overview_when_udp_raw_slot_is_only_0x180(monkeypatc
     assert snapshot["latest_frame"]["can_id"] == "0x180"
 
 
+def test_pending_door_and_lock_show_event_group_without_claiming_success(monkeypatch):
+    clock = {"now": 700000}
+    monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
+    state = make_real_state(clock["now"])
+    state.body_frame_history.appendleft({
+        "sequence": 99,
+        "can_id": "0x180",
+        "frame_name": "BodyStatus",
+        "cycle_ms": 100,
+        "simulation_step": 5,
+        "cloud_receive_time_ms": clock["now"],
+    })
+    for action, expected_id in (("door_fl", "0x351"), ("central_lock", "0x352")):
+        server.queue_body_event_command(state, action)
+        snapshot = state.body_snapshot()
+        assert snapshot["latest_frame"]["can_id"] == expected_id
+        assert snapshot["latest_frame"]["event_pending"] is True
+        assert snapshot["latest_frame"]["send_type"] == "Web事件待K3确认"
+        assert snapshot["frame_history"][0]["can_id"] == "0x180"
+        state.body_event_command["status"] = "failed"
+        assert state.body_snapshot()["latest_frame"]["can_id"] == "0x353"
+
+
 def test_periodic_overview_maps_k3_step_without_changing_raw_history(monkeypatch):
     clock = {"now": 600000}
     monkeypatch.setattr(server, "now_ms", lambda: clock["now"])

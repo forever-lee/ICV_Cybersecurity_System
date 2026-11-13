@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import io
 import json
 import logging
 import math
@@ -31,6 +32,7 @@ from stream_protocol import (
     unpack_frame,
 )
 from wifi_ids import detect_wifi_intrusion, parse_charging_packet
+from body_blf_monitor import MAX_UPLOAD_BYTES, summarize_blf, vector_monitor
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -417,11 +419,12 @@ class VehicleState:
                 ), None)
                 if event_frame:
                     latest_frame = event_frame
-                elif command_status == "succeeded" and latest_frame:
+                elif command_status in {"pending", "executing", "succeeded"} and latest_frame:
                     # Some K3 builds acknowledge the real CAN0 readback but
                     # only expose the periodic 0x180 frame in their UDP raw
                     # frame slot. Keep history truthful and create a separate
-                    # overview-only frame from that hardware acknowledgement.
+                    # overview-only frame. Pending frames are explicitly marked
+                    # as unconfirmed; they must not look like hardware success.
                     event_group = BODY_EVENT_GROUPS.get(str(command.get("action") or ""))
                     profile = BODY_SIGNAL_GROUPS.get(event_group or "")
                     if profile:
@@ -430,13 +433,23 @@ class VehicleState:
                             "can_id": profile["can_id"],
                             "frame_name": profile["frame_name"],
                             "cycle_ms": 0,
-                            "send_type": "Web事件触发/CAN回读",
-                            "event": str(command.get("label") or "车身事件"),
+                            "send_type": (
+                                "Web事件触发/CAN回读" if command_status == "succeeded"
+                                else "Web事件待K3确认"
+                            ),
+                            "event": "{}（{}）".format(
+                                command.get("label") or "车身事件",
+                                "已确认" if command_status == "succeeded" else "等待回读",
+                            ),
                             "data_hex": body_payload_bytes(
                                 body, int(latest_frame.get("sequence") or 0), event_group
                             ),
                             "overview_only": True,
-                            "overview_source": "K3真实事件确认",
+                            "overview_source": (
+                                "K3真实事件确认" if command_status == "succeeded"
+                                else "Web命令待确认"
+                            ),
+                            "event_pending": command_status != "succeeded",
                         })
         body["latest_frame"] = latest_frame
         visible_frames = frame_history[:8]
@@ -1231,6 +1244,48 @@ async def vehicle_metrics(vehicle_id: str):
 @app.get("/api/vehicles/{vehicle_id}/history")
 async def vehicle_history(vehicle_id: str):
     return {"vehicle_id": vehicle_id, "samples": list(registry.get(vehicle_id).history)}
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/blf")
+async def analyze_body_blf(vehicle_id: str, request: Request):
+    normalize_vehicle_id(vehicle_id)
+    if request.headers.get("content-type", "").split(";")[0] != "application/octet-stream":
+        raise HTTPException(status_code=415, detail="请上传 BLF 文件")
+    declared = request.headers.get("content-length")
+    if declared and int(declared) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="BLF 文件超过 64 MB")
+    data = await request.body()
+    if not data.startswith(b"LOGG"):
+        raise HTTPException(status_code=400, detail="不是有效的 BLF 文件")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="BLF 文件超过 64 MB")
+    try:
+        return summarize_blf(io.BytesIO(data))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="BLF 解析失败：{}".format(exc)) from exc
+
+
+@app.get("/api/vehicles/{vehicle_id}/body/vector-monitor")
+async def body_vector_monitor_state(vehicle_id: str):
+    normalize_vehicle_id(vehicle_id)
+    return vector_monitor.snapshot()
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/vector-monitor")
+async def body_vector_monitor_control(vehicle_id: str, request: Request):
+    normalize_vehicle_id(vehicle_id)
+    payload = await request.json()
+    if payload.get("action") == "stop":
+        return vector_monitor.stop()
+    if payload.get("action") != "start":
+        raise HTTPException(status_code=400, detail="未知的监听操作")
+    try:
+        channel = int(payload.get("channel", 0))
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=400, detail="无效的 Vector 通道")
+    if not 0 <= channel <= 31:
+        raise HTTPException(status_code=400, detail="Vector 通道须为 0 至 31")
+    return vector_monitor.start(channel)
 
 
 @app.get("/api/vehicles/{vehicle_id}/body/history")

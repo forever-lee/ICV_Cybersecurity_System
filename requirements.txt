@@ -1,3 +1,4 @@
 # Versions validated by the active TM cloud environment.
 fastapi==0.139.0
 uvicorn[standard]==0.51.0
+python-can>=4.4,<5
