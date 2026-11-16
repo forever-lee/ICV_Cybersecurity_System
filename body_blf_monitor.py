@@ -4,8 +4,52 @@ from collections import Counter, deque
 from statistics import median
 from threading import Event, Lock, Thread
 
-TARGET_IDS = (0x290, 0x1D1)
+TARGET_IDS = (0x1D1, 0x228)
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+# VCU-ESP sheet in 2028Pch05_整合通信矩阵(1).xlsx. Starts use Intel/LSB0
+# numbering; the workbook itself does not specify byte order explicitly.
+SIGNALS = {
+    0x1D1: [
+        ("MbRegenWhl", "制动能量回收轮端实际扭矩", 8, 16, 1, -32768, "Nm", None, None),
+        ("MbRegenMaxWhl", "制动能量回收轮端允许最大扭矩", 24, 16, 1, -32768, "Nm", None, None),
+        ("MbRegenWhlQlfr", "制动能量回收轮端实际扭矩有效状态", 38, 2, 1, 0, "", {0:"未初始化",1:"正常",2:"故障"}, None),
+        ("MbRegenMaxWhlQlfr", "制动能量回收轮端允许最大扭矩有效状态", 36, 2, 1, 0, "", {0:"未初始化",1:"正常",2:"故障"}, None),
+        ("VcuMotSts", "电机运行状态", 34, 2, 1, 0, "", {0:"停止",1:"保留",2:"运行",3:"无效"}, "0x00：未点火发送停止；0x02：点火成功发送运行"),
+        ("VcuAccrPedlVld", "加速踏板位置有效", 32, 1, 1, 0, "", {0:"有效",1:"无效"}, None),
+        ("VcuAccrPedl", "加速踏板位置", 40, 8, .392, 0, "%", None, None),
+        ("VcuBrkPedlSts", "制动踏板状态", 54, 2, 1, 0, "", {0:"未踩下",1:"已踩下",2:"保留",3:"错误"}, None),
+        ("Vcu1D1CycCntr", "本帧计数", 48, 4, 1, 0, "", None, None),
+        ("VcuCRCChk1D1", "校验", 56, 8, 1, 0, "", None, "CRC_8校验，多项式采用 X8+X4+X3+X2+1；这里只展示原值"),
+    ],
+    0x228: [
+        ("MbRegenTarWhl", "制动能量回收轮端目标扭矩", 8, 16, 1, -32768, "Nm", None, None),
+        ("ESPTqDecFastwhl", "ESP 减扭轮端扭矩", 25, 15, 1, -5400, "Nm", None, None),
+        ("MbRegenTarWhlQlfr", "制动能量回收轮端目标扭矩有效状态", 40, 2, 1, 0, "", {0:"未初始化",1:"正常",2:"故障"}, None),
+        ("ESPTqDecActv", "减扭生效标志", 55, 1, 1, 0, "", {0:"未生效",1:"已生效"}, None),
+        ("EPBi_RollingCounter_228", "本帧计数", 48, 4, 1, 0, "", None, None),
+        ("EPBi_CheckSum_228", "校验和", 56, 8, 1, 0, "", None, "表中规定为前 7 字节之和按位异或 0xFF；这里只展示原值"),
+    ],
+}
+
+
+def decode_signals(can_id, payload):
+    data = bytes(payload)
+    bits = int.from_bytes(data, "little")
+    result = []
+    for name, label, start, length, factor, offset, unit, meanings, note in SIGNALS[can_id]:
+        if len(data) * 8 < start + length:
+            result.append({"name": name, "label": label, "raw": "—", "value": "—",
+                           "unit": unit, "meaning": "矩阵位范围超出当前报文，无法解码",
+                           "note": "请核对 Excel 起始位和长度" if len(data) == 8 else "报文长度不足",
+                           "start_bit": start, "bit_length": length})
+            continue
+        raw = (bits >> start) & ((1 << length) - 1)
+        value = round(raw * factor + offset, 4)
+        result.append({"name": name, "label": label, "raw": "0x{:X}".format(raw),
+                       "value": value, "unit": unit, "meaning": (meanings or {}).get(raw, ""),
+                       "note": note or "", "start_bit": start, "bit_length": length})
+    return result
 
 
 class FrameSummary:
@@ -37,6 +81,7 @@ class FrameSummary:
         if len(self.payloads) > 32:
             self.payloads = Counter(dict(self.payloads.most_common(16)))
         self.latest_data = data
+        self.latest_payload = bytes(msg.data)
 
     def json(self, can_id):
         return {
@@ -49,6 +94,8 @@ class FrameSummary:
             "data": getattr(self, "latest_data", ""),
             "unique_data_count": len(self.payloads),
             "last_timestamp": self.last,
+            "nominal_cycle_ms": 10,
+            "signals": decode_signals(can_id, self.latest_payload) if self.last is not None else [],
         }
 
 

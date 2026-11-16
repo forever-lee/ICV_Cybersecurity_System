@@ -1676,6 +1676,13 @@
         <div><span>CAN 类型</span><b>${escapeHtml(frame.can_type || "—")}</b></div>
         <div><span>方向</span><b>${escapeHtml(frame.direction || "—")}</b></div>
         <div class="body-blf-data"><span>最新数据</span><code>${escapeHtml(frame.data || "—")}</code></div>
+        <div class="body-blf-signals">${(frame.signals || []).map((signal) => `<div class="body-blf-signal">
+          <b>${escapeHtml(signal.label)}</b><small>${escapeHtml(signal.name)}</small>
+          <span>原始值 ${escapeHtml(signal.raw)} · ${escapeHtml(signal.start_bit)} 位起 / ${escapeHtml(signal.bit_length)} 位</span>
+          <strong>${escapeHtml(signal.meaning || `${signal.value}${signal.unit ? ` ${signal.unit}` : ""}`)}</strong>
+          ${signal.meaning && signal.unit ? `<em>${escapeHtml(signal.value)} ${escapeHtml(signal.unit)}</em>` : ""}
+          ${signal.note ? `<p>${escapeHtml(signal.note)}</p>` : ""}
+        </div>`).join("")}</div>
       </div>`).join("");
     };
     const showError = async (response) => {
@@ -1717,12 +1724,12 @@
         const response = await fetch(url());
         if (!response.ok) return;
         const result = await response.json();
-        display(result, "Vector 实时");
+        display(result, "CANoe 同通道实时");
         status.textContent = result.error ? `监听失败：${result.error}` : result.running ? "实时监听中" : "实时监听已停止";
         if (!result.running) mode = "idle";
       } catch (_) { status.textContent = "实时状态获取失败"; }
     }, 1000);
-    display({ frames: [{ id: "0x290" }, { id: "0x1D1" }] }, "等待数据");
+    display({ frames: [{ id: "0x1D1" }, { id: "0x228" }] }, "等待数据");
   }
 
   function renderBodyTransmissionControl(body) {
