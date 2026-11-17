@@ -4,4 +4,5 @@ uvicorn[standard]==0.51.0
 numpy>=1.23,<3
 opencv-python>=4.8,<6
 python-can>=4.4,<5
+cantools>=40.0,<41.0
 bleak>=0.21,<4.0

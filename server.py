@@ -21,6 +21,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import quote, unquote
 
 import cv2
 import numpy as np
@@ -42,11 +43,26 @@ from wifi_ids import detect_wifi_intrusion, parse_charging_packet, detect_wifi_r
 from wifi_control import WifiControl
 from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack, parse_message_ack as parse_bluetooth_message_ack, MAX_MESSAGE_BYTES
 from body_blf_monitor import MAX_UPLOAD_BYTES, summarize_blf, vector_monitor
+from can_log_service import (
+    CanLogDependencyError,
+    CanLogError,
+    CanLogNotFoundError,
+    CanLogValidationError,
+    get_can_log_service,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
 REFERENCE_LIBRARY_DIR = (STATIC_DIR / "reference-library").resolve()
+COCKPIT_VIDEO_DIR = Path(
+    os.getenv("COCKPIT_VIDEO_DIR") or BASE_DIR.parent / "实车测试视频"
+).resolve()
+COCKPIT_EXPECTED_IMAGE_DIR = Path(
+    os.getenv("COCKPIT_EXPECTED_IMAGE_DIR") or BASE_DIR.parent / "测试expected图片"
+).resolve()
+COCKPIT_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".webm", ".mov"}
+COCKPIT_EXPECTED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 INGEST_TOKEN = os.getenv("VEHICLE_INGEST_TOKEN", "change-me-in-production")
 DASHBOARD_ACCESS_TOKEN = os.getenv("DASHBOARD_ACCESS_TOKEN", "")
 OFFLINE_AFTER_SECONDS = float(os.getenv("OFFLINE_AFTER_SECONDS", "4"))
@@ -98,6 +114,9 @@ CANOE_AGENT_LOG_PATH = Path(os.getenv(
 BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
+CAN_FLOW_MAX_REPLAY_FRAMES = max(
+    1, min(10000, int(os.getenv("CAN_FLOW_MAX_REPLAY_FRAMES", "6000")))
+)
 S32_COMPACT_TIME_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-_"
 S32_COMPACT_TIME_PATTERN = re.compile(r"^(S32K344_HELLO_\d{2})([0-9A-Za-z_-]{3})$")
 S32_SOURCE_TIME_PATTERN = re.compile(r"(?:^|;)TS=(\d{13})(?=;|$)")
@@ -125,6 +144,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 LOGGER = logging.getLogger("vehicle-cloud")
+CAN_LOG_SERVICE = get_can_log_service(BASE_DIR)
 
 
 def init_body_database():
@@ -891,13 +911,21 @@ def resolve_reference_image(reference_url):
     if not isinstance(reference_url, str):
         raise HTTPException(status_code=400, detail="expected_image must be a reference-library URL")
     clean_path = reference_url.split("?", 1)[0].replace("\\", "/")
-    prefix = "/static/reference-library/"
-    if not clean_path.startswith(prefix):
-        raise HTTPException(status_code=400, detail="expected_image must come from /static/reference-library/")
-    relative_path = clean_path[len(prefix):]
-    candidate = (REFERENCE_LIBRARY_DIR / relative_path).resolve()
+    roots = (
+        ("/static/reference-library/", REFERENCE_LIBRARY_DIR),
+        ("/api/cockpit/expected/", COCKPIT_EXPECTED_IMAGE_DIR),
+    )
+    match = next(((prefix, root) for prefix, root in roots if clean_path.startswith(prefix)), None)
+    if match is None:
+        raise HTTPException(
+            status_code=400,
+            detail="expected_image must come from the configured cockpit reference library",
+        )
+    prefix, root = match
+    relative_path = unquote(clean_path[len(prefix):])
+    candidate = (root / relative_path).resolve()
     try:
-        candidate.relative_to(REFERENCE_LIBRARY_DIR)
+        candidate.relative_to(root)
     except ValueError:
         raise HTTPException(status_code=400, detail="invalid expected_image path")
     if not candidate.is_file():
@@ -907,6 +935,20 @@ def resolve_reference_image(reference_url):
     if image is None:
         raise HTTPException(status_code=400, detail="expected image is not readable")
     return candidate, image
+
+
+def public_reference_image_url(path):
+    resolved = Path(path).resolve()
+    for prefix, root in (
+        ("/static/reference-library/", REFERENCE_LIBRARY_DIR),
+        ("/api/cockpit/expected/", COCKPIT_EXPECTED_IMAGE_DIR),
+    ):
+        try:
+            relative_path = resolved.relative_to(root)
+        except ValueError:
+            continue
+        return prefix + quote(relative_path.as_posix())
+    raise ValueError("reference image is outside configured libraries")
 
 
 def encode_comparison_preview(image):
@@ -1451,6 +1493,31 @@ registry = Registry()
 app = FastAPI(title="V-SHIELD Vehicle Cybersecurity Platform", version="2.0.0")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
+
+def _media_files(root, extensions):
+    if not root.is_dir():
+        return []
+    return sorted(
+        (
+            path for path in root.iterdir()
+            if path.is_file() and path.suffix.lower() in extensions
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+
+
+def _safe_media_file(root, file_name, extensions):
+    if not isinstance(file_name, str) or not file_name or Path(file_name).name != file_name:
+        raise HTTPException(status_code=400, detail="invalid media file name")
+    candidate = (root / file_name).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid media file path")
+    if candidate.suffix.lower() not in extensions or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="media file was not found")
+    return candidate
+
 # WebScan 独立部署，通过测试工具页面中的同源入口跳转到实际服务。
 WEBSCAN_PUBLIC_URL = os.getenv(
     "WEBSCAN_PUBLIC_URL", ""
@@ -1581,6 +1648,105 @@ async def cockpit_comparison_status():
     return comparison_runtime_snapshot()
 
 
+@app.get("/api/cockpit/videos")
+async def cockpit_video_catalog():
+    """List selectable real-car videos without exposing arbitrary files."""
+
+    videos = []
+    for path in _media_files(COCKPIT_VIDEO_DIR, COCKPIT_VIDEO_EXTENSIONS):
+        stat = path.stat()
+        videos.append({
+            "name": path.name,
+            "size_bytes": int(stat.st_size),
+            "modified_at_ms": int(stat.st_mtime * 1000),
+            "url": "/api/cockpit/videos/{}".format(quote(path.name)),
+        })
+    return {"videos": videos, "count": len(videos)}
+
+
+@app.get("/api/cockpit/videos/{file_name}")
+async def cockpit_video_file(file_name: str):
+    path = _safe_media_file(
+        COCKPIT_VIDEO_DIR, unquote(file_name), COCKPIT_VIDEO_EXTENSIONS
+    )
+    media_type = {
+        ".mp4": "video/mp4",
+        ".m4v": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=media_type)
+
+
+@app.get("/api/cockpit/expected/{file_name}")
+async def cockpit_expected_image(file_name: str):
+    path = _safe_media_file(
+        COCKPIT_EXPECTED_IMAGE_DIR,
+        unquote(file_name),
+        COCKPIT_EXPECTED_IMAGE_EXTENSIONS,
+    )
+    media_type = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(path), media_type=media_type)
+
+
+@app.get("/api/cockpit/can-flow/catalog")
+async def cockpit_can_flow_catalog():
+    """Discover BLF files and return cockpit function-level CAN mappings."""
+
+    try:
+        return await asyncio.to_thread(CAN_LOG_SERVICE.catalog)
+    except (CanLogDependencyError, CanLogError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        LOGGER.exception("cockpit_can_flow_catalog_failure")
+        raise HTTPException(status_code=500, detail="无法扫描实车 CAN 日志") from exc
+
+
+@app.get("/api/cockpit/can-flow/replay")
+async def cockpit_can_flow_replay(log_id: str, feature_id: str, limit: int = 4000):
+    """Return a bounded replay containing only frames related to one function."""
+
+    if limit > CAN_FLOW_MAX_REPLAY_FRAMES:
+        raise HTTPException(
+            status_code=400,
+            detail="limit 不能超过 {}".format(CAN_FLOW_MAX_REPLAY_FRAMES),
+        )
+    try:
+        replay = await asyncio.to_thread(
+            CAN_LOG_SERVICE.replay, log_id, feature_id, limit
+        )
+    except CanLogNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except CanLogValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except (CanLogDependencyError, CanLogError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        LOGGER.exception(
+            "cockpit_can_flow_replay_failure log_id=%s feature_id=%s",
+            log_id,
+            feature_id,
+        )
+        raise HTTPException(status_code=500, detail="无法生成 CAN 日志回放") from exc
+
+    frames = replay.get("frames") or []
+    replay["duration_ms"] = int(frames[-1].get("offset_ms", 0)) if frames else 0
+    replay["matched_frame_count"] = int(replay.get("matched_frames", 0))
+    replay["sampled_frame_count"] = int(replay.get("returned_frames", len(frames)))
+    replay["message_ids"] = sorted(
+        {frame.get("can_id") for frame in frames if frame.get("can_id")},
+        key=lambda value: int(value[2:], 16),
+    )
+    replay["message_count"] = len(replay["message_ids"])
+    return replay
+
+
 @app.get("/api/config/map")
 async def map_config():
     return {
@@ -1672,8 +1838,7 @@ async def compare_cockpit_images(vehicle_id: str, request: Request):
         "critical_failures": list(result.critical_failures),
         "annotated_actual": encode_comparison_preview(result.annotated),
         "expected": {
-            "src": "/static/reference-library/"
-            + expected_path.relative_to(REFERENCE_LIBRARY_DIR).as_posix(),
+            "src": public_reference_image_url(expected_path),
             "width": int(expected_image.shape[1]),
             "height": int(expected_image.shape[0]),
         },

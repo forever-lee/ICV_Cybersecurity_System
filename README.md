@@ -16,6 +16,18 @@ WiFi 暂停/恢复的本地测试与 Jetson 部署见 [WiFi 下行操作说明](
 - `requirements.txt`：云端 Python 依赖。
 - `.env.example`：云端环境变量示例。
 
+## 智能座舱实车一键测试
+
+智能座舱域提供三条 `0x330` 开启用例：解锁主动换气、解锁降窗通风和空调自干燥。选择用例并点击“开始测试”后，平台会同步从头启动实车 MP4 与对应功能的 BLF 回放，在动作完成帧自动采集画面，随后执行 Expected/Actual 与 CAN 信号联合判定，只显示 `PASS / FAIL`。
+
+默认从项目相邻目录读取 `实车测试视频`、`测试expected图片`、`实车log` 和 `实车DBC`。部署目录不同可在 `.env` 配置 `COCKPIT_VIDEO_DIR`、`COCKPIT_EXPECTED_IMAGE_DIR`、`CAN_LOG_DIR`、`CAN_DBC_PATH` 与 `CAN_MATRIX_PATH`。这些接口均为只读能力，不向车辆总线注入报文：
+
+```text
+GET /api/cockpit/videos
+GET /api/cockpit/can-flow/catalog
+GET /api/cockpit/can-flow/replay?log_id=<id>&feature_id=<feature>
+```
+
 ## 电脑 A：启动云端与 Web
 
 上传 Token、网页访问口令和公网地址已经在 `run_cloud.py` 的“可修改配置”区域中设置好，电脑 A 直接启动即可：
