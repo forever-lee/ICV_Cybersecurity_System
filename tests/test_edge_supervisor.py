@@ -25,6 +25,9 @@ def test_supervisor_uses_central_cloud_defaults(monkeypatch):
         assert component.environment["EDGE_SESSION_ID"]
         assert int(component.environment["EDGE_SESSION_STARTED_AT_MS"]) > 0
 
+    assert start_edge.DEFAULT_CLOUD_HTTP_URL == "https://7b58892c.r7.nas.cpolar.cn"
+    assert start_edge.DEFAULT_CLOUD_WS_URL == "wss://7b58892c.r7.nas.cpolar.cn"
+
 
 def test_supervisor_shares_explicit_edge_session_with_all_components(monkeypatch):
     components = start_edge.build_components("edge-session-test", 1234567890)
@@ -38,6 +41,58 @@ def test_supervisor_shares_explicit_edge_session_with_all_components(monkeypatch
         component.environment["EDGE_SESSION_STARTED_AT_MS"] == "1234567890"
         for component in components
     )
+
+
+def test_navigation_upload_is_independent_of_camera_components(monkeypatch):
+    monkeypatch.setenv("EDGE_VEHICLE_ID", "VHC-001")
+    monkeypatch.setenv("BODY_ENABLED", "0")
+    monkeypatch.setenv("WIFI_ENABLED", "0")
+    monkeypatch.setenv("BLUETOOTH_ENABLED", "0")
+    monkeypatch.setenv("GPS_ENABLED", "1")
+    monkeypatch.setenv("CAMERA_1_ENABLED", "0")
+    monkeypatch.setenv("CAMERA_2_ENABLED", "0")
+
+    components = start_edge.build_components(
+        "edge-session-test",
+        1234567890,
+        reachable_camera_indexes=set(),
+        edge_vehicle_id="VHC-001",
+    )
+
+    assert [component.name for component in components] == [
+        "gps",
+        "navigation_uploader",
+    ]
+    uploader = components[1]
+    assert uploader.environment["VEHICLE_ID"] == "VHC-001"
+    assert uploader.environment["VEHICLE_NAVIGATION_FILE"].endswith(
+        "navigation_live.json"
+    )
+    assert uploader.environment["EDGE_SESSION_ID"] == "edge-session-test"
+    assert uploader.environment["EDGE_SESSION_STARTED_AT_MS"] == "1234567890"
+
+
+def test_ip_navigation_fallback_starts_without_gps_process(monkeypatch):
+    for name in (
+        "BODY_ENABLED",
+        "WIFI_ENABLED",
+        "BLUETOOTH_ENABLED",
+        "GPS_ENABLED",
+        "CAMERA_1_ENABLED",
+        "CAMERA_2_ENABLED",
+    ):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setenv("NAVIGATION_IP_FALLBACK_ENABLED", "1")
+
+    components = start_edge.build_components(
+        "edge-session-test",
+        1234567890,
+        reachable_camera_indexes=set(),
+        edge_vehicle_id="VHC-001",
+    )
+
+    assert [component.name for component in components] == ["navigation_uploader"]
+    assert components[0].environment["NAVIGATION_IP_FALLBACK_ENABLED"] == "1"
 
 
 def test_supervisor_allows_ingest_token_override(monkeypatch):
@@ -157,7 +212,13 @@ def test_edge_vehicle_id_allows_explicit_fallback_without_camera(monkeypatch):
 
 
 def test_build_components_starts_only_reachable_camera(monkeypatch):
-    for name in ("BODY_ENABLED", "GPS_ENABLED", "WIFI_ENABLED", "BLUETOOTH_ENABLED"):
+    for name in (
+        "BODY_ENABLED",
+        "GPS_ENABLED",
+        "WIFI_ENABLED",
+        "BLUETOOTH_ENABLED",
+        "NAVIGATION_IP_FALLBACK_ENABLED",
+    ):
         monkeypatch.setenv(name, "0")
     monkeypatch.setenv("CAMERA_1_ENABLED", "1")
     monkeypatch.setenv("CAMERA_2_ENABLED", "1")
@@ -178,6 +239,7 @@ def test_camera_identity_is_shared_by_body_wifi_and_bluetooth(monkeypatch):
     monkeypatch.delenv("WIFI_VEHICLE_ID", raising=False)
     monkeypatch.delenv("BLUETOOTH_VEHICLE_ID", raising=False)
     monkeypatch.setenv("GPS_ENABLED", "0")
+    monkeypatch.setenv("NAVIGATION_IP_FALLBACK_ENABLED", "0")
     monkeypatch.setenv("CAMERA_1_ENABLED", "1")
     monkeypatch.setenv("CAMERA_2_ENABLED", "1")
 

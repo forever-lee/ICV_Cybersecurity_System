@@ -11,11 +11,11 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "https://3e199a97.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "https://7b58892c.r7.nas.cpolar.cn"
 
 # WebScan 平台公网地址。测试工具页面通过后端 /webscan 入口内嵌该服务。
 WEBSCAN_PUBLIC_URL = os.getenv(
-    "WEBSCAN_PUBLIC_URL", "https://108f151a.r7.nas.cpolar.cn"
+    "WEBSCAN_PUBLIC_URL", "https://7bc8928e.r7.nas.cpolar.cn"
 )
 
 # 必须与 jetson_edge 中配置的 VEHICLE_INGEST_TOKEN 完全一致。

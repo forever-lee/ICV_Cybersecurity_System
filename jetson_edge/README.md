@@ -23,6 +23,7 @@
 - `h264_vehicle_agent.py`：RTSP/fMP4 采流上传实现（同时支持 H.264/H.265）。
 - `stream_protocol.py`：边缘端与云端二进制协议。
 - `navigation_gps.py`：读取 `/dev/ttyTHS1` NMEA 并更新定位 JSON。
+- `navigation_uploader.py`：独立上传定位 JSON；没有可用摄像头时地图仍可接收车辆位置。
 - `requirements_jetson.txt`：Python 依赖。
 
 `logs/`、`*.pid`、`navigation_live.json` 均为运行时自动生成，不属于源码。
@@ -54,7 +55,22 @@ python3 -m pip install --user -r requirements_jetson.txt
 python3 start_edge.py
 ```
 
-Jetson 只需手动运行上述 `start_edge.py`。它会自动以子进程启动并监管 `WiFi_Module.py`、`bluetooth_edge_agent.py`、`body_edge_agent.py`、`navigation_gps.py` 和两路摄像头上传进程；不要再分别启动这些脚本。
+Jetson 只需手动运行上述 `start_edge.py`。它会自动以子进程启动并监管 `WiFi_Module.py`、`bluetooth_edge_agent.py`、`body_edge_agent.py`、`navigation_gps.py`、`navigation_uploader.py` 和两路摄像头上传进程；不要再分别启动这些脚本。导航上传独立于摄像头上传器，因此设置 `EDGE_VEHICLE_ID` 后，即使所有摄像头均禁用或不可达，GPS 位置仍会上传云端。
+
+串口 GNSS 暂时不可用时，可显式启用公网 IP 粗略定位。该功能默认关闭；启用后，NMEA 数据超过 15 秒未更新才会使用 IP 定位，默认每 10 分钟刷新一次 GeoIP、每 5 秒向云端续传一次粗略位置，NMEA 恢复后自动切回：
+
+```bash
+export NAVIGATION_IP_FALLBACK_ENABLED=1
+export NAVIGATION_IP_GEO_URL=https://ipinfo.io/json
+export NAVIGATION_IP_FALLBACK_AFTER_SECONDS=15
+export NAVIGATION_IP_GEO_REFRESH_SECONDS=600
+export NAVIGATION_IP_FALLBACK_UPLOAD_SECONDS=5
+export NAVIGATION_IP_GEO_ACCURACY_M=50000
+# 正式使用建议设置；未鉴权接口可能限流：
+export IPINFO_TOKEN=your-ipinfo-token
+```
+
+IP定位仅代表 Jetson 公网出口的大致区域，日志和网页数据源会标记为 `EDGE-IP-GEO`，不得作为车辆精确位置使用。
 
 后台运行：
 
@@ -62,7 +78,7 @@ Jetson 只需手动运行上述 `start_edge.py`。它会自动以子进程启动
 nohup python3 start_edge.py > edge_supervisor.log 2>&1 &
 ```
 
-日志保存在 `logs/`。正常停止统一进程时，车身、蓝牙、WiFi、GPS、两个摄像头上传进程和 FFmpeg 子进程会一起退出。
+日志保存在 `logs/`。导航采集和上传日志分别为 `logs/gps.log` 与 `logs/navigation_uploader.log`。正常停止统一进程时，车身、蓝牙、WiFi、GPS、导航上传器、两个摄像头上传进程和 FFmpeg 子进程会一起退出。
 
 ## 源码默认配置与修改位置
 

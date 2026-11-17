@@ -45,9 +45,7 @@ MAX_WIDTH = int(os.getenv("VIDEO_MAX_WIDTH", "1280"))
 TARGET_FPS = int(os.getenv("VIDEO_TARGET_FPS", "20"))
 H264_BITRATE_KBPS = int(os.getenv("VIDEO_BITRATE_KBPS", "2200"))
 H264_SEGMENT_MS = int(os.getenv("VIDEO_SEGMENT_MS", "1000"))
-BUFFER_SECONDS = float(os.getenv(
-    "VIDEO_BUFFER_SECONDS", "3" if VIDEO_MODE == "copy" else "300"
-))
+BUFFER_SECONDS = float(os.getenv("VIDEO_BUFFER_SECONDS", "3"))
 SEND_TIMEOUT = float(os.getenv("VIDEO_SEND_TIMEOUT", "60"))
 GST_LAUNCH_PATH = os.getenv("GST_LAUNCH_PATH", "gst-launch-1.0")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")

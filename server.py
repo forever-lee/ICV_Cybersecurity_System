@@ -3153,15 +3153,39 @@ def handle_telemetry(state, text):
     state.history.append(sample)
 
 
+async def wait_for_viewer_disconnect(websocket: WebSocket):
+    """Consume the ASGI disconnect event for send-only viewer sockets."""
+    try:
+        while True:
+            message = await websocket.receive()
+            if message.get("type") == "websocket.disconnect":
+                return
+    except (WebSocketDisconnect, RuntimeError):
+        return
+
+
+async def stop_disconnect_watcher(task):
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
 async def relay_fmp4(websocket: WebSocket, vehicle_id: str):
     """Relay compressed fMP4 without decoding or re-encoding it in the cloud."""
     state = registry.get(vehicle_id)
     await websocket.accept()
     state.viewer_count += 1
+    disconnect_task = asyncio.create_task(wait_for_viewer_disconnect(websocket))
     last_init = None
     last_sequence = None
     try:
         while True:
+            if disconnect_task.done():
+                break
             init_packet = state.fmp4_init
             fragments = list(state.fmp4_fragments)
             if init_packet is None or not fragments:
@@ -3172,7 +3196,7 @@ async def relay_fmp4(websocket: WebSocket, vehicle_id: str):
                         pass
                 continue
             if init_packet is not last_init:
-                await websocket.send_bytes(init_packet)
+                await asyncio.wait_for(websocket.send_bytes(init_packet), timeout=5.0)
                 last_init = init_packet
                 last_sequence = None
             if last_sequence is None:
@@ -3197,11 +3221,14 @@ async def relay_fmp4(websocket: WebSocket, vehicle_id: str):
                         except asyncio.TimeoutError:
                             pass
                     continue
-            await websocket.send_bytes(packet)
+            if disconnect_task.done():
+                break
+            await asyncio.wait_for(websocket.send_bytes(packet), timeout=5.0)
             last_sequence = sequence
     except Exception:
         pass
     finally:
+        await stop_disconnect_watcher(disconnect_task)
         state.viewer_count = max(0, state.viewer_count - 1)
 
 
@@ -3231,11 +3258,14 @@ async def live(websocket: WebSocket, vehicle_id: str):
     state = registry.get(vehicle_id)
     await websocket.accept()
     state.viewer_count += 1
+    disconnect_task = asyncio.create_task(wait_for_viewer_disconnect(websocket))
     last_sequence = None
     playback_started = False
     next_send_at = asyncio.get_event_loop().time()
     try:
         while True:
+            if disconnect_task.done():
+                break
             frames = list(state.frame_buffer)
             if not frames:
                 await asyncio.sleep(0.03)
@@ -3264,13 +3294,14 @@ async def live(websocket: WebSocket, vehicle_id: str):
                     latest_age = unpack_frame(frames[-1][1])["captured_at_ms"] - unpack_frame(frame)["captured_at_ms"]
                     if latest_age > 18000:
                         sequence, frame = frames[max(0, len(frames) - prebuffer_frames)]
-            await websocket.send_bytes(frame)
+            await asyncio.wait_for(websocket.send_bytes(frame), timeout=5.0)
             last_sequence = sequence
             next_send_at = max(next_send_at + 1.0 / playback_fps, asyncio.get_event_loop().time())
             await asyncio.sleep(max(0.0, next_send_at - asyncio.get_event_loop().time()))
     except Exception:
         pass
     finally:
+        await stop_disconnect_watcher(disconnect_task)
         state.viewer_count = max(0, state.viewer_count - 1)
 
 
@@ -3283,18 +3314,24 @@ async def metrics_socket(websocket: WebSocket, vehicle_id: str):
         return
     state = registry.get(vehicle_id)
     await websocket.accept()
+    disconnect_task = asyncio.create_task(wait_for_viewer_disconnect(websocket))
     include_navigation_history = True
     sent_navigation_session_id = None
     try:
-        while websocket.client_state == WebSocketState.CONNECTED:
+        while not disconnect_task.done():
             if state.navigation_session_id != sent_navigation_session_id:
                 include_navigation_history = True
-            await websocket.send_json(state.snapshot(include_navigation_history))
+            await asyncio.wait_for(
+                websocket.send_json(state.snapshot(include_navigation_history)),
+                timeout=5.0,
+            )
             sent_navigation_session_id = state.navigation_session_id
             include_navigation_history = False
             await asyncio.sleep(1)
     except Exception:
         pass
+    finally:
+        await stop_disconnect_watcher(disconnect_task)
 
 
 def main():

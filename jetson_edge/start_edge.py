@@ -23,12 +23,13 @@ from urllib.parse import urlsplit
 BASE_DIR = Path(__file__).resolve().parent
 LOG_DIR = BASE_DIR / "logs"
 NAVIGATION_FILE = BASE_DIR / "navigation_live.json"
+NAVIGATION_UPLOADER_PATH = BASE_DIR / "navigation_uploader.py"
 BODY_AGENT_PATH = BASE_DIR / "body_edge_agent.py"
 BLUETOOTH_AGENT_PATH = BASE_DIR / "bluetooth_edge_agent.py"
 RESTART_DELAY_SECONDS = 3
 MAX_LOG_BYTES = 20 * 1024 * 1024
-DEFAULT_CLOUD_HTTP_URL = "http://771523b0.r7.nas.cpolar.cn"
-DEFAULT_CLOUD_WS_URL = "ws://771523b0.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_HTTP_URL = "https://7b58892c.r7.nas.cpolar.cn"
+DEFAULT_CLOUD_WS_URL = "wss://7b58892c.r7.nas.cpolar.cn"
 DEFAULT_VEHICLE_INGEST_TOKEN = "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0"
 
 @dataclass
@@ -470,7 +471,13 @@ def build_components(
         "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
         "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
     })
-    for name in ("VIDEO_BUFFER_SECONDS",):
+    for name in (
+        "VIDEO_BUFFER_SECONDS",
+        "VIDEO_WS_OPEN_TIMEOUT_SECONDS",
+        "VIDEO_WS_PING_INTERVAL_SECONDS",
+        "VIDEO_WS_PING_TIMEOUT_SECONDS",
+        "VIDEO_FRAGMENT_STALL_TIMEOUT_SECONDS",
+    ):
         if os.getenv(name):
             common_vehicle_environment[name] = os.environ[name]
 
@@ -505,7 +512,8 @@ def build_components(
             environment=body_environment,
         ))
 
-    if enabled("GPS_ENABLED"):
+    gps_enabled = enabled("GPS_ENABLED")
+    if gps_enabled:
         components.append(Component(
             name="gps",
             command=[
@@ -516,6 +524,41 @@ def build_components(
                 "--output", str(NAVIGATION_FILE),
             ],
             environment=dict(common_cloud_environment),
+        ))
+
+    ip_navigation_fallback_enabled = enabled("NAVIGATION_IP_FALLBACK_ENABLED")
+    navigation_uploader_default = (
+        "1" if gps_enabled or ip_navigation_fallback_enabled else "0"
+    )
+    if enabled("NAVIGATION_UPLOADER_ENABLED", navigation_uploader_default):
+        if not NAVIGATION_UPLOADER_PATH.is_file():
+            raise SystemExit("缺少导航上传程序：{}".format(NAVIGATION_UPLOADER_PATH))
+        navigation_environment = dict(common_cloud_environment)
+        navigation_environment.update({
+            "VEHICLE_ID": edge_vehicle_id,
+            "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
+            "NAVIGATION_UPLOAD_INTERVAL_SECONDS": os.getenv(
+                "NAVIGATION_UPLOAD_INTERVAL_SECONDS", "1"
+            ),
+            "NAVIGATION_HTTP_TIMEOUT_SECONDS": os.getenv(
+                "NAVIGATION_HTTP_TIMEOUT_SECONDS", "5"
+            ),
+        })
+        for name in (
+            "NAVIGATION_IP_FALLBACK_ENABLED",
+            "NAVIGATION_IP_GEO_URL",
+            "NAVIGATION_IP_FALLBACK_AFTER_SECONDS",
+            "NAVIGATION_IP_GEO_REFRESH_SECONDS",
+            "NAVIGATION_IP_FALLBACK_UPLOAD_SECONDS",
+            "NAVIGATION_IP_GEO_ACCURACY_M",
+            "IPINFO_TOKEN",
+        ):
+            if os.getenv(name):
+                navigation_environment[name] = os.environ[name]
+        components.append(Component(
+            name="navigation_uploader",
+            command=[sys.executable, "-u", str(NAVIGATION_UPLOADER_PATH)],
+            environment=navigation_environment,
         ))
 
     if enabled("WIFI_ENABLED"):
