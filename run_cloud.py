@@ -1,6 +1,8 @@
 """PyCharm 直接运行：启动云端服务与监控网页。"""
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -72,6 +74,19 @@ import uvicorn
 
 
 if __name__ == "__main__":
+    tx_viewer = None
+    if os.name == "nt" and os.getenv("BLUETOOTH_TX_VIEWER", "1") != "0":
+        viewer_env = os.environ.copy()
+        viewer_env["BLUETOOTH_TX_VIEWER_PORT"] = str(PORT)
+        viewer_env["BLUETOOTH_TX_VIEWER_TOKEN"] = DASHBOARD_ACCESS_TOKEN
+        try:
+            tx_viewer = subprocess.Popen(
+                [sys.executable, str(BASE_DIR / "bluetooth_tx_viewer.py")],
+                env=viewer_env,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except OSError as exc:
+            print("蓝牙 TX 展示窗口未能打开：{}".format(exc), flush=True)
     print("=" * 64)
     print("V-SHIELD 智能网联汽车攻防平台正在启动")
     print("本机访问：http://127.0.0.1:{}".format(PORT))
@@ -81,10 +96,14 @@ if __name__ == "__main__":
     print("CANoe按需启动：网页攻击按钮（配置：{}）".format(CANOE_CONFIG_PATH))
     print("请保持此窗口运行；视频与定位由 Jetson 边缘端上传")
     print("=" * 64)
-    uvicorn.run(
-        "server:app",
-        host=HOST,
-        port=PORT,
-        reload=False,
-        log_level="info",
-    )
+    try:
+        uvicorn.run(
+            "server:app",
+            host=HOST,
+            port=PORT,
+            reload=False,
+            log_level="info",
+        )
+    finally:
+        if tx_viewer is not None and tx_viewer.poll() is None:
+            tx_viewer.terminate()

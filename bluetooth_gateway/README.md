@@ -5,6 +5,13 @@
 S32K344 经以太网 UDP 5000 发给 Jetson；Jetson 只运行 `start_edge.py`，
 由它启动 `bluetooth_edge_agent.py` 并上传遥测。蓝牙模块继续使用已有的透传模式。
 
+在 Windows 笔记本运行 `run_cloud.py` 时，会自动打开一个“云端下发报文 TX”
+独立窗口。它通过本机云端接口只显示**已收到硬件 ACK 的 TX 报文**，不显示
+遥测报文和对时报文；窗口显示报文内容、时间、编号和 UTF-8 HEX。即使 sender
+运行在 Jetson，窗口也开在运行云端的笔记本上。关闭此窗口不会停止云端或
+sender；下次启动云端会重新打开。若不需要自动打开，在运行云端前设置
+`BLUETOOTH_TX_VIEWER=0`。原有网页 TX/RX 和蓝牙链路不受此展示窗口影响。
+
 在仓库根目录的 PowerShell 中安装依赖并启动两个进程（分别占用一个窗口）：
 
 ```powershell
