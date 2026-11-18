@@ -25,12 +25,30 @@ def test_ffmpeg_encoder_available_matches_encoder_listing(monkeypatch):
     assert h264_vehicle_agent.ffmpeg_encoder_available("h264_nvenc") is False
 
 
-def test_websocket_timeout_defaults_tolerate_public_tunnel_jitter(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["h264_vehicle_agent.py"])
+def test_copy_command_matches_integration_five_domains(monkeypatch):
+    args = SimpleNamespace(
+        ffmpeg="ffmpeg",
+        source="rtsp://192.168.4.88:8554/main",
+        rtsp_codec="h265",
+        fps=25,
+        segment_ms=1000,
+    )
+    monkeypatch.setattr(
+        h264_vehicle_agent,
+        "ffmpeg_executable",
+        lambda _value: "/usr/bin/ffmpeg",
+    )
+    monkeypatch.setattr(
+        h264_vehicle_agent,
+        "ffmpeg_rtsp_timeout_args",
+        lambda _executable: [],
+    )
 
-    args = h264_vehicle_agent.parse_args()
+    command = h264_vehicle_agent.build_command(args, "copy")
 
-    assert args.ws_open_timeout == 45
-    assert args.ws_ping_interval == 30
-    assert args.ws_ping_timeout == 90
-    assert args.fragment_stall_timeout == 20
+    assert command[command.index("-c:v") + 1] == "copy"
+    assert command[command.index("-tag:v") + 1] == "hvc1"
+    assert command[command.index("-movflags") + 1] == (
+        "+frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset"
+    )
+    assert command[command.index("-frag_duration") + 1] == "1000000"

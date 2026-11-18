@@ -11,7 +11,7 @@ HOST = "0.0.0.0"
 PORT = 8001
 
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
-PUBLIC_DASHBOARD_URL = "https://7b58892c.r7.nas.cpolar.cn"
+PUBLIC_DASHBOARD_URL = "https://icvseclxy.vip.cpolar.cn"
 
 # WebScan 平台公网地址。测试工具页面通过后端 /webscan 入口内嵌该服务。
 WEBSCAN_PUBLIC_URL = os.getenv(
@@ -50,7 +50,8 @@ FMP4_BUFFER_SEGMENTS = int(os.getenv("FMP4_BUFFER_SEGMENTS", "4"))
 AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "e42382dff12a247360729d11fdfc39c0")  # 例如："你的 Web 端 Key"
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "8cdd0c19bda74e5c369bfce4283fa11a")  # 例如："你的安全密钥"
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "")
-# ===========================================================
+# ===========================================================File: Save
+
 
 
 # server.py 在导入时读取这些配置，因此必须先设置环境变量。

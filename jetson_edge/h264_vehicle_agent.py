@@ -632,14 +632,6 @@ def capture_loop(shared, args):
 
         record_encoder_pid(args.source, process.pid)
         stderr_lines = deque(maxlen=12)
-        capture_diagnostics = {
-            "started_at": time.monotonic(),
-            "stdout_bytes": 0,
-            "fragments": 0,
-            "last_fragment_at": 0.0,
-            "parser_pending_bytes": 0,
-        }
-        diagnostics_stop = threading.Event()
 
         def read_stderr():
             for raw in iter(process.stderr.readline, b""):
@@ -648,61 +640,6 @@ def capture_loop(shared, args):
                     stderr_lines.append(line)
 
         threading.Thread(target=read_stderr, daemon=True).start()
-
-        def report_fragment_stalls():
-            previous_bytes = 0
-            previous_fragments = 0
-            while not diagnostics_stop.wait(10):
-                if process.poll() is not None or shared.stop.is_set():
-                    return
-                current_bytes = capture_diagnostics["stdout_bytes"]
-                current_fragments = capture_diagnostics["fragments"]
-                if current_fragments == previous_fragments:
-                    fragment_age = (
-                        time.monotonic() - capture_diagnostics["last_fragment_at"]
-                        if capture_diagnostics["last_fragment_at"]
-                        else time.monotonic() - capture_diagnostics["started_at"]
-                    )
-                    LOGGER.warning(
-                        "fmp4_fragment_stalled age=%.1fs stdout_bytes_delta=%s "
-                        "stdout_bytes_total=%s parser_pending_bytes=%s "
-                        "hint=camera_keyframe_or_ffmpeg_fragmentation",
-                        fragment_age,
-                        current_bytes - previous_bytes,
-                        current_bytes,
-                        capture_diagnostics["parser_pending_bytes"],
-                    )
-                    if fragment_age >= args.fragment_stall_timeout:
-                        LOGGER.error(
-                            "fmp4_fragment_stall_restart age=%.1fs timeout=%.1fs "
-                            "action=restart_ffmpeg",
-                            fragment_age,
-                            args.fragment_stall_timeout,
-                        )
-                        try:
-                            process.terminate()
-                        except OSError:
-                            return
-                        try:
-                            process.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            LOGGER.error(
-                                "fmp4_fragment_stall_force_kill pid=%s",
-                                process.pid,
-                            )
-                            try:
-                                process.kill()
-                                process.wait(timeout=2)
-                            except (OSError, subprocess.TimeoutExpired):
-                                LOGGER.exception(
-                                    "fmp4_fragment_stall_kill_failed pid=%s",
-                                    process.pid,
-                                )
-                        return
-                previous_bytes = current_bytes
-                previous_fragments = current_fragments
-
-        threading.Thread(target=report_fragment_stalls, daemon=True).start()
 
         def on_init(payload):
             with shared.lock:
@@ -721,10 +658,6 @@ def capture_loop(shared, args):
 
         def on_fragment(payload):
             created = now_ms()
-            capture_diagnostics["fragments"] += 1
-            capture_diagnostics["last_fragment_at"] = time.monotonic()
-            if capture_diagnostics["fragments"] == 1:
-                LOGGER.info("fmp4_first_fragment bytes=%s", len(payload))
             with shared.lock:
                 shared.sequence = (shared.sequence + 1) & 0xFFFFFFFF
                 if len(shared.fragments) == shared.fragments.maxlen:
@@ -739,17 +672,10 @@ def capture_loop(shared, args):
                 chunk = media_stream.read(65536)
                 if not chunk:
                     break
-                capture_diagnostics["stdout_bytes"] += len(chunk)
                 parser.feed(chunk)
-                capture_diagnostics["parser_pending_bytes"] = (
-                    len(parser.buffer)
-                    + sum(len(part) for part in parser.init_parts)
-                    + sum(len(part) for part in parser.fragment_parts)
-                )
         except Exception:
             LOGGER.exception("encoder_output_failure")
         finally:
-            diagnostics_stop.set()
             try:
                 media_stream.close()
             except OSError:
@@ -799,14 +725,8 @@ async def upload_loop(shared, args):
         )
         try:
             async with websockets.connect(
-                url,
-                max_size=None,
-                max_queue=2,
-                open_timeout=args.ws_open_timeout,
-                ping_interval=args.ws_ping_interval,
-                ping_timeout=args.ws_ping_timeout,
-                close_timeout=3,
-                write_limit=1024 * 1024,
+                url, max_size=None, max_queue=2, ping_interval=20, ping_timeout=20,
+                close_timeout=3, write_limit=1024 * 1024,
             ) as socket:
                 LOGGER.info("cloud_connected vehicle_id=%s", args.vehicle_id)
                 reconnect_delay = 1.0
@@ -914,27 +834,6 @@ def parse_args():
     parser.add_argument("--buffer-seconds", type=float, default=300.0)
     parser.add_argument("--send-timeout", type=float, default=60.0)
     parser.add_argument(
-        "--ws-open-timeout",
-        type=float,
-        default=float(os.getenv("VIDEO_WS_OPEN_TIMEOUT_SECONDS", "45")),
-    )
-    parser.add_argument(
-        "--ws-ping-interval",
-        type=float,
-        default=float(os.getenv("VIDEO_WS_PING_INTERVAL_SECONDS", "30")),
-    )
-    parser.add_argument(
-        "--ws-ping-timeout",
-        type=float,
-        default=float(os.getenv("VIDEO_WS_PING_TIMEOUT_SECONDS", "90")),
-    )
-    parser.add_argument(
-        "--fragment-stall-timeout",
-        type=float,
-        default=float(os.getenv("VIDEO_FRAGMENT_STALL_TIMEOUT_SECONDS", "20")),
-        help="Restart FFmpeg when no complete fMP4 fragment is produced",
-    )
-    parser.add_argument(
         "--software-preset",
         choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium"),
         default=os.getenv("VIDEO_SOFTWARE_PRESET", "veryfast"),
@@ -951,14 +850,7 @@ def main():
     cleanup_stale_encoder(args.source)
     if args.width < 160 or args.fps < 1 or args.bitrate_kbps < 100:
         raise ValueError("invalid video profile")
-    if (
-        args.buffer_seconds <= 0
-        or args.send_timeout <= 0
-        or args.ws_open_timeout <= 0
-        or args.ws_ping_interval <= 0
-        or args.ws_ping_timeout <= 0
-        or args.fragment_stall_timeout <= 0
-    ):
+    if args.buffer_seconds <= 0 or args.send_timeout <= 0:
         raise ValueError("buffer and timeout values must be positive")
     queue_segments = max(4, int(math.ceil(args.buffer_seconds * 1000 / args.segment_ms)))
     shared = SharedStream(fragments=deque(maxlen=queue_segments))

@@ -44,3 +44,7 @@ Thumbs.db
 doc/
 
 jetson_edge/logs/
+
+# Local Conda environment archives
+conda enviroments/
+*.zip

@@ -14,13 +14,6 @@
   const H264_TARGET_BUFFER_SECONDS = 1;
   const H264_RESUME_BUFFER_SECONDS = 0.5;
   const H264_MAX_LIVE_LATENCY_MS = 5000;
-  const H264_MAX_PENDING_SECONDS = 5;
-  const H264_MAX_SEQUENCE_LAG = 5;
-  const H264_RECOVERY_COOLDOWN_MS = 6000;
-  const H264_CONNECT_GRACE_MS = 7000;
-  const H264_MAX_BUFFER_AHEAD_SECONDS = 5;
-  const H264_BUFFER_LAG_GRACE_MS = 3000;
-  const H264_SEEK_RECOVERY_MS = 2000;
   const MAP_DEMO_MODE = new URLSearchParams(location.search).get("map_demo") === "1";
   const MAP_DEMO_POINTS = [
     [106.611825, 29.537908],
@@ -74,9 +67,6 @@
   const state = {
     vehicleId: new URLSearchParams(location.search).get("vehicle") || "VHC-001",
     liveSocket: null, metricsSocket: null, reconnectTimer: null,
-    liveConnectedAt: 0, liveRecoveryAt: 0, liveRecoveryTimer: null,
-    sequenceLagStartedAt: 0,
-    mseLagStartedAt: 0, mseSeekAttemptAt: 0,
     frameTimes: [], latencyHistory: [], rateHistory: [], lastFrameAt: 0,
     latestMetrics: {}, currentView: "overview",
     frameQueue: [], decoderBusy: false, playbackTimer: null,
@@ -89,11 +79,9 @@
     navigationSessionId: null, pendingNavigationHistory: null,
     navigationHistoryRenderId: 0, navigationHistoryLoading: false,
     pendingLiveNavigationPoints: [], mapDemoTimer: null, mapDemoIndex: 0,
-    mediaSource: null, sourceBuffer: null, sourceBufferUpdateHandler: null,
-    appendingMedia: null, mediaQueue: [], mediaUrl: null,
+    mediaSource: null, sourceBuffer: null, mediaQueue: [], mediaUrl: null,
     mediaMime: null,
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
-    latestReceivedMediaCreatedAt: 0, lastMediaSequence: null,
     h264Rebuffering: false,
     wifiClearBeforeMs: 0, wifiClearBaseCount: 0, wifiClearBaseAlertCount: 0,
     wifiSubmission: null, wifiMetricsAt: 0, wifiConnectAt: 0,
@@ -931,36 +919,19 @@
   }
 
   function destroyMediaSource() {
-    const previousSourceBuffer = state.sourceBuffer;
-    if (previousSourceBuffer && state.sourceBufferUpdateHandler) {
-      previousSourceBuffer.removeEventListener("updateend", state.sourceBufferUpdateHandler);
-    }
-    if (previousSourceBuffer?.updating) {
-      try { previousSourceBuffer.abort(); } catch (_) { /* It may already be detached. */ }
-    }
     state.mediaQueue = [];
-    state.appendingMedia = null;
-    state.sourceBufferUpdateHandler = null;
     state.sourceBuffer = null;
     state.mediaSource = null;
     state.mediaMime = null;
     state.h264Active = false;
     state.h264Started = false;
     state.latestMediaCreatedAt = 0;
-    state.latestReceivedMediaCreatedAt = 0;
-    state.lastMediaSequence = null;
-    state.mseLagStartedAt = 0;
-    state.mseSeekAttemptAt = 0;
     state.h264Rebuffering = false;
     video.pause();
     video.removeAttribute("src");
     video.load();
     video.classList.add("hidden");
     canvas.style.display = "block";
-    $("videoPlaceholder").classList.remove("hidden");
-    $("videoStage").classList.remove("has-video");
-    $("sequenceTag").textContent = "SEG —";
-    $("overlayTimestamp").textContent = "--:--:--.---";
     if (state.mediaUrl) URL.revokeObjectURL(state.mediaUrl);
     state.mediaUrl = null;
   }
@@ -989,14 +960,9 @@
       || state.mediaSource.readyState !== "open"
     ) return;
     try {
-      const sourceBuffer = state.mediaSource.addSourceBuffer(state.mediaMime);
-      state.sourceBuffer = sourceBuffer;
-      sourceBuffer.mode = "segments";
-      state.sourceBufferUpdateHandler = () => {
-        if (state.sourceBuffer !== sourceBuffer) return;
-        onMediaUpdateEnd();
-      };
-      sourceBuffer.addEventListener("updateend", state.sourceBufferUpdateHandler);
+      state.sourceBuffer = state.mediaSource.addSourceBuffer(state.mediaMime);
+      state.sourceBuffer.mode = "segments";
+      state.sourceBuffer.addEventListener("updateend", onMediaUpdateEnd);
       appendNextMediaSegment();
     } catch (_) {
       setConnection(false, state.mediaMime.includes("hvc1") || state.mediaMime.includes("hev1")
@@ -1008,12 +974,10 @@
   function prepareMediaSource(mime = null) {
     destroyMediaSource();
     state.mediaMime = mime;
-    const mediaSource = new MediaSource();
-    state.mediaSource = mediaSource;
-    state.mediaUrl = URL.createObjectURL(mediaSource);
+    state.mediaSource = new MediaSource();
+    state.mediaUrl = URL.createObjectURL(state.mediaSource);
     video.src = state.mediaUrl;
-    mediaSource.addEventListener("sourceopen", () => {
-      if (state.mediaSource !== mediaSource) return;
+    state.mediaSource.addEventListener("sourceopen", () => {
       ensureMediaSourceBuffer();
     }, { once: true });
   }
@@ -1046,25 +1010,8 @@
         ensureMediaSourceBuffer();
       }
       state.mediaQueue = [];
-    } else {
-      state.latestReceivedMediaCreatedAt = Math.max(
-        state.latestReceivedMediaCreatedAt,
-        item.createdAt,
-      );
     }
     state.mediaQueue.push(item);
-    const pendingMedia = [state.appendingMedia, ...state.mediaQueue]
-      .filter((pending) => pending?.kind === 1);
-    if (pendingMedia.length > 1) {
-      const oldestCreatedAt = Math.min(...pendingMedia.map((pending) => pending.createdAt));
-      const pendingSeconds = (
-        state.latestReceivedMediaCreatedAt - oldestCreatedAt
-      ) / 1000;
-      if (pendingSeconds > H264_MAX_PENDING_SECONDS) {
-        requestLiveRecovery("浏览器视频队列超过5秒，正在追赶直播");
-        return;
-      }
-    }
     // Do not discard an intermediate media segment here. Dropping one creates
     // a timestamp hole in MSE and causes exactly the stop-at-each-segment issue.
     appendNextMediaSegment();
@@ -1088,7 +1035,6 @@
     state.appendingMedia = null;
     if (item && item.kind === 1) {
       state.latestMediaCreatedAt = item.createdAt;
-      state.lastMediaSequence = item.sequence;
       state.lastFrameAt = Date.now();
       $("sequenceTag").textContent = `SEG ${item.sequence.toLocaleString()}`;
       $("overlayTimestamp").textContent = formatFrameTime(item.createdAt);
@@ -1169,8 +1115,6 @@
 
   function connect() {
     clearTimeout(state.reconnectTimer);
-    clearTimeout(state.liveRecoveryTimer);
-    state.liveRecoveryTimer = null;
     closeSockets();
     state.wifiMetricsAt = 0;
     updateWifi(state.latestMetrics.wifi || {});
@@ -1179,20 +1123,12 @@
     const fmp4Supported = "MediaSource" in window;
     if (fmp4Supported) prepareMediaSource();
     const livePath = fmp4Supported ? "/ws/live-fmp4/" : "/ws/live/";
-    const liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
-    state.liveSocket = liveSocket;
-    liveSocket.binaryType = "arraybuffer";
-    liveSocket.onmessage = fmp4Supported ? enqueueFmp4 : enqueueFrame;
-    liveSocket.onopen = () => {
-      if (state.liveSocket !== liveSocket) return;
-      state.liveConnectedAt = Date.now();
-      setConnection(false, "等待车端");
-    };
-    liveSocket.onclose = () => {
-      if (state.liveSocket !== liveSocket) return;
-      scheduleReconnect();
-    };
-    liveSocket.onerror = () => liveSocket.close();
+    state.liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
+    state.liveSocket.binaryType = "arraybuffer";
+    state.liveSocket.onmessage = fmp4Supported ? enqueueFmp4 : enqueueFrame;
+    state.liveSocket.onopen = () => setConnection(false, "等待车端");
+    state.liveSocket.onclose = scheduleReconnect;
+    state.liveSocket.onerror = () => state.liveSocket.close();
     const metricsSocket = new WebSocket(wsUrl(`/ws/metrics/${encodeURIComponent(state.vehicleId)}`));
     state.metricsSocket = metricsSocket;
     state.wifiConnectAt = Date.now();
@@ -1217,87 +1153,6 @@
   function closeSockets() {
     for (const socket of [state.liveSocket, state.metricsSocket]) {
       if (socket) { socket.onclose = null; socket.onmessage = null; socket.onerror = null; socket.close(); }
-    }
-    state.liveSocket = null;
-    state.metricsSocket = null;
-    state.liveConnectedAt = 0;
-  }
-
-  function sequenceLag(newest, current) {
-    if (!Number.isInteger(newest) || !Number.isInteger(current)) return 0;
-    const distance = (newest - current) >>> 0;
-    return distance < 0x80000000 ? distance : 0;
-  }
-
-  function requestLiveRecovery(reason) {
-    const now = Date.now();
-    if (state.liveRecoveryTimer || now - state.liveRecoveryAt < H264_RECOVERY_COOLDOWN_MS) {
-      return false;
-    }
-    state.liveRecoveryAt = now;
-    state.sequenceLagStartedAt = 0;
-    setConnection(false, reason || "正在追赶直播");
-    state.liveRecoveryTimer = setTimeout(() => {
-      state.liveRecoveryTimer = null;
-      connect();
-    }, 0);
-    return true;
-  }
-
-  function latestBufferedPosition() {
-    if (!video.buffered.length) return null;
-    const index = video.buffered.length - 1;
-    const start = video.buffered.start(index);
-    const end = video.buffered.end(index);
-    return {
-      start,
-      end,
-      ahead: Math.max(0, end - (video.currentTime || start)),
-    };
-  }
-
-  function monitorLivePlayback(forceCheck = false) {
-    const buffered = latestBufferedPosition();
-    const streamOnline = state.latestMetrics.status === "online";
-    if (!state.h264Active || !streamOnline || !buffered) {
-      state.mseLagStartedAt = 0;
-      state.mseSeekAttemptAt = 0;
-      return;
-    }
-    if (buffered.ahead <= H264_MAX_BUFFER_AHEAD_SECONDS) {
-      state.mseLagStartedAt = 0;
-      state.mseSeekAttemptAt = 0;
-      return;
-    }
-
-    const now = Date.now();
-    if (!state.mseLagStartedAt) {
-      state.mseLagStartedAt = forceCheck
-        ? now - H264_BUFFER_LAG_GRACE_MS
-        : now;
-    }
-    if (now - state.mseLagStartedAt < H264_BUFFER_LAG_GRACE_MS) return;
-
-    if (!state.mseSeekAttemptAt) {
-      state.mseSeekAttemptAt = now;
-      try {
-        video.currentTime = Math.max(buffered.start, buffered.end - 0.35);
-        video.play().catch(() => {});
-        setConnection(true, "播放位置落后，正在跳转直播");
-      } catch (_) {
-        requestLiveRecovery("无法跳转直播，正在重建视频连接");
-      }
-      return;
-    }
-
-    if (now - state.mseSeekAttemptAt >= H264_SEEK_RECOVERY_MS) {
-      const afterSeek = latestBufferedPosition();
-      if (afterSeek && afterSeek.ahead > H264_MAX_BUFFER_AHEAD_SECONDS) {
-        requestLiveRecovery("浏览器播放缓冲仍超过5秒，正在重建直播");
-      } else {
-        state.mseLagStartedAt = 0;
-        state.mseSeekAttemptAt = 0;
-      }
     }
   }
 
@@ -1446,30 +1301,6 @@
     $("fpsValue").textContent = fps ? fps.toFixed(1) : "—";
     $("bitrateValue").textContent = kbps ? (kbps / 1000).toFixed(2) : "—";
     const h264 = String(metrics.stream_mode || "").includes("fmp4");
-    const cloudSequence = Number(metrics.sequence);
-    if (
-      h264
-      && metrics.status === "online"
-      && Number.isInteger(cloudSequence)
-      && cloudSequence > 0
-    ) {
-      const lag = sequenceLag(cloudSequence, state.lastMediaSequence);
-      const connectionAge = state.liveConnectedAt ? Date.now() - state.liveConnectedAt : 0;
-      if (state.lastMediaSequence != null && lag > H264_MAX_SEQUENCE_LAG) {
-        if (!state.sequenceLagStartedAt) state.sequenceLagStartedAt = Date.now();
-        if (Date.now() - state.sequenceLagStartedAt >= 3000) {
-          requestLiveRecovery(`浏览器持续落后云端 ${lag} 个片段，正在追赶直播`);
-        }
-      } else if (
-        state.lastMediaSequence == null
-        && state.liveConnectedAt
-        && connectionAge > H264_CONNECT_GRACE_MS
-      ) {
-        requestLiveRecovery("云端已有视频，浏览器正在重新接入直播");
-      } else {
-        state.sequenceLagStartedAt = 0;
-      }
-    }
     const passthrough = metrics.encoder === "copy";
     const codecLabel = metrics.codec || "H.264/H.265";
     $("qualityLabel").textContent = h264 ? `${codecLabel} ${metrics.bitrate_kbps || "—"} Kbps` : `JPEG Q${metrics.jpeg_quality || "—"}`;
@@ -2560,9 +2391,6 @@
   $("fullscreenButton").addEventListener("click", () => { const target = $("videoStage"); if (document.fullscreenElement) document.exitFullscreen(); else target.requestFullscreen().catch(() => toast("浏览器未允许全屏显示")); });
   $("vehicleSelect").addEventListener("change", (event) => {
     state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
-    state.liveRecoveryAt = 0;
-    clearTimeout(state.liveRecoveryTimer);
-    state.liveRecoveryTimer = null;
     delete state.latestMetrics.wifi;
     state.wifiClearBeforeMs = 0; state.wifiClearBaseCount = 0; state.wifiClearBaseAlertCount = 0;
     resetNavigationView();
@@ -2869,15 +2697,7 @@
     closeSockets();
   });
   setInterval(updateClock, 1000);
-  setInterval(() => {
-    monitorLivePlayback();
-    if (state.lastFrameAt && Date.now() - state.lastFrameAt > 4000) {
-      setConnection(false, "画面中断");
-    }
-  }, 1000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) monitorLivePlayback(true);
-  });
+  setInterval(() => { if (state.lastFrameAt && Date.now() - state.lastFrameAt > 4000) setConnection(false, "画面中断"); }, 1000);
   updateClock();
   $("overlayVehicle").textContent = state.vehicleId;
   loadVehicles().finally(connect);
