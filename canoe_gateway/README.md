@@ -6,13 +6,12 @@
 `0x1D1`、`0x228` 的报文数量、实测周期、DLC、CAN 类型、方向、最新数据，
 并按 VCU-ESP 通信矩阵显示各信号的原始值、物理值和状态含义。
 通信矩阵未明确字节序，目前按 Intel 小端、LSB0 位序解析，接实车后需对照 CANoe 数据库验证。
-实时监听使用安装 CANoe 的同一台 Windows 电脑上的 Vector XL 驱动，
-在面板中填写 Vector 通道号（从 0 开始）并点击“开始实时监听”。
-此通道号应对应 CANoe 中已映射的物理通道；CANoe 的应用通道“CAN1”
-不一定等于 Python 的通道号 1。只有真实收到帧时计数才增长。
-需安装云端 `requirements.txt` 中的 `python-can`。若设备或驱动不支持
-CANoe 与监听程序同时打开通道，页面会显示驱动错误；可停止 CANoe
-Measurement 后重新监听，或使用独立 Vector 通道。
+实时模式从 S32K344 CAN0 接收的两种报文获取数据，经 Jetson 独立上传到
+`/body/edge-monitor`；不会读 CANoe Trace，也不会写入原有车身状态或攻击记录。
+台架测试时 CANoe 代替域控发送两种报文；上车后由域控发送，Web/Jetson
+链路无需切换。板端须烧录包含专用报文转发标记的新版固件，Jetson 须更新
+`body_protocol.py`、`body_edge_agent.py`，云端须更新 `server.py` 和
+`body_blf_monitor.py`。BLF 上传功能仍需 `python-can`。
 
 本目录实现 Web 到真实 CAN 总线的实验台架闭环。请勿连接实车或道路运行网络。
 

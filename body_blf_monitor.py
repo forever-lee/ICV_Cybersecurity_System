@@ -3,6 +3,8 @@
 from collections import Counter, deque
 from statistics import median
 from threading import Event, Lock, Thread
+from types import SimpleNamespace
+import time
 
 TARGET_IDS = (0x1D1, 0x228)
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
@@ -166,3 +168,41 @@ class VectorMonitor:
 
 
 vector_monitor = VectorMonitor()
+
+
+class EdgeFrameMonitor:
+    """Inspector-only frames delivered by K3 through Jetson."""
+
+    def __init__(self):
+        self.lock = Lock()
+        self.frames = {can_id: FrameSummary() for can_id in TARGET_IDS}
+        self.last_received = 0.0
+
+    def ingest(self, items):
+        with self.lock:
+            for item in items:
+                can_id = int(item["can_id"])
+                if can_id not in self.frames:
+                    continue
+                data = bytes.fromhex(item["data_hex"])
+                if len(data) != 8:
+                    continue
+                msg = SimpleNamespace(timestamp=float(item["received_at_ms"]) / 1000,
+                                      dlc=8, is_fd=False, is_rx=True, data=data)
+                self.frames[can_id].add(msg)
+                self.last_received = time.monotonic()
+        return self.snapshot()
+
+    def snapshot(self):
+        with self.lock:
+            return {"running": self.last_received > 0 and time.monotonic() - self.last_received < 5,
+                    "frames": [self.frames[can_id].json(can_id) for can_id in TARGET_IDS]}
+
+
+_edge_monitors = {}
+_edge_monitors_lock = Lock()
+
+
+def edge_monitor_for(vehicle_id):
+    with _edge_monitors_lock:
+        return _edge_monitors.setdefault(vehicle_id, EdgeFrameMonitor())

@@ -214,7 +214,7 @@
             <button type="button" data-body-vector-start>开始实时监听</button>
             <button type="button" data-body-vector-stop>停止</button>
           </div>
-          <div class="body-blf-status" data-body-blf-status>请选择 BLF 文件，或连接 Vector 接口开始监听</div>
+          <div class="body-blf-status" data-body-blf-status>请选择 BLF 文件，或等待板端 CAN0 报文</div>
           <div class="body-blf-cards" data-body-blf-cards></div>
         </div>
       </article>
@@ -1665,7 +1665,7 @@
     const cards = root.querySelector('[data-body-blf-cards]');
     const status = root.querySelector('[data-body-blf-status]');
     const file = root.querySelector('[data-body-blf-file]');
-    const url = () => `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/vector-monitor`;
+    const url = () => `/api/vehicles/${encodeURIComponent(state.vehicleId)}/body/edge-monitor`;
     let mode = "idle";
     const display = (result, source) => {
       cards.innerHTML = (result.frames || []).map((frame) => `<div class="body-blf-card">
@@ -1706,17 +1706,13 @@
       } catch (error) { status.textContent = `解析失败：${error.message}`; }
       file.value = "";
     });
-    root.querySelector('[data-body-vector-start]').addEventListener("click", async () => {
-      try {
-        const response = await fetch(url(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "start" }) });
-        if (!response.ok) await showError(response);
-        mode = "live";
-        status.textContent = "正在连接 Vector 接口…";
-      } catch (error) { status.textContent = `监听失败：${error.message}`; }
+    root.querySelector('[data-body-vector-start]').addEventListener("click", () => {
+      mode = "live";
+      status.textContent = "等待板端收到 0x1D1 / 0x228…";
     });
     root.querySelector('[data-body-vector-stop]').addEventListener("click", async () => {
-      try { await fetch(url(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "stop" }) }); }
-      finally { mode = "idle"; status.textContent = "实时监听已停止"; }
+      mode = "idle";
+      status.textContent = "实时显示已停止";
     });
     window.setInterval(async () => {
       if (mode !== "live") return;
@@ -1724,9 +1720,8 @@
         const response = await fetch(url());
         if (!response.ok) return;
         const result = await response.json();
-        display(result, "CANoe 同通道实时");
-        status.textContent = result.error ? `监听失败：${result.error}` : result.running ? "实时监听中" : "实时监听已停止";
-        if (!result.running) mode = "idle";
+        display(result, "板端 CAN0 实时");
+        status.textContent = result.running ? "板端报文实时更新中" : "等待板端报文（请检查 CANoe/域控与 Jetson）";
       } catch (_) { status.textContent = "实时状态获取失败"; }
     }, 1000);
     display({ frames: [{ id: "0x1D1" }, { id: "0x228" }] }, "等待数据");

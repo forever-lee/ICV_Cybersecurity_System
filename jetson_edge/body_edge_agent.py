@@ -70,6 +70,36 @@ def forward_to_cloud(payload, cloud_url, vehicle_id, token):
         return json.loads(response.read().decode("utf-8"))
 
 
+def upload_inspector_frames(args, frames):
+    url = "{}/api/vehicles/{}/body/edge-monitor".format(args.cloud, args.vehicle_id)
+    body = json.dumps({"frames": frames}, separators=(",", ":")).encode("utf-8")
+    http_request = request.Request(
+        url, data=body,
+        headers={"Authorization": "Bearer {}".format(args.token),
+                 "Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with request.urlopen(http_request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def run_inspector_uploader(args, inspector_queue):
+    while True:
+        frames = [inspector_queue.get()]
+        while len(frames) < 256:
+            try:
+                frames.append(inspector_queue.get_nowait())
+            except queue.Empty:
+                break
+        try:
+            upload_inspector_frames(args, frames)
+        except (error.URLError, OSError, ValueError) as exc:
+            print("[INSPECTOR] 云端上传失败：{}".format(exc))
+        finally:
+            for _ in frames:
+                inspector_queue.task_done()
+
+
 def poll_transmission_command(
     cloud_url, vehicle_id, token, last_sequence, dispatched_sequence=0,
     last_event_sequence=0, dispatched_event_sequence=0
@@ -377,6 +407,7 @@ def run_udp(args):
     udp_socket.settimeout(0.2)
     board_control_address = (args.board_host, args.control_port)
     upload_queue = queue.Queue(maxsize=UPLOAD_QUEUE_SIZE)
+    inspector_queue = queue.Queue(maxsize=2048)
     control_runtime = {"lock": threading.Lock(), "pending": None}
     threading.Thread(
         target=run_udp_uploader,
@@ -384,6 +415,8 @@ def run_udp(args):
         name="body-cloud-uploader",
         daemon=True,
     ).start()
+    threading.Thread(target=run_inspector_uploader, args=(args, inspector_queue),
+                     name="body-inspector-uploader", daemon=True).start()
     threading.Thread(
         target=run_udp_maintenance,
         args=(args, udp_socket, board_control_address, control_runtime),
@@ -419,6 +452,20 @@ def run_udp(args):
                 TRANSMISSION_ACK_PACKET_SIZE, RAW_CAN_PACKET_SIZE,
             ) and data[:2] == PACKET_MAGIC:
                 decoded = decode_serial_packet(data)
+                if decoded.get("inspectorFrame"):
+                    raw = decoded.get("rawCanFrame") or {}
+                    if raw.get("can_id") in (0x1D1, 0x228) and raw.get("dlc") == 8:
+                        item = {"can_id": raw["can_id"],
+                                "data_hex": bytes(raw["data"]).hex(),
+                                "received_at_ms": received_at_ms}
+                        if inspector_queue.full():
+                            try:
+                                inspector_queue.get_nowait()
+                                inspector_queue.task_done()
+                            except queue.Empty:
+                                pass
+                        inspector_queue.put_nowait(item)
+                    continue
                 if decoded.get("transmissionAck") and not validate_transmission_ack(
                     decoded, control_runtime
                 ):
