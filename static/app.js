@@ -26,6 +26,9 @@
   const H264_MAX_BUFFER_AHEAD_SECONDS = 20;
   const H264_BUFFER_LAG_GRACE_MS = 15000;
   const H264_SEEK_RECOVERY_MS = 5000;
+  const H264_MAX_END_TO_END_LATENCY_MS = 10000;
+  const H264_LATENCY_RECOVERY_GRACE_MS = 5000;
+  const H264_LATENCY_RECOVERY_COOLDOWN_MS = 30000;
   const MAP_DEMO_MODE = new URLSearchParams(location.search).get("map_demo") === "1";
   const MAP_DEMO_POINTS = [
     [106.611825, 29.537908],
@@ -81,6 +84,7 @@
     liveSocket: null, metricsSocket: null, reconnectTimer: null,
     liveConnectedAt: 0, liveRecoveryAt: 0, liveRecoveryTimer: null,
     sequenceLagStartedAt: 0,
+    latencyThresholdStartedAt: 0, latencyRecoveryAt: 0,
     mseLagStartedAt: 0, mseSeekAttemptAt: 0,
     frameTimes: [], latencyHistory: [], rateHistory: [], lastFrameAt: 0,
     latestMetrics: {}, currentView: "overview",
@@ -100,6 +104,7 @@
     h264Active: false, h264Started: false, latestMediaCreatedAt: 0,
     latestReceivedMediaCreatedAt: 0, lastMediaSequence: null,
     h264Rebuffering: false,
+    decoderCapabilityKey: null, decoderAccelerationLabel: "解码方式检测中",
     wifiClearBeforeMs: 0, wifiClearBaseCount: 0, wifiClearBaseAlertCount: 0,
     wifiSubmission: null, wifiMetricsAt: 0, wifiConnectAt: 0,
   };
@@ -968,6 +973,8 @@
     state.mseLagStartedAt = 0;
     state.mseSeekAttemptAt = 0;
     state.h264Rebuffering = false;
+    state.decoderCapabilityKey = null;
+    state.decoderAccelerationLabel = "解码方式检测中";
     video.playbackRate = 1;
     video.pause();
     video.removeAttribute("src");
@@ -1140,7 +1147,7 @@
   video.addEventListener("playing", () => {
     state.h264Active = true;
     state.h264Rebuffering = false;
-    updateH264StreamProfile();
+    refreshH264StreamProfile();
     video.classList.remove("hidden");
     canvas.style.display = "none";
     $("videoPlaceholder").classList.add("hidden");
@@ -1148,8 +1155,8 @@
     setConnection(true, "压缩码流连续播放");
   });
 
-  video.addEventListener("loadedmetadata", () => updateH264StreamProfile());
-  video.addEventListener("resize", () => updateH264StreamProfile());
+  video.addEventListener("loadedmetadata", () => refreshH264StreamProfile());
+  video.addEventListener("resize", () => refreshH264StreamProfile());
 
   video.addEventListener("waiting", () => {
     if (!state.h264Started) return;
@@ -1180,19 +1187,20 @@
     state.playbackLatency = latency;
     $("latencyValue").textContent = Math.round(latency);
     updateLatencyState(latency);
+    monitorEndToEndLatency(latency);
   });
 
-  function connect() {
+  function connect({ preserveLastFrame = false } = {}) {
     clearTimeout(state.reconnectTimer);
     clearTimeout(state.liveRecoveryTimer);
     state.liveRecoveryTimer = null;
     closeSockets();
     state.wifiMetricsAt = 0;
     updateWifi(state.latestMetrics.wifi || {});
-    resetPlayback();
-    setConnection(false, "正在连接");
     const fmp4Supported = "MediaSource" in window;
-    if (fmp4Supported) prepareMediaSource();
+    resetPlayback({ resetMedia: !fmp4Supported, preserveLastFrame });
+    setConnection(false, "正在连接");
+    if (fmp4Supported) prepareMediaSource(null, preserveLastFrame);
     const livePath = fmp4Supported ? "/ws/live-fmp4/" : "/ws/live/";
     const liveSocket = new WebSocket(wsUrl(`${livePath}${encodeURIComponent(state.vehicleId)}`));
     state.liveSocket = liveSocket;
@@ -1244,9 +1252,18 @@
     return distance < 0x80000000 ? distance : 0;
   }
 
-  function requestLiveRecovery(reason) {
+  function requestLiveRecovery(
+    reason,
+    { preserveLastFrame = true, cooldownMs = H264_RECOVERY_COOLDOWN_MS } = {},
+  ) {
     const now = Date.now();
-    if (state.liveRecoveryTimer || now - state.liveRecoveryAt < H264_RECOVERY_COOLDOWN_MS) {
+    const latencyRecoveryCoolingDown = state.latencyRecoveryAt
+      && now - state.latencyRecoveryAt < H264_LATENCY_RECOVERY_COOLDOWN_MS;
+    if (
+      state.liveRecoveryTimer
+      || latencyRecoveryCoolingDown
+      || now - state.liveRecoveryAt < cooldownMs
+    ) {
       return false;
     }
     state.liveRecoveryAt = now;
@@ -1254,9 +1271,42 @@
     setConnection(false, reason || "正在追赶直播");
     state.liveRecoveryTimer = setTimeout(() => {
       state.liveRecoveryTimer = null;
-      connect();
+      connect({ preserveLastFrame });
     }, 0);
     return true;
+  }
+
+  function monitorEndToEndLatency(latency) {
+    const now = Date.now();
+    const streamOnline = state.latestMetrics.status === "online";
+    if (
+      !state.h264Active
+      || !streamOnline
+      || latency <= H264_MAX_END_TO_END_LATENCY_MS
+    ) {
+      state.latencyThresholdStartedAt = 0;
+      return;
+    }
+    if (now - state.latencyRecoveryAt < H264_LATENCY_RECOVERY_COOLDOWN_MS) {
+      state.latencyThresholdStartedAt = 0;
+      return;
+    }
+    if (!state.latencyThresholdStartedAt) {
+      state.latencyThresholdStartedAt = now;
+      return;
+    }
+    if (now - state.latencyThresholdStartedAt < H264_LATENCY_RECOVERY_GRACE_MS) return;
+    const requested = requestLiveRecovery(
+      "端到端延迟持续超过10秒，正在保持最后画面并重建直播",
+      {
+        preserveLastFrame: true,
+        cooldownMs: H264_LATENCY_RECOVERY_COOLDOWN_MS,
+      },
+    );
+    if (requested) {
+      state.latencyRecoveryAt = now;
+      state.latencyThresholdStartedAt = 0;
+    }
   }
 
   function latestBufferedPosition() {
@@ -1329,7 +1379,7 @@
   function scheduleReconnect() {
     setConnection(false, "连接中断");
     clearTimeout(state.reconnectTimer);
-    state.reconnectTimer = setTimeout(connect, 1800);
+    state.reconnectTimer = setTimeout(() => connect({ preserveLastFrame: true }), 1800);
   }
 
   function enqueueFrame(event) {
@@ -1358,8 +1408,8 @@
     schedulePlayback();
   }
 
-  function resetPlayback() {
-    destroyMediaSource();
+  function resetPlayback({ resetMedia = true, preserveLastFrame = false } = {}) {
+    if (resetMedia) destroyMediaSource(preserveLastFrame);
     state.frameQueue = [];
     state.decoderBusy = false;
     state.lastPresentedCaptureAt = 0;
@@ -1466,7 +1516,49 @@
     const codecLabel = metrics.codec || "H.264/H.265";
     const fps = Number(metrics.encoded_fps || metrics.fps || 25);
     const passthrough = metrics.encoder === "copy";
-    $("streamProfile").textContent = `${width} × ${height} · ${codecLabel} · ${fps} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
+    const profile = $("streamProfile");
+    profile.textContent = `${width} × ${height} · ${codecLabel} · ${fps} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"} · ${state.decoderAccelerationLabel}`;
+    profile.title = "解码方式由浏览器 MediaCapabilities 的 powerEfficient 能力评估；DevTools Media 面板可查看实际解码器名称";
+  }
+
+  async function detectHardwareDecoding(metrics = state.latestMetrics) {
+    if (!String(metrics.stream_mode || "").includes("fmp4")) return;
+    const width = video.videoWidth || Number(metrics.width) || 1280;
+    const height = video.videoHeight || Number(metrics.height) || 720;
+    const fps = Number(metrics.encoded_fps || metrics.fps || 25);
+    const bitrate = Math.max(1, Number(metrics.bitrate_kbps || 2200) * 1000);
+    const contentType = state.mediaMime;
+    if (!contentType || !navigator.mediaCapabilities?.decodingInfo) {
+      state.decoderAccelerationLabel = "解码方式未知";
+      updateH264StreamProfile(metrics);
+      return;
+    }
+    const capabilityKey = `${contentType}|${width}x${height}|${fps}|${bitrate}`;
+    if (state.decoderCapabilityKey === capabilityKey) return;
+    state.decoderCapabilityKey = capabilityKey;
+    state.decoderAccelerationLabel = "解码方式检测中";
+    updateH264StreamProfile(metrics);
+    try {
+      const capability = await navigator.mediaCapabilities.decodingInfo({
+        type: "media-source",
+        video: { contentType, width, height, bitrate, framerate: fps },
+      });
+      if (state.decoderCapabilityKey !== capabilityKey) return;
+      state.decoderAccelerationLabel = capability.supported && capability.powerEfficient
+        ? "硬件解码"
+        : capability.supported
+          ? "未检测到硬件解码"
+          : "浏览器不支持该解码配置";
+    } catch (_) {
+      if (state.decoderCapabilityKey !== capabilityKey) return;
+      state.decoderAccelerationLabel = "解码方式未知";
+    }
+    updateH264StreamProfile(metrics);
+  }
+
+  function refreshH264StreamProfile(metrics = state.latestMetrics) {
+    updateH264StreamProfile(metrics);
+    detectHardwareDecoding(metrics);
   }
 
   function updateMetrics(metrics) {
@@ -1512,7 +1604,7 @@
       ? `${(metrics.segment_bytes / 1024).toFixed(0)} KB/片段`
       : metrics.frame_bytes ? `${(metrics.frame_bytes / 1024).toFixed(0)} KB/帧` : "— KB/帧";
     if (h264) {
-      updateH264StreamProfile(metrics);
+      refreshH264StreamProfile(metrics);
     }
     const droppedFrames = Number(metrics.cloud_dropped_frames || 0)
       + Number(metrics.queue_dropped_frames || 0)
@@ -2527,8 +2619,10 @@
 
   function updateLatencyState(latency) {
     const element = $("latencyState");
-    element.className = latency < 15000 ? "good" : "warn";
-    element.textContent = latency < 15000 ? "连续播放稳定" : "质量优先缓冲中";
+    element.className = latency <= H264_MAX_END_TO_END_LATENCY_MS ? "good" : "warn";
+    element.textContent = latency <= H264_MAX_END_TO_END_LATENCY_MS
+      ? "连续播放稳定"
+      : "延迟过高，准备自动恢复";
   }
 
   function setConnection(online, label) {
@@ -2596,6 +2690,8 @@
   $("vehicleSelect").addEventListener("change", (event) => {
     state.vehicleId = event.target.value; $("overlayVehicle").textContent = state.vehicleId;
     state.liveRecoveryAt = 0;
+    state.latencyThresholdStartedAt = 0;
+    state.latencyRecoveryAt = 0;
     clearTimeout(state.liveRecoveryTimer);
     state.liveRecoveryTimer = null;
     delete state.latestMetrics.wifi;
