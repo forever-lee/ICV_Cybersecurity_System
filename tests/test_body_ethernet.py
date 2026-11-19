@@ -63,6 +63,20 @@ def raw_can_body_packet(can_id, data):
     return bytes(packet)
 
 
+def test_inspector_marker_only_applies_to_targeted_packet():
+    normal = raw_can_body_packet(0x1D1, bytes(8))
+    marked = bytearray(normal)
+    marked[31] = 0xA1
+    marked[39] = 0
+    for value in marked[:39]:
+        marked[39] ^= value
+    marked[-1] = 0
+    for value in marked[:-1]:
+        marked[-1] ^= value
+    assert decode_serial_packet(normal)["inspectorFrame"] is False
+    assert decode_serial_packet(bytes(marked))["inspectorFrame"] is True
+
+
 def test_binary_udp_packet_maps_to_cloud_schema():
     received_at_ms = 1700000000123
     decoded = decode_serial_packet(body_packet())

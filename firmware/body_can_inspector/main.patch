@@ -1,0 +1,28 @@
+diff --git a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -61,6 +61,8 @@
+ #define RX_MB_IDX                  (0U)
+ #define TX_MB_IDX                  (1U)
+ #define BODY_STATUS_CAN_ID         (0x180U)
++#define BODY_INSPECT_1D1_CAN_ID    (0x1D1U)
++#define BODY_INSPECT_228_CAN_ID    (0x228U)
+ #define BODY_DOOR_CAN_ID           (0x351U)
+ #define BODY_LOCK_CAN_ID           (0x352U)
+ #define BODY_LIGHT_CAN_ID          (0x353U)
+@@ -877,4 +879,15 @@
+ 
+         BodyCan_DecodeStatus(&gRxMessage);
++
++        /* Forward inspector frames immediately, independently of the body
++         * status/event decoder. The regular body telemetry path is unchanged. */
++        if (((BODY_INSPECT_1D1_CAN_ID == gRxMessage.msgId) ||
++             (BODY_INSPECT_228_CAN_ID == gRxMessage.msgId)) &&
++            (8U == gRxMessage.dataLen))
++        {
++            BodyCan_BuildJetsonPacket();
++            gEthernetPacketQueue[(gEthernetQueueHead + JETSON_ETH_QUEUE_DEPTH - 1U) %
++                                 JETSON_ETH_QUEUE_DEPTH][31] = 0xA1U;
++        }
+ 
+         /* Re-arm CAN0 immediately for the next frame. */

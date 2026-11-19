@@ -331,6 +331,7 @@ def decode_serial_packet(packet):
             "error": TRANSMISSION_ACK_ERRORS.get(tx_error_code, "unknown"),
         }
     if len(packet) == RAW_CAN_PACKET_SIZE:
+        decoded["inspectorFrame"] = packet[31] == 0xA1
         legacy_checksum = 0
         for value in packet[:39]:
             legacy_checksum ^= value

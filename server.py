@@ -42,7 +42,7 @@ from stream_protocol import (
 from wifi_ids import detect_wifi_intrusion, parse_charging_packet, detect_wifi_rate
 from wifi_control import WifiControl
 from jetson_edge.bluetooth_control_protocol import parse_ack as parse_bluetooth_device_ack, parse_message_ack as parse_bluetooth_message_ack, MAX_MESSAGE_BYTES
-from body_blf_monitor import MAX_UPLOAD_BYTES, summarize_blf, vector_monitor
+from body_blf_monitor import MAX_UPLOAD_BYTES, summarize_blf, vector_monitor, edge_monitor_for
 from can_log_service import (
     CanLogDependencyError,
     CanLogError,
@@ -1554,6 +1554,9 @@ async def security_headers(request: Request, call_next):
         "/healthz", "/readyz", "/public/live/VHC-001",
     }
     domain_ingest = request.method == "POST" and "/domains/" in request.url.path
+    body_inspector_ingest = (
+        request.method == "POST" and request.url.path.endswith("/body/edge-monitor")
+    )
     bluetooth_ingest = request.method == "POST" and (
         request.url.path.endswith("/bluetooth")
         or request.url.path.endswith("/bluetooth/timing")
@@ -1577,6 +1580,7 @@ async def security_headers(request: Request, call_next):
         DASHBOARD_ACCESS_TOKEN
         and not public_path
         and not domain_ingest
+        and not body_inspector_ingest
         and not bluetooth_ingest
         and not bluetooth_control_poll
         and not bluetooth_local_ipc
@@ -1869,6 +1873,33 @@ async def analyze_body_blf(vehicle_id: str, request: Request):
         return summarize_blf(io.BytesIO(data))
     except Exception as exc:
         raise HTTPException(status_code=400, detail="BLF 解析失败：{}".format(exc)) from exc
+
+
+@app.get("/api/vehicles/{vehicle_id}/body/edge-monitor")
+async def body_edge_monitor_state(vehicle_id: str):
+    return edge_monitor_for(normalize_vehicle_id(vehicle_id)).snapshot()
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/edge-monitor")
+async def body_edge_monitor_ingest(vehicle_id: str, request: Request):
+    vehicle_id = normalize_vehicle_id(vehicle_id)
+    if bearer_token(request.headers) != INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    payload = await request.json()
+    frames = payload.get("frames") if isinstance(payload, dict) else None
+    if not isinstance(frames, list) or len(frames) > 256:
+        raise HTTPException(status_code=400, detail="invalid inspector frame batch")
+    try:
+        for frame in frames:
+            if not isinstance(frame, dict) or int(frame.get("can_id", -1)) not in (0x1D1, 0x228):
+                raise ValueError("invalid CAN ID")
+            if len(bytes.fromhex(str(frame.get("data_hex", "")))) != 8:
+                raise ValueError("invalid CAN data")
+            if not isinstance(frame.get("received_at_ms"), (int, float)):
+                raise ValueError("invalid receive timestamp")
+        return edge_monitor_for(vehicle_id).ingest(frames)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/vehicles/{vehicle_id}/body/vector-monitor")
