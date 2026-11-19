@@ -1140,12 +1140,16 @@
   video.addEventListener("playing", () => {
     state.h264Active = true;
     state.h264Rebuffering = false;
+    updateH264StreamProfile();
     video.classList.remove("hidden");
     canvas.style.display = "none";
     $("videoPlaceholder").classList.add("hidden");
     $("videoStage").classList.add("has-video");
     setConnection(true, "压缩码流连续播放");
   });
+
+  video.addEventListener("loadedmetadata", () => updateH264StreamProfile());
+  video.addEventListener("resize", () => updateH264StreamProfile());
 
   video.addEventListener("waiting", () => {
     if (!state.h264Started) return;
@@ -1455,6 +1459,16 @@
     });
   }
 
+  function updateH264StreamProfile(metrics = state.latestMetrics) {
+    if (!String(metrics.stream_mode || "").includes("fmp4")) return;
+    const width = video.videoWidth || Number(metrics.width) || 1280;
+    const height = video.videoHeight || Number(metrics.height) || 720;
+    const codecLabel = metrics.codec || "H.264/H.265";
+    const fps = Number(metrics.encoded_fps || metrics.fps || 25);
+    const passthrough = metrics.encoder === "copy";
+    $("streamProfile").textContent = `${width} × ${height} · ${codecLabel} · ${fps} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
+  }
+
   function updateMetrics(metrics) {
     state.latestMetrics = metrics;
     window.VShieldCockpit?.updateMetrics(metrics);
@@ -1498,7 +1512,7 @@
       ? `${(metrics.segment_bytes / 1024).toFixed(0)} KB/片段`
       : metrics.frame_bytes ? `${(metrics.frame_bytes / 1024).toFixed(0)} KB/帧` : "— KB/帧";
     if (h264) {
-      $("streamProfile").textContent = `${metrics.width || 1280} × ${metrics.height || 720} · ${codecLabel} · ${metrics.encoded_fps || 25} FPS · ${H264_TARGET_BUFFER_SECONDS}s 缓冲 · ${passthrough ? "原码流低延迟透传" : "编码模式"}`;
+      updateH264StreamProfile(metrics);
     }
     const droppedFrames = Number(metrics.cloud_dropped_frames || 0)
       + Number(metrics.queue_dropped_frames || 0)
