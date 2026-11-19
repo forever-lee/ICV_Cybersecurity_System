@@ -471,7 +471,15 @@ def build_components(
         "RTSP_CODEC": os.getenv("RTSP_CODEC", "h265"),
         "VEHICLE_NAVIGATION_FILE": str(NAVIGATION_FILE),
     })
-    for name in ("VIDEO_BUFFER_SECONDS",):
+    for name in (
+        "VIDEO_BUFFER_SECONDS",
+        "VIDEO_SEND_TIMEOUT",
+        "VIDEO_WS_OPEN_TIMEOUT_SECONDS",
+        "VIDEO_WS_PING_INTERVAL_SECONDS",
+        "VIDEO_WS_PING_TIMEOUT_SECONDS",
+        "VIDEO_FRAGMENT_STALL_TIMEOUT_SECONDS",
+        "VIDEO_FRAGMENT_STARTUP_TIMEOUT_SECONDS",
+    ):
         if os.getenv(name):
             common_vehicle_environment[name] = os.environ[name]
 

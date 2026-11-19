@@ -83,7 +83,10 @@ AMAP_JS_KEY = os.getenv("AMAP_JS_KEY", "").strip()
 AMAP_SECURITY_JS_CODE = os.getenv("AMAP_SECURITY_JS_CODE", "").strip()
 AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "").strip()
 CLOUD_FRAME_BUFFER_FRAMES = max(30, int(os.getenv("CLOUD_FRAME_BUFFER_FRAMES", "300")))
-FMP4_BUFFER_SEGMENTS = max(3, int(os.getenv("FMP4_BUFFER_SEGMENTS", "4")))
+# Keep a continuity window for temporary cpolar/mobile-network stalls. At the
+# default 1-second fragment duration this costs roughly 5-6 MB per vehicle at
+# 2.2 Mbps, while avoiding visible timeline gaps after short interruptions.
+FMP4_BUFFER_SEGMENTS = max(4, int(os.getenv("FMP4_BUFFER_SEGMENTS", "20")))
 BODY_DATA_TIMEOUT_SECONDS = float(os.getenv("BODY_DATA_TIMEOUT_SECONDS", "10"))
 BODY_EVENT_HOLD_SECONDS = 5
 BODY_EVENT_TIMEOUT_MS = 8000

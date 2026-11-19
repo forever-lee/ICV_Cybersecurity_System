@@ -313,7 +313,16 @@ def build_command(args, encoder, gpu_pipeline=False):
     else:
         # Timeout option names vary across FFmpeg/Libav builds. Probe the
         # installed executable instead of passing an incompatible fixed flag.
-        source = ["-rtsp_transport", "tcp"] + ffmpeg_rtsp_timeout_args(executable)
+        # Some embedded RTSP servers intermittently omit PTS/DTS. Generate a
+        # stable live timeline before remuxing; otherwise the MP4 muxer can
+        # remain alive while permanently stopping fragment output.
+        source = [
+            "-fflags", "+genpts+discardcorrupt",
+            "-use_wallclock_as_timestamps", "1",
+            "-rtsp_transport", "tcp",
+            "-analyzeduration", "15000000",
+            "-probesize", "10000000",
+        ] + ffmpeg_rtsp_timeout_args(executable)
         if encoder == "copy":
             source += ["-max_delay", "500000"]
         if gpu_pipeline:
@@ -362,6 +371,7 @@ def build_command(args, encoder, gpu_pipeline=False):
             "-g", str(gop_frames), "-keyint_min", str(gop_frames), "-sc_threshold", "0",
         ]
     mux = [
+        "-avoid_negative_ts", "make_zero",
         "-movflags", "+frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
         "-frag_duration", str(args.segment_ms * 1000),
         "-video_track_timescale", "90000", "-f", "mp4", "pipe:1",
@@ -632,6 +642,14 @@ def capture_loop(shared, args):
 
         record_encoder_pid(args.source, process.pid)
         stderr_lines = deque(maxlen=12)
+        capture_diagnostics = {
+            "started_at": time.monotonic(),
+            "stdout_bytes": 0,
+            "fragments": 0,
+            "last_fragment_at": 0.0,
+            "parser_pending_bytes": 0,
+        }
+        diagnostics_stop = threading.Event()
 
         def read_stderr():
             for raw in iter(process.stderr.readline, b""):
@@ -640,6 +658,89 @@ def capture_loop(shared, args):
                     stderr_lines.append(line)
 
         threading.Thread(target=read_stderr, daemon=True).start()
+
+        def report_fragment_stalls():
+            """Restart a wedged RTSP/FFmpeg pipeline that remains alive but emits no fMP4."""
+            previous_bytes = 0
+            previous_fragments = 0
+            check_interval = min(2.0, max(0.5, args.fragment_stall_timeout / 4.0))
+            progress_log_interval = 10.0
+            last_progress_log_at = time.monotonic() - progress_log_interval
+            last_stall_warning_at = 0.0
+            while not diagnostics_stop.wait(check_interval):
+                if process.poll() is not None or shared.stop.is_set():
+                    return
+                current_bytes = capture_diagnostics["stdout_bytes"]
+                current_fragments = capture_diagnostics["fragments"]
+                last_fragment_at = capture_diagnostics["last_fragment_at"]
+                fragment_age = (
+                    time.monotonic() - last_fragment_at
+                    if last_fragment_at
+                    else time.monotonic() - capture_diagnostics["started_at"]
+                )
+                effective_timeout = (
+                    args.fragment_stall_timeout
+                    if last_fragment_at
+                    else args.fragment_startup_timeout
+                )
+                now = time.monotonic()
+                if (
+                    current_fragments != previous_fragments
+                    and now - last_progress_log_at >= progress_log_interval
+                ):
+                    LOGGER.info(
+                        "fmp4_capture_progress fragments=%s stdout_bytes=%s "
+                        "parser_pending_bytes=%s fragment_age=%.1fs",
+                        current_fragments,
+                        current_bytes,
+                        capture_diagnostics["parser_pending_bytes"],
+                        fragment_age,
+                    )
+                    last_progress_log_at = now
+                elif (
+                    current_fragments == previous_fragments
+                    and fragment_age >= min(4.0, effective_timeout / 2.0)
+                    and now - last_stall_warning_at >= min(10.0, effective_timeout / 2.0)
+                ):
+                    LOGGER.warning(
+                        "fmp4_fragment_stalled phase=%s age=%.1fs timeout=%.1fs "
+                        "stdout_bytes_delta=%s stdout_bytes_total=%s parser_pending_bytes=%s",
+                        "streaming" if last_fragment_at else "startup",
+                        fragment_age,
+                        effective_timeout,
+                        current_bytes - previous_bytes,
+                        current_bytes,
+                        capture_diagnostics["parser_pending_bytes"],
+                    )
+                    last_stall_warning_at = now
+                if fragment_age >= effective_timeout:
+                    LOGGER.error(
+                        "fmp4_fragment_stall_restart phase=%s age=%.1fs timeout=%.1fs "
+                        "action=restart_ffmpeg",
+                        "streaming" if last_fragment_at else "startup",
+                        fragment_age,
+                        effective_timeout,
+                    )
+                    try:
+                        process.terminate()
+                    except OSError:
+                        return
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        LOGGER.error("fmp4_fragment_stall_force_kill pid=%s", process.pid)
+                        try:
+                            process.kill()
+                            process.wait(timeout=2)
+                        except (OSError, subprocess.TimeoutExpired):
+                            LOGGER.exception(
+                                "fmp4_fragment_stall_kill_failed pid=%s", process.pid
+                            )
+                    return
+                previous_bytes = current_bytes
+                previous_fragments = current_fragments
+
+        threading.Thread(target=report_fragment_stalls, daemon=True).start()
 
         def on_init(payload):
             with shared.lock:
@@ -658,6 +759,10 @@ def capture_loop(shared, args):
 
         def on_fragment(payload):
             created = now_ms()
+            capture_diagnostics["fragments"] += 1
+            capture_diagnostics["last_fragment_at"] = time.monotonic()
+            if capture_diagnostics["fragments"] == 1:
+                LOGGER.info("fmp4_first_fragment bytes=%s", len(payload))
             with shared.lock:
                 shared.sequence = (shared.sequence + 1) & 0xFFFFFFFF
                 if len(shared.fragments) == shared.fragments.maxlen:
@@ -672,10 +777,17 @@ def capture_loop(shared, args):
                 chunk = media_stream.read(65536)
                 if not chunk:
                     break
+                capture_diagnostics["stdout_bytes"] += len(chunk)
                 parser.feed(chunk)
+                capture_diagnostics["parser_pending_bytes"] = (
+                    len(parser.buffer)
+                    + sum(len(part) for part in parser.init_parts)
+                    + sum(len(part) for part in parser.fragment_parts)
+                )
         except Exception:
             LOGGER.exception("encoder_output_failure")
         finally:
+            diagnostics_stop.set()
             try:
                 media_stream.close()
             except OSError:
@@ -716,6 +828,43 @@ def capture_loop(shared, args):
             time.sleep(2)
 
 
+class CloudWebSocketConnection:
+    """Python 3.6-compatible async context manager for the ingest socket."""
+
+    def __init__(self, url, args):
+        self.url = url
+        self.args = args
+        self.socket = None
+
+    async def __aenter__(self):
+        # websockets 9.x forwards unknown options to loop.create_connection(),
+        # so enforce the opening timeout outside websockets.connect().
+        connection = websockets.connect(
+            self.url,
+            max_size=None,
+            max_queue=2,
+            ping_interval=self.args.ws_ping_interval,
+            ping_timeout=self.args.ws_ping_timeout,
+            close_timeout=3,
+            write_limit=1024 * 1024,
+        )
+        self.socket = await asyncio.wait_for(
+            connection,
+            timeout=self.args.ws_open_timeout,
+        )
+        return self.socket
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        if self.socket is not None:
+            await self.socket.close()
+        return False
+
+
+def open_cloud_websocket(url, args):
+    """Open the cloud socket on Python 3.6 and legacy websockets releases."""
+    return CloudWebSocketConnection(url, args)
+
+
 async def upload_loop(shared, args):
     reconnect_delay = 1.0
     reconnects = 0
@@ -724,10 +873,7 @@ async def upload_loop(shared, args):
             args.cloud.rstrip("/"), quote(args.vehicle_id, safe=""), quote(args.token, safe="")
         )
         try:
-            async with websockets.connect(
-                url, max_size=None, max_queue=2, ping_interval=20, ping_timeout=20,
-                close_timeout=3, write_limit=1024 * 1024,
-            ) as socket:
+            async with open_cloud_websocket(url, args) as socket:
                 LOGGER.info("cloud_connected vehicle_id=%s", args.vehicle_id)
                 reconnect_delay = 1.0
                 last_init = None
@@ -834,6 +980,33 @@ def parse_args():
     parser.add_argument("--buffer-seconds", type=float, default=300.0)
     parser.add_argument("--send-timeout", type=float, default=60.0)
     parser.add_argument(
+        "--ws-open-timeout",
+        type=float,
+        default=float(os.getenv("VIDEO_WS_OPEN_TIMEOUT_SECONDS", "45")),
+    )
+    parser.add_argument(
+        "--ws-ping-interval",
+        type=float,
+        default=float(os.getenv("VIDEO_WS_PING_INTERVAL_SECONDS", "30")),
+    )
+    parser.add_argument(
+        "--ws-ping-timeout",
+        type=float,
+        default=float(os.getenv("VIDEO_WS_PING_TIMEOUT_SECONDS", "90")),
+    )
+    parser.add_argument(
+        "--fragment-stall-timeout",
+        type=float,
+        default=float(os.getenv("VIDEO_FRAGMENT_STALL_TIMEOUT_SECONDS", "8")),
+        help="Restart FFmpeg when no complete fMP4 fragment is produced",
+    )
+    parser.add_argument(
+        "--fragment-startup-timeout",
+        type=float,
+        default=float(os.getenv("VIDEO_FRAGMENT_STARTUP_TIMEOUT_SECONDS", "45")),
+        help="Allow RTSP probing to receive H.265 VPS/SPS/PPS and a keyframe",
+    )
+    parser.add_argument(
         "--software-preset",
         choices=("ultrafast", "superfast", "veryfast", "faster", "fast", "medium"),
         default=os.getenv("VIDEO_SOFTWARE_PRESET", "veryfast"),
@@ -850,7 +1023,15 @@ def main():
     cleanup_stale_encoder(args.source)
     if args.width < 160 or args.fps < 1 or args.bitrate_kbps < 100:
         raise ValueError("invalid video profile")
-    if args.buffer_seconds <= 0 or args.send_timeout <= 0:
+    if (
+        args.buffer_seconds <= 0
+        or args.send_timeout <= 0
+        or args.ws_open_timeout <= 0
+        or args.ws_ping_interval <= 0
+        or args.ws_ping_timeout <= 0
+        or args.fragment_stall_timeout <= 0
+        or args.fragment_startup_timeout <= 0
+    ):
         raise ValueError("buffer and timeout values must be positive")
     queue_segments = max(4, int(math.ceil(args.buffer_seconds * 1000 / args.segment_ms)))
     shared = SharedStream(fragments=deque(maxlen=queue_segments))

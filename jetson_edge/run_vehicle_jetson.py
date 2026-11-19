@@ -39,16 +39,16 @@ INGEST_TOKEN = os.getenv(
     "vcl_687Nfse29GsoYlX0j8hPaK4ctMv_5g4nXBeYpy1Obu0",
 )
 
-# Jetson H.264/fMP4 公网稳定档：使用 20 FPS 和 2.2 Mbps，
+# Jetson H.264/fMP4 公网稳定档：匹配摄像头实际 25 FPS，码率保持 2.2 Mbps，
 # 为 cpolar、WebSocket 开销及移动网络波动保留更充足的带宽余量。
 MAX_WIDTH = int(os.getenv("VIDEO_MAX_WIDTH", "1280"))
-TARGET_FPS = int(os.getenv("VIDEO_TARGET_FPS", "20"))
+TARGET_FPS = int(os.getenv("VIDEO_TARGET_FPS", "25"))
 H264_BITRATE_KBPS = int(os.getenv("VIDEO_BITRATE_KBPS", "2200"))
 H264_SEGMENT_MS = int(os.getenv("VIDEO_SEGMENT_MS", "1000"))
-BUFFER_SECONDS = float(os.getenv(
-    "VIDEO_BUFFER_SECONDS", "3" if VIDEO_MODE == "copy" else "300"
-))
-SEND_TIMEOUT = float(os.getenv("VIDEO_SEND_TIMEOUT", "60"))
+# Preserve a complete short outage instead of dropping intermediate fragments.
+# The uploader replays this FIFO in order when the public uplink recovers.
+BUFFER_SECONDS = float(os.getenv("VIDEO_BUFFER_SECONDS", "15"))
+SEND_TIMEOUT = float(os.getenv("VIDEO_SEND_TIMEOUT", "15"))
 GST_LAUNCH_PATH = os.getenv("GST_LAUNCH_PATH", "gst-launch-1.0")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 SOFTWARE_PRESET = os.getenv("VIDEO_SOFTWARE_PRESET", "veryfast")
