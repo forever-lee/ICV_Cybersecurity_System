@@ -424,10 +424,35 @@
     $("sidebarBackdrop").classList.remove("show");
   }
 
+  // 智能驾驶域：双击视频或地图单独放大，再次双击或按 Esc 还原
+  function setupAdasSplit() {
+    const split = $("adasSplit");
+    if (!split) return;
+    const toggle = (pane) => {
+      const current = split.dataset.focus || "";
+      split.dataset.focus = current === pane ? "" : pane;
+      // 容器尺寸变了，地图与趋势图都要重算
+      requestAnimationFrame(() => {
+        if (state.vehicleMap) state.vehicleMap.resize();
+        if (state.currentView === "adas") resizeChart();
+      });
+    };
+    split.querySelectorAll("[data-split-pane]").forEach((column) => {
+      column.addEventListener("dblclick", (event) => {
+        if (event.target.closest("button")) return;
+        toggle(column.dataset.splitPane);
+      });
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && split.dataset.focus) toggle(split.dataset.focus);
+    });
+  }
+
   function setupNavigation() {
     document.querySelectorAll("[data-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
     document.querySelectorAll("[data-open-view]").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.openView)));
     setupToolBridges();
+    setupAdasSplit();
     $("mobileMenu").addEventListener("click", () => { $("sidebar").classList.toggle("open"); $("sidebarBackdrop").classList.toggle("show"); });
     $("sidebarBackdrop").addEventListener("click", closeMobileNav);
     const initial = location.hash.replace("#", "");

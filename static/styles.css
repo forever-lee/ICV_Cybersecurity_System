@@ -717,3 +717,31 @@ body { font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; t
 #wifiControlStatus[data-status="expired"] { color:#ff8299; }
 .wifi-control-panel button:disabled { opacity:.45; cursor:not-allowed; }
 @media(max-width:700px) { .wifi-control-panel { align-items:flex-start; flex-direction:column; } }
+
+/* ── 智能驾驶域：左右分栏（左视频 / 右位置） ───────────────────────── */
+.adas-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.split-column { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.split-main { position: relative; overflow: hidden; display: flex; flex-direction: column; }
+.split-main .split-stage { height: clamp(320px, 40vh, 520px); min-height: 0; }
+.split-main .video-stage.split-stage { aspect-ratio: auto; }
+.split-hint { position: absolute; right: 12px; bottom: 10px; z-index: 6; padding: 2px 8px; border-radius: 4px; background: rgba(3, 8, 14, .55); color: #6f8ea4; font-size: 9px; letter-spacing: .06em; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.split-main:hover .split-hint { opacity: 1; }
+.adas-split[data-focus="map"] .split-column[data-split-pane="video"],
+.adas-split[data-focus="video"] .split-column[data-split-pane="map"] { display: none; }
+.adas-split[data-focus="map"],
+.adas-split[data-focus="video"] { grid-template-columns: minmax(0, 1fr); }
+.adas-split[data-focus="map"] .split-main .split-stage,
+.adas-split[data-focus="video"] .split-main .split-stage { height: calc(100vh - 268px); }
+.adas-split[data-focus="map"] .split-main .split-hint,
+.adas-split[data-focus="video"] .split-main .split-hint { opacity: 1; bottom: 36px; }
+.metrics-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.metrics-row .metric-card { min-height: 96px; padding: 12px 14px; }
+.telemetry-panel { padding: 0; overflow: hidden; }
+.telemetry-panel .panel-title { padding: 12px 16px; }
+.driving-telemetry.wide { border-left: 0; border-top: 1px solid var(--line); padding: 16px 18px; gap: 14px; }
+@media (max-width: 1180px) { .adas-split { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 680px) {
+  .metrics-row { grid-template-columns: minmax(0, 1fr); }
+  .adas-split[data-focus="map"] .split-main .split-stage,
+  .adas-split[data-focus="video"] .split-main .split-stage { height: 60vh; }
+}

@@ -223,44 +223,54 @@
 
           <section class="content-view" data-view-panel="adas">
             <div class="page-heading"><div><p class="eyebrow">AUTONOMOUS DRIVING DOMAIN</p><h1>智能驾驶域安全</h1><p>感知摄像头、车辆位置、行驶速度与数据链路安全状态监测</p></div><div class="domain-summary"><span class="status-chip active">前视摄像头</span><span class="status-chip" id="navigationHeadingStatus">定位待接入</span><span class="status-chip">完整性监测</span></div></div>
-            <div class="adas-layout">
-              <article class="panel video-panel">
-                <div class="video-head"><div class="camera-title"><span class="camera-indicator"></span><div><strong>前视主摄像头 · CAM-FRONT-01</strong><small id="streamProfile">等待视频参数</small></div></div><div class="video-actions"><button id="snapshotButton">保存画面</button><button id="fullscreenButton">全屏查看</button></div></div>
-                <div class="video-stage" id="videoStage"><canvas id="videoCanvas" aria-label="车辆实时视频"></canvas><div class="scan-line"></div><div class="video-placeholder" id="videoPlaceholder"><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待 Jetson 视频流</strong><p>边缘端连接云端后，H.265/fMP4 画面将在此自动出现</p></div><div class="video-overlay top-left"><span class="live-tag"><i></i> LIVE</span><span id="sequenceTag">SEQ —</span></div><div class="video-overlay bottom-left"><span id="overlayVehicle">VHC-001</span><span id="overlayTimestamp">--:--:--.---</span></div><div class="video-overlay bottom-right"><span id="overlayTransport">WEBSOCKET / FMP4</span></div></div>
-              </article>
-              <aside class="metrics-column">
-                <article class="metric-card panel accent"><div class="metric-label"><span>端到端延迟</span><i>LATENCY</i></div><div class="metric-value"><strong id="latencyValue">—</strong><small>ms</small></div><div class="metric-foot"><span id="latencyState" class="good">等待测量</span><span>连续播放优先</span></div></article>
-                <article class="metric-card panel"><div class="metric-label"><span>云端接收帧率</span><i>FPS</i></div><div class="metric-value"><strong id="fpsValue">—</strong><small>FPS</small></div><div class="spark-bars" id="fpsBars"></div></article>
-                <article class="metric-card panel"><div class="metric-label"><span>上行传输速率</span><i>UPLINK</i></div><div class="metric-value"><strong id="bitrateValue">—</strong><small>Mbps</small></div><div class="metric-foot"><span id="qualityLabel">H.265 — Kbps</span><span id="frameSizeLabel">— KB/片段</span></div></article>
-                <article class="metric-card panel compact"><div class="health-row"><span>链路健康度</span><strong id="healthValue">—</strong></div><div class="health-track"><i id="healthBar"></i></div><div class="health-details"><span>丢帧 <b id="dropValue">—</b></span><span>观看端 <b id="viewerValue">0</b></span><span>重连 <b id="reconnectValue">0</b></span></div></article>
-              </aside>
-            </div>
-            <article class="panel vehicle-location-panel">
-              <div class="panel-title location-title">
-                <div><p class="eyebrow">LIVE VEHICLE LOCATION</p><h2>车辆实时位置与速度</h2></div>
-                <div class="location-title-meta"><span id="navigationDataSourceTag" class="tag">数据源：边缘端 GNSS / CAN</span><span id="navigationStatus" class="tag">等待定位数据</span><span id="navigationAge">—</span></div>
-              </div>
-              <div class="vehicle-location-layout">
-                <div class="map-shell">
-                  <div id="vehicleMap" class="vehicle-map" aria-label="车辆实时位置地图"></div>
-                  <div id="mapPlaceholder" class="map-placeholder"><i></i><strong>正在准备高德地图</strong><p>仅显示 Jetson 边缘端 GNSS / CAN 定位数据</p></div>
-                  <div class="map-coordinate-chip"><span>坐标</span><b id="coordinateSystem">—</b></div>
+            <div class="adas-split" id="adasSplit" data-focus="">
+              <div class="split-column" data-split-pane="video">
+                <article class="panel split-main video-panel">
+                  <div class="video-head"><div class="camera-title"><span class="camera-indicator"></span><div><strong>前视主摄像头 · CAM-FRONT-01</strong><small id="streamProfile">等待视频参数</small></div></div><div class="video-actions"><button id="snapshotButton">保存画面</button><button id="fullscreenButton">全屏查看</button></div></div>
+                  <div class="video-stage split-stage" id="videoStage"><canvas id="videoCanvas" aria-label="车辆实时视频"></canvas><div class="scan-line"></div><div class="video-placeholder" id="videoPlaceholder"><div class="signal-symbol"><span></span><span></span><span></span></div><strong>等待 Jetson 视频流</strong><p>边缘端连接云端后，H.265/fMP4 画面将在此自动出现</p></div><div class="video-overlay top-left"><span class="live-tag"><i></i> LIVE</span><span id="sequenceTag">SEQ —</span></div><div class="video-overlay bottom-left"><span id="overlayVehicle">VHC-001</span><span id="overlayTimestamp">--:--:--.---</span></div><div class="video-overlay bottom-right"><span id="overlayTransport">WEBSOCKET / FMP4</span></div></div>
+                  <div class="split-hint">双击放大</div>
+                </article>
+
+                <div class="metrics-row">
+                  <article class="metric-card panel accent"><div class="metric-label"><span>端到端延迟</span><i>LATENCY</i></div><div class="metric-value"><strong id="latencyValue">—</strong><small>ms</small></div><div class="metric-foot"><span id="latencyState" class="good">等待测量</span><span>连续播放优先</span></div></article>
+                  <article class="metric-card panel"><div class="metric-label"><span>云端接收帧率</span><i>FPS</i></div><div class="metric-value"><strong id="fpsValue">—</strong><small>FPS</small></div><div class="spark-bars" id="fpsBars"></div></article>
+                  <article class="metric-card panel"><div class="metric-label"><span>上行传输速率</span><i>UPLINK</i></div><div class="metric-value"><strong id="bitrateValue">—</strong><small>Mbps</small></div><div class="metric-foot"><span id="qualityLabel">H.265 — Kbps</span><span id="frameSizeLabel">— KB/片段</span></div></article>
+                  <article class="metric-card panel compact"><div class="health-row"><span>链路健康度</span><strong id="healthValue">—</strong></div><div class="health-track"><i id="healthBar"></i></div><div class="health-details"><span>丢帧 <b id="dropValue">—</b></span><span>观看端 <b id="viewerValue">0</b></span><span>重连 <b id="reconnectValue">0</b></span></div></article>
                 </div>
-                <aside class="driving-telemetry" aria-label="车辆实时行驶数据">
-                  <div class="speed-display">
-                    <div class="speed-ring"><span><strong id="vehicleSpeed">—</strong><small>km/h</small></span></div>
-                    <div><p>实时车速</p><b id="speedSource">等待边缘端</b></div>
-                  </div>
-                  <div class="location-data-grid">
-                    <div><span>经度 LONGITUDE</span><strong id="vehicleLongitude">—</strong></div>
-                    <div><span>纬度 LATITUDE</span><strong id="vehicleLatitude">—</strong></div>
-                    <div><span>航向 HEADING</span><strong id="vehicleHeading">—</strong></div>
-                    <div><span>定位精度 ACCURACY</span><strong id="vehicleAccuracy">—</strong></div>
-                  </div>
-                  <div class="navigation-source-row"><span><i id="navigationPulse"></i><b id="navigationSource">GNSS / CAN 数据待接入</b></span><time id="navigationTime">--:--:--</time></div>
-                </aside>
               </div>
-            </article>
+
+              <div class="split-column" data-split-pane="map">
+                <article class="panel split-main">
+                  <div class="video-head">
+                    <div class="camera-title"><span class="camera-indicator"></span><div><strong>车辆实时位置 · GNSS / CAN</strong><small id="navigationDataSourceTag">数据源：边缘端 GNSS / CAN</small></div></div>
+                    <div class="video-actions"><span id="navigationStatus" class="tag">等待定位数据</span><span id="navigationAge" class="tag">—</span></div>
+                  </div>
+                  <div class="map-shell split-stage" id="mapShell">
+                    <div id="vehicleMap" class="vehicle-map" aria-label="车辆实时位置地图"></div>
+                    <div id="mapPlaceholder" class="map-placeholder"><i></i><strong>正在准备高德地图</strong><p>仅显示 Jetson 边缘端 GNSS / CAN 定位数据</p></div>
+                    <div class="map-coordinate-chip"><span>坐标</span><b id="coordinateSystem">—</b></div>
+                  </div>
+                  <div class="split-hint">双击放大</div>
+                </article>
+
+                <article class="panel telemetry-panel">
+                  <div class="panel-title"><div><p class="eyebrow">DRIVING TELEMETRY</p><h2>车辆行驶数据</h2></div><span class="tag">数据源：GNSS / CAN</span></div>
+                  <aside class="driving-telemetry wide" aria-label="车辆实时行驶数据">
+                    <div class="speed-display">
+                      <div class="speed-ring"><span><strong id="vehicleSpeed">—</strong><small>km/h</small></span></div>
+                      <div><p>实时车速</p><b id="speedSource">等待边缘端</b></div>
+                    </div>
+                    <div class="location-data-grid">
+                      <div><span>经度 LONGITUDE</span><strong id="vehicleLongitude">—</strong></div>
+                      <div><span>纬度 LATITUDE</span><strong id="vehicleLatitude">—</strong></div>
+                      <div><span>航向 HEADING</span><strong id="vehicleHeading">—</strong></div>
+                      <div><span>定位精度 ACCURACY</span><strong id="vehicleAccuracy">—</strong></div>
+                    </div>
+                    <div class="navigation-source-row"><span><i id="navigationPulse"></i><b id="navigationSource">GNSS / CAN 数据待接入</b></span><time id="navigationTime">--:--:--</time></div>
+                  </aside>
+                </article>
+              </div>
+            </div>
             <div class="adas-bottom">
               <article class="panel trend-panel"><div class="panel-title"><div><p class="eyebrow">LINK TREND</p><h2>视频链路趋势</h2></div><div class="chart-legend"><span><i></i>延迟</span><span><i></i>速率</span></div></div><div class="chart-wrap"><canvas id="trendChart" aria-label="延迟与码率趋势图"></canvas></div></article>
               <article class="panel integrity-panel"><div class="panel-title"><div><p class="eyebrow">SECURITY CHECK</p><h2>感知链路安全检查</h2></div><span class="tag plan">待接入</span></div><div class="check-list"><div><i>01</i><span><b>视频流完整性校验</b><small>检测帧替换、重放与异常中断</small></span><em>规划中</em></div><div><i>02</i><span><b>摄像头身份认证</b><small>验证设备身份与链路可信状态</small></span><em>规划中</em></div><div><i>03</i><span><b>感知数据异常检测</b><small>识别干扰、欺骗与数据漂移</small></span><em>规划中</em></div></div></article>
