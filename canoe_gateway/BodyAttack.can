@@ -1,115 +1,80 @@
 /*@!Encoding:936*/
-/* VShield body-domain CANoe tamper demonstration.
- * Use only on an isolated laboratory bench.
- */
+/* One isolated 0x211 bench intrusion per Web request. */
 
 variables
 {
-  message 0x351 DoorStatus;
-  message 0x352 LockStatus;
-  msTimer TxTimer;
-  msTimer RestoreTimer;
-  byte AliveCounter = 0;
-  byte PositionInGroup = 0;
-  byte TamperPosition = 5;
+  message 0x211 TorqueFrame;
+  msTimer TamperTimer;
+  msTimer FinishTimer;
+  byte Baseline[8];
+  byte TamperByte = 0;
+  byte TamperMask = 1;
   int AttackActive = 0;
   long LastAttackSequence = 0;
-  long TxCount = 0;
-  long ManualAttackSequence = 1000;
 }
 
 on start
 {
+  Baseline[0] = 0x2A;
+  Baseline[1] = 0x30;
+  Baseline[2] = 0x54;
+  Baseline[3] = 0x61;
+  Baseline[4] = 0x88;
+  Baseline[5] = 0x00;
+  Baseline[6] = 0x01;
+  Baseline[7] = 0x6D;
   @sysvar::VShield::AttackState = 0;
-  write("BodyAttack CAPL started");
+  write("BodyAttack 0x211 one-shot bench mode ready");
 }
 
 on sysvar_update sysvar::VShield::AttackRequest
 {
   long sequence;
-  sequence = @sysvar::VShield::AttackRequest;
-  if (sequence != 0 && sequence != LastAttackSequence && !AttackActive)
-  {
-    LastAttackSequence = sequence;
-    AttackActive = 1;
-    PositionInGroup = 0;
-    /* Each ten-frame group replaces position 5 or 6 with one tampered frame. */
-    TamperPosition = (byte)(5 + random(2));
-    @sysvar::VShield::AttackState = 1;
-    write("BodyAttack injection started, sequence=%d, position=%d", sequence, TamperPosition);
-    setTimer(TxTimer, 1);
-    setTimer(RestoreTimer, 5000);
-  }
-}
-
-on key 'a'
-{
-  ManualAttackSequence++;
-  @sysvar::VShield::AttackRequest = ManualAttackSequence;
-  write("BodyAttack manual request=%d", ManualAttackSequence);
-}
-
-on timer TxTimer
-{
   int index;
-  byte doorByte = 0;
-  long doorChecksum = 0;
-  long lockChecksum = 0;
-
-  if (!AttackActive)
+  sequence = @sysvar::VShield::AttackRequest;
+  if (sequence == 0 || sequence == LastAttackSequence || AttackActive)
   {
     return;
   }
+  LastAttackSequence = sequence;
+  AttackActive = 1;
+  /* Select only bits with unambiguous meanings in the supplied matrix. */
+  TamperByte = (byte)(1 + random(3));
+  if (TamperByte == 1)
+  {
+    TamperMask = 0x02; /* bit 9: real wheel torque */
+  }
+  else if (TamperByte == 2)
+  {
+    TamperMask = (byte)(1 << random(8)); /* bits 16..23: real wheel torque */
+  }
   else
   {
-    PositionInGroup++;
-    if (PositionInGroup == TamperPosition)
-    {
-      doorByte = 0x01;
-    }
-    if (PositionInGroup >= 10)
-    {
-      PositionInGroup = 0;
-      TamperPosition = (byte)(5 + random(2));
-    }
+    TamperMask = (byte)(1 << random(2)); /* bits 24/25: two status flags */
   }
-
+  TorqueFrame.dlc = 8;
   for (index = 0; index < 8; index++)
   {
-    DoorStatus.byte(index) = 0;
-    LockStatus.byte(index) = 0;
+    TorqueFrame.byte(index) = Baseline[index];
   }
-  DoorStatus.dlc = 8;
-  DoorStatus.byte(0) = doorByte;
-  DoorStatus.byte(6) = AliveCounter;
-
-  LockStatus.dlc = 8;
-  LockStatus.byte(1) = 0x01;
-  LockStatus.byte(6) = AliveCounter;
-  for (index = 0; index < 7; index++)
-  {
-    doorChecksum += DoorStatus.byte(index);
-    lockChecksum += LockStatus.byte(index);
-  }
-  DoorStatus.byte(7) = (byte)(doorChecksum & 0xFF);
-  LockStatus.byte(7) = (byte)(lockChecksum & 0xFF);
-
-  output(LockStatus);
-  output(DoorStatus);
-  TxCount++;
-  if ((TxCount % 10) == 0)
-  {
-    write("BodyAttack transmitted %d cycles", TxCount);
-  }
-  AliveCounter = (AliveCounter + 1) & 0x0F;
-  setTimer(TxTimer, 100);
+  @sysvar::VShield::AttackState = 1;
+  output(TorqueFrame);
+  write("0x211 baseline sent; sequence=%d, byte=%d, mask=0x%02X",
+        sequence, TamperByte, TamperMask);
+  setTimer(TamperTimer, 20);
 }
 
-on timer RestoreTimer
+on timer TamperTimer
+{
+  TorqueFrame.byte(TamperByte) = Baseline[TamperByte] ^ TamperMask;
+  output(TorqueFrame);
+  write("0x211 tampered frame sent once; byte=%d", TamperByte);
+  setTimer(FinishTimer, 1000);
+}
+
+on timer FinishTimer
 {
   AttackActive = 0;
-  PositionInGroup = 0;
-  cancelTimer(TxTimer);
   @sysvar::VShield::AttackState = 2;
-  write("BodyAttack injection restored");
+  write("0x211 one-shot attack complete");
 }

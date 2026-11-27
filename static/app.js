@@ -233,17 +233,18 @@
                 <option>有线通信协议及接口攻击</option>
               </select>
             </label>
-            <button data-body-canoe-attack><i>!</i><span>CANoe 发起篡改攻击</span><small>固定持续 5 秒 · 自动恢复</small></button>
+            <button data-body-canoe-attack><i>!</i><span>CANoe 发起篡改攻击</span><small>每次点击仅发送一组 0x211 基线/篡改帧</small></button>
           </div>
           <div class="body-intrusion-latest" data-body-canoe-state>尚未创建攻击命令</div>
           <div class="body-intrusion-detail" data-body-canoe-detail hidden>
             <div><span>攻击类型</span><b data-body-canoe-detected-type>—</b></div>
             <div><span>报文 ID</span><b data-body-canoe-can-id>—</b></div>
-            <div><span>Payload</span><code data-body-canoe-payload>—</code></div>
+            <div><span>CAN0 基线报文</span><code data-body-canoe-baseline>—</code></div>
+            <div><span>CAN0 篡改报文</span><code data-body-canoe-payload>—</code></div>
             <div><span>异常位置</span><b data-body-canoe-location>—</b></div>
-            <div><span>异常内容</span><b>左前门由关闭篡改为开启</b></div>
+            <div><span>对应功能</span><b data-body-canoe-functions>—</b></div>
             <div><span>判定依据</span><b data-body-canoe-reason>—</b></div>
-            <div><span>闭环链路</span><b data-body-canoe-path>CANoe → K3 → Jetson → 云端</b></div>
+            <div><span>闭环链路</span><b data-body-canoe-path>CANoe → S32K344 CAN0 → Jetson → 云端</b></div>
           </div>
         </div>
       </article>
@@ -2145,8 +2146,8 @@
     const attackTypeText = canoeAttack?.attack_type ? `【${canoeAttack.attack_type}】` : "";
     const stateText = {
       queued: `${attackTypeText}等待 CANoe 代理领取命令`,
-      injecting: `${attackTypeText}CANoe 正在注入篡改报文，等待真实回传`,
-      detected: `${attackTypeText}云端已通过 K3 / Jetson 真实回传检测到异常`,
+      injecting: `${attackTypeText}等待两帧 0x211 经板端回传`,
+      detected: `${attackTypeText}已对比 CAN0 回传的 0x211 基线与篡改帧`,
       timeout: canoeAttack?.error || "30 秒内未检测到目标异常",
     };
     if (attackState) {
@@ -2156,7 +2157,7 @@
     }
     if (attackButton) attackButton.disabled = canoeAttack?.active === true
       || ["pending", "executing"].includes(payload.event_command?.status);
-    const detectedFrame = canoeAttack?.detected_frame || intrusion.latest;
+    const detectedFrame = canoeAttack?.detected_frame || null;
     const detail = root.querySelector("[data-body-canoe-detail]");
     if (detail) detail.hidden = !detectedFrame;
     if (detectedFrame) {
@@ -2165,14 +2166,26 @@
       const payloadCode = root.querySelector("[data-body-canoe-payload]");
       const location = root.querySelector("[data-body-canoe-location]");
       const reason = root.querySelector("[data-body-canoe-reason]");
-      if (canId) canId.textContent = detectedFrame.can_id || "0x351";
+      if (canId) canId.textContent = detectedFrame.can_id || "0x211";
       if (detectedType) detectedType.textContent = detectedFrame.attack_type || canoeAttack?.attack_type || "CAN消息重放";
-      if (location) location.textContent = detectedFrame.anomaly_location || "Byte 0 · Bit 0（Door_FL）：0 → 1";
-      if (reason) reason.textContent = detectedFrame.reason || "中央门锁已锁止，但左前门处于开启状态";
+      if (location) location.textContent = detectedFrame.anomaly_location || "—";
+      if (reason) reason.textContent = detectedFrame.reason || "—";
+      const baselineCode = root.querySelector("[data-body-canoe-baseline]");
+      if (baselineCode) baselineCode.textContent = detectedFrame.baseline_hex || "—";
+      const functionsText = root.querySelector("[data-body-canoe-functions]");
+      if (functionsText) {
+        const names = Array.isArray(detectedFrame.changed_functions) ? detectedFrame.changed_functions : [];
+        functionsText.innerHTML = names.length
+          ? names.map((name) => `<mark>${escapeHtml(name)}</mark>`).join(" ")
+          : "—";
+      }
+      const path = root.querySelector("[data-body-canoe-path]");
+      if (path) path.textContent = detectedFrame.source || "CANoe → S32K344 CAN0 → Jetson → 云端";
       if (payloadCode) {
         const bytes = String(detectedFrame.data_hex || "").trim().split(/\s+/).filter(Boolean);
+        const changed = new Set(detectedFrame.changed_bytes || []);
         payloadCode.innerHTML = bytes.length
-          ? `<mark>${escapeHtml(bytes[0])}</mark>${bytes.slice(1).map((item) => ` ${escapeHtml(item)}`).join("")}`
+          ? bytes.map((item, index) => changed.has(index) ? `<mark>${escapeHtml(item)}</mark>` : escapeHtml(item)).join(" ")
           : "—";
       }
     }

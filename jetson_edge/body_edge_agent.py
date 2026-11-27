@@ -83,6 +83,19 @@ def upload_inspector_frames(args, frames):
         return json.loads(response.read().decode("utf-8"))
 
 
+def upload_attack_frames(args, frames):
+    url = "{}/api/vehicles/{}/body/canoe-attack/frame".format(args.cloud, args.vehicle_id)
+    body = json.dumps({"frames": frames}, separators=(",", ":")).encode("utf-8")
+    http_request = request.Request(
+        url, data=body,
+        headers={"Authorization": "Bearer {}".format(args.token),
+                 "Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    with request.urlopen(http_request, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
 def run_inspector_uploader(args, inspector_queue):
     while True:
         frames = [inspector_queue.get()]
@@ -98,6 +111,23 @@ def run_inspector_uploader(args, inspector_queue):
         finally:
             for _ in frames:
                 inspector_queue.task_done()
+
+
+def run_attack_uploader(args, attack_queue):
+    while True:
+        frames = [attack_queue.get()]
+        while len(frames) < 128:
+            try:
+                frames.append(attack_queue.get_nowait())
+            except queue.Empty:
+                break
+        try:
+            upload_attack_frames(args, frames)
+        except (error.URLError, OSError, ValueError) as exc:
+            print("[CANOE 0x211] 云端上传失败：{}".format(exc))
+        finally:
+            for _ in frames:
+                attack_queue.task_done()
 
 
 def poll_transmission_command(
@@ -408,6 +438,7 @@ def run_udp(args):
     board_control_address = (args.board_host, args.control_port)
     upload_queue = queue.Queue(maxsize=UPLOAD_QUEUE_SIZE)
     inspector_queue = queue.Queue(maxsize=2048)
+    attack_queue = queue.Queue(maxsize=2048)
     control_runtime = {"lock": threading.Lock(), "pending": None}
     threading.Thread(
         target=run_udp_uploader,
@@ -417,6 +448,8 @@ def run_udp(args):
     ).start()
     threading.Thread(target=run_inspector_uploader, args=(args, inspector_queue),
                      name="body-inspector-uploader", daemon=True).start()
+    threading.Thread(target=run_attack_uploader, args=(args, attack_queue),
+                     name="body-canoe-attack-uploader", daemon=True).start()
     threading.Thread(
         target=run_udp_maintenance,
         args=(args, udp_socket, board_control_address, control_runtime),
@@ -496,6 +529,17 @@ def run_udp(args):
                 decoded = decode_serial_packet(data)
                 if decoded.get("inspectorFrame"):
                     raw = decoded.get("rawCanFrame") or {}
+                    if raw.get("can_id") == 0x211 and raw.get("dlc") == 8:
+                        item = {"can_id": 0x211, "data_hex": bytes(raw["data"]).hex(),
+                                "received_at_ms": received_at_ms}
+                        if attack_queue.full():
+                            try:
+                                attack_queue.get_nowait()
+                                attack_queue.task_done()
+                            except queue.Empty:
+                                pass
+                        attack_queue.put_nowait(item)
+                        continue
                     if raw.get("can_id") in (0x1D1, 0x228) and raw.get("dlc") == 8:
                         item = {"can_id": raw["can_id"],
                                 "data_hex": bytes(raw["data"]).hex(),

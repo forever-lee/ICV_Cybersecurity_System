@@ -1,0 +1,34 @@
+diff --git a/FlexCAN_example_CT.mex b/FlexCAN_example_CT.mex
+--- a/FlexCAN_example_CT.mex
++++ b/FlexCAN_example_CT.mex
+@@ -511,3 +511,3 @@
+                                  <setting name="flexcan_cfg_phaseSeg2" value="2"/>
+-                                 <setting name="flexcan_cfg_preDivider" value="6"/>
++                                 <setting name="flexcan_cfg_preDivider" value="3"/>
+                                  <setting name="flexcan_cfg_rJumpwidth" value="2"/>
+@@ -560,3 +560,3 @@
+                                  <setting name="flexcan_cfg_phaseSeg2" value="2"/>
+-                                 <setting name="flexcan_cfg_preDivider" value="6"/>
++                                 <setting name="flexcan_cfg_preDivider" value="3"/>
+                                  <setting name="flexcan_cfg_rJumpwidth" value="2"/>
+diff --git a/generate/src/FlexCAN_Ip_Sa_PBcfg.c b/generate/src/FlexCAN_Ip_Sa_PBcfg.c
+--- a/generate/src/FlexCAN_Ip_Sa_PBcfg.c
++++ b/generate/src/FlexCAN_Ip_Sa_PBcfg.c
+@@ -185,3 +185,3 @@
+             /* Pre Divider */
+-            (5U),
++            (2U),
+             /* Resync jump width */
+@@ -278,3 +278,3 @@
+             /* Pre Divider */
+-            (5U),
++            (2U),
+             /* Resync jump width */
+diff --git a/BODY_CAN_PROTOCOL.md b/BODY_CAN_PROTOCOL.md
+--- a/BODY_CAN_PROTOCOL.md
++++ b/BODY_CAN_PROTOCOL.md
+@@ -9,3 +9,3 @@
+ - 11-bit standard identifiers
+-- 250 kbit/s
++- 500 kbit/s
+ - CAN1 simulates the body controller and transmits

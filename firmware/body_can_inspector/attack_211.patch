@@ -1,0 +1,19 @@
+diff --git a/src/main.c b/src/main.c
+--- a/src/main.c
++++ b/src/main.c
+@@ -62,6 +62,7 @@
+ #define TX_MB_IDX                  (1U)
+ #define BODY_STATUS_CAN_ID         (0x180U)
+ #define BODY_INSPECT_1D1_CAN_ID    (0x1D1U)
+ #define BODY_INSPECT_228_CAN_ID    (0x228U)
++#define BODY_ATTACK_211_CAN_ID     (0x211U)
+ #define BODY_DOOR_CAN_ID           (0x351U)
+ #define BODY_LOCK_CAN_ID           (0x352U)
+@@ -884,5 +885,6 @@
+         /* Forward inspector frames immediately, independently of the body
+          * status/event decoder. The regular body telemetry path is unchanged. */
+-        if (((BODY_INSPECT_1D1_CAN_ID == gRxMessage.msgId) ||
++        if (((BODY_ATTACK_211_CAN_ID == gRxMessage.msgId) ||
++             (BODY_INSPECT_1D1_CAN_ID == gRxMessage.msgId) ||
+              (BODY_INSPECT_228_CAN_ID == gRxMessage.msgId)) &&
+             (8U == gRxMessage.dataLen))

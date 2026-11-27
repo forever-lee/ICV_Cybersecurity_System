@@ -1180,6 +1180,8 @@ def body_alerts(body, validity, reasons, timestamp):
 def detect_canoe_body_tamper(state, frame, body, received_at_ms):
     """Confirm the attack only from a valid K3/Jetson raw CAN readback."""
     command = state.body_canoe_attack_command
+    if command and command.get("can_id") == "0x211":
+        return None
     if not command or command.get("status") not in {"injecting", "detected"}:
         return None
     if received_at_ms < int(command.get("requested_at_ms") or 0):
@@ -1575,6 +1577,7 @@ async def security_headers(request: Request, call_next):
     canoe_agent = request.method == "POST" and (
         request.url.path.endswith("/body/canoe-attack/next")
         or request.url.path.endswith("/body/canoe-attack/ack")
+        or request.url.path.endswith("/body/canoe-attack/frame")
     )
     if (
         DASHBOARD_ACCESS_TOKEN
@@ -2054,6 +2057,7 @@ async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
         "sequence": state.body_canoe_attack_sequence,
         "attack": attack_type,
         "attack_type": attack_label,
+        "can_id": "0x211",
         "status": "queued",
         "requested_at_ms": now_ms(),
         "acknowledged_at_ms": None,
@@ -2062,6 +2066,8 @@ async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
         "restore_due_at_ms": None,
         "detected_frame": None,
         "error": "",
+        "baseline_hex": None,
+        "baseline_received_at_ms": None,
     }
     return {
         "accepted": True,
@@ -2070,6 +2076,72 @@ async def trigger_body_canoe_attack(vehicle_id: str, request: Request):
         "command": dict(state.body_canoe_attack_command),
         "body": state.body_snapshot(),
     }
+
+
+@app.post("/api/vehicles/{vehicle_id}/body/canoe-attack/frame")
+async def ingest_body_canoe_attack_frame(vehicle_id: str, request: Request):
+    """Compare two CAN0 readbacks from one isolated CANoe 0x211 request."""
+    if bearer_token(request.headers) != INGEST_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid ingest token")
+    payload = await request.json()
+    frames = payload.get("frames") if isinstance(payload, dict) else None
+    if not isinstance(frames, list) or len(frames) > 128:
+        raise HTTPException(status_code=400, detail="invalid 0x211 frame batch")
+    state = registry.get(vehicle_id)
+    command = state.body_canoe_attack_command
+    for frame in frames:
+        try:
+            if not isinstance(frame, dict) or int(frame.get("can_id", -1)) != 0x211:
+                raise ValueError("invalid CAN ID")
+            data = bytes.fromhex(str(frame.get("data_hex", "")))
+            if len(data) != 8:
+                raise ValueError("0x211 must have DLC 8")
+            received_at_ms = int(frame.get("received_at_ms"))
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not command or command.get("status") not in {"queued", "injecting"}:
+            continue
+        if received_at_ms < int(command.get("requested_at_ms") or 0):
+            continue
+        if command.get("baseline_hex") is None:
+            command["baseline_hex"] = data.hex(" ").upper()
+            command["baseline_received_at_ms"] = received_at_ms
+            continue
+        baseline = bytes.fromhex(command["baseline_hex"])
+        changed = [i for i in range(8) if baseline[i] != data[i]]
+        if len(changed) != 1 or changed[0] not in {1, 2, 3}:
+            continue
+        byte_index = changed[0]
+        mask = baseline[byte_index] ^ data[byte_index]
+        if byte_index == 1 and mask != 0x02:
+            continue
+        if byte_index == 3 and mask not in {0x01, 0x02}:
+            continue
+        if byte_index in {1, 2}:
+            changed_functions = ["动力总成真实轮端扭矩"]
+        elif mask == 0x01:
+            changed_functions = ["ESP扭矩请求激活"]
+        else:
+            changed_functions = ["动力总成扭矩失效"]
+        command["status"] = "detected"
+        command["detected_at_ms"] = now_ms()
+        command["completed_at_ms"] = command["detected_at_ms"]
+        command["restore_due_at_ms"] = command["detected_at_ms"] + 1000
+        command["error"] = ""
+        command["detected_frame"] = {
+            "can_id": "0x211",
+            "attack_type": command["attack_type"],
+            "baseline_hex": command["baseline_hex"],
+            "data_hex": data.hex(" ").upper(),
+            "changed_bytes": changed,
+            "changed_functions": changed_functions,
+            "anomaly_location": "Byte {} · Bit {}".format(
+                byte_index, byte_index * 8 + mask.bit_length() - 1),
+            "reason": "CAN0 回传的 0x211 与同次攻击基线帧相比，{}发生变化".format(
+                "、".join(changed_functions)),
+            "source": "CANoe → S32K344 CAN0 → Jetson → 云端",
+        }
+    return {"accepted": True, "command": dict(command) if command else None}
 
 
 @app.post("/api/vehicles/{vehicle_id}/body/canoe-attack/next")
