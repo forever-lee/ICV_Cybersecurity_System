@@ -14,7 +14,6 @@ import os
 import random
 import re
 import secrets
-import sqlite3
 import subprocess
 import sys
 import threading
@@ -114,7 +113,6 @@ CANOE_AGENT_VEHICLE_ID = os.getenv("CANOE_AGENT_VEHICLE_ID", "VHC-001").strip()
 CANOE_AGENT_LOG_PATH = Path(os.getenv(
     "CANOE_AGENT_LOG_PATH", str(BASE_DIR / "logs" / "canoe_attack_agent.log")
 )).expanduser().resolve()
-BODY_DATABASE_PATH = Path(os.getenv("BODY_DATABASE_PATH", str(BASE_DIR / "data" / "body_telemetry.db")))
 MAX_COMPARISON_IMAGE_BYTES = int(os.getenv("MAX_COMPARISON_IMAGE_BYTES", str(MAX_FRAME_BYTES)))
 HMI_COMPARISON_PATH = os.getenv("HMI_COMPARISON_PATH", "").strip()
 CAN_FLOW_MAX_REPLAY_FRAMES = max(
@@ -148,80 +146,6 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger("vehicle-cloud")
 CAN_LOG_SERVICE = get_can_log_service(BASE_DIR)
-
-
-def init_body_database():
-    BODY_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS body_frames (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vehicle_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL,
-                can_id TEXT NOT NULL,
-                dlc INTEGER NOT NULL,
-                data_hex TEXT NOT NULL,
-                signals_json TEXT NOT NULL,
-                captured_at_ms INTEGER NOT NULL,
-                received_at_ms INTEGER NOT NULL,
-                valid INTEGER NOT NULL,
-                invalid_reason TEXT NOT NULL,
-                device_id TEXT NOT NULL,
-                interface_path TEXT NOT NULL,
-                source TEXT NOT NULL,
-                is_test INTEGER NOT NULL
-            )"""
-        )
-        connection.execute(
-            """CREATE TABLE IF NOT EXISTS body_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                vehicle_id TEXT NOT NULL,
-                event_key TEXT NOT NULL,
-                level TEXT NOT NULL,
-                title TEXT NOT NULL,
-                detail TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL
-            )"""
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_body_frames_vehicle_time ON body_frames(vehicle_id, received_at_ms DESC)"
-        )
-        existing_columns = {
-            row[1] for row in connection.execute("PRAGMA table_info(body_frames)").fetchall()
-        }
-        for column_name, definition in (
-            ("is_intrusion", "INTEGER NOT NULL DEFAULT 0"),
-            ("intrusion_type", "TEXT NOT NULL DEFAULT ''"),
-            ("intrusion_reason", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            if column_name not in existing_columns:
-                connection.execute(
-                    "ALTER TABLE body_frames ADD COLUMN {} {}".format(column_name, definition)
-                )
-
-
-def persist_body_frame(vehicle_id, frame):
-    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
-        connection.execute(
-            """INSERT INTO body_frames (
-                vehicle_id, sequence, can_id, dlc, data_hex, signals_json,
-                captured_at_ms, received_at_ms, valid, invalid_reason,
-                device_id, interface_path, source, is_test,
-                is_intrusion, intrusion_type, intrusion_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                vehicle_id, frame["sequence"], frame["can_id"], frame["dlc"], frame["data_hex"],
-                json.dumps(frame.get("signal_changes", {}), ensure_ascii=False, separators=(",", ":")),
-                frame["vehicle_time_ms"], frame["cloud_receive_time_ms"], int(frame.get("valid", True)),
-                frame.get("invalid_reason", ""), frame.get("device_id", ""),
-                frame.get("interface_path", ""), frame.get("source", ""), int(frame.get("test", False)),
-                int(frame.get("is_intrusion", False)), frame.get("intrusion_type", ""),
-                frame.get("intrusion_reason", ""),
-            ),
-        )
-
-
-init_body_database()
 
 
 class VehicleState:
@@ -1328,12 +1252,6 @@ def record_body_update(state, payload, is_test=False):
     alerts = body_alerts(body, body["signal_validity"], body["signal_invalid_reasons"], received_at_ms)
     state.body_alerts.clear()
     state.body_alerts.extend(alerts)
-    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
-        for alert in alerts:
-            connection.execute(
-                "INSERT INTO body_events (vehicle_id,event_key,level,title,detail,created_at_ms) VALUES (?,?,?,?,?,?)",
-                (state.vehicle_id, alert["key"], alert["level"], alert["title"], alert["detail"], alert["created_at_ms"]),
-            )
 
     created_frames = []
     raw_supplied = isinstance(payload.get("raw_frame"), dict) or "can_id" in payload or "data_hex" in payload
@@ -1371,21 +1289,9 @@ def record_body_update(state, payload, is_test=False):
         }
         if payload.get("simulation_step") is not None:
             frame["simulation_step"] = max(0, min(255, int(payload["simulation_step"])))
-        intrusion_alert = detect_canoe_body_tamper(
-            state, frame, body, received_at_ms
-        ) if raw_supplied and frame_valid else None
+        if raw_supplied and frame_valid:
+            detect_canoe_body_tamper(state, frame, body, received_at_ms)
         state.body_frame_history.appendleft(frame)
-        persist_body_frame(state.vehicle_id, frame)
-        if intrusion_alert:
-            with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
-                connection.execute(
-                    "INSERT INTO body_events (vehicle_id,event_key,level,title,detail,created_at_ms) VALUES (?,?,?,?,?,?)",
-                    (
-                        state.vehicle_id, intrusion_alert["key"], intrusion_alert["level"],
-                        intrusion_alert["title"], intrusion_alert["detail"],
-                        intrusion_alert["created_at_ms"],
-                    ),
-                )
         created_frames.append(frame)
     return state.body_snapshot(), created_frames
 
@@ -1931,24 +1837,27 @@ async def body_vector_monitor_control(vehicle_id: str, request: Request):
 @app.get("/api/vehicles/{vehicle_id}/body/history")
 async def body_history(vehicle_id: str, limit: int = 100):
     vehicle_id = normalize_vehicle_id(vehicle_id)
-    limit = max(1, min(1000, int(limit)))
-    with sqlite3.connect(str(BODY_DATABASE_PATH)) as connection:
-        connection.row_factory = sqlite3.Row
-        rows = connection.execute(
-            """SELECT sequence,can_id,dlc,data_hex,signals_json,captured_at_ms,
-                      received_at_ms,valid,invalid_reason,device_id,interface_path,source,is_test,
-                      is_intrusion,intrusion_type,intrusion_reason
-               FROM body_frames WHERE vehicle_id=? ORDER BY received_at_ms DESC LIMIT ?""",
-            (vehicle_id, limit),
-        ).fetchall()
+    limit = max(1, min(80, int(limit)))
     records = []
-    for row in rows:
-        record = dict(row)
-        record["signals"] = json.loads(record.pop("signals_json") or "{}")
-        record["valid"] = bool(record["valid"])
-        record["is_test"] = bool(record["is_test"])
-        record["is_intrusion"] = bool(record["is_intrusion"])
-        records.append(record)
+    for frame in list(registry.get(vehicle_id).body_frame_history)[:limit]:
+        records.append({
+            "sequence": frame["sequence"],
+            "can_id": frame["can_id"],
+            "dlc": frame["dlc"],
+            "data_hex": frame["data_hex"],
+            "signals": dict(frame.get("signal_changes", {})),
+            "captured_at_ms": frame["vehicle_time_ms"],
+            "received_at_ms": frame["cloud_receive_time_ms"],
+            "valid": bool(frame.get("valid", True)),
+            "invalid_reason": frame.get("invalid_reason", ""),
+            "device_id": frame.get("device_id", ""),
+            "interface_path": frame.get("interface_path", ""),
+            "source": frame.get("source", ""),
+            "is_test": bool(frame.get("test", False)),
+            "is_intrusion": bool(frame.get("is_intrusion", False)),
+            "intrusion_type": frame.get("intrusion_type", ""),
+            "intrusion_reason": frame.get("intrusion_reason", ""),
+        })
     return {"vehicle_id": vehicle_id, "count": len(records), "frames": records}
 
 

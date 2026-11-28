@@ -42,6 +42,7 @@ Thumbs.db
 
 #doc
 doc/
+icv-assets/
 
 jetson_edge/logs/
 

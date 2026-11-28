@@ -249,7 +249,7 @@ WiFi 链路中的 `192.168.3.x` 仅用于 BMS 报文产生端与 ESP32 热点之
 - `/api/vehicles/{vehicle_id}/body/canoe-attack/{next,ack}`：CANoe 代理领取命令并上报注入状态；使用现有 ingest token。
 - `POST /api/vehicles/{vehicle_id}/domains/body/control`：Jetson 轮询车身域启停控制。
 - `POST /api/vehicles/{vehicle_id}/body/transmission`：网页设置车身域上传状态。
-- `GET /api/vehicles/{vehicle_id}/body/history`：车身域历史报文。
+- `GET /api/vehicles/{vehicle_id}/body/history`：查询云端内存中最近 80 条车身域报文，服务重启后清空。
 - `GET /api/cockpit/comparison/status`：座舱图像比对算法状态。
 - `POST /api/vehicles/{vehicle_id}/cockpit/compare`：座舱 Expected/Actual 图像比对。
 

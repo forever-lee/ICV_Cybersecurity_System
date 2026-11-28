@@ -6,10 +6,22 @@ import sys
 from pathlib import Path
 
 
+BASE_DIR = Path(__file__).resolve().parent
+ASSET_DIR = BASE_DIR / "icv-assets"
+
 # ======================== 可修改配置 ========================
 HOST = "0.0.0.0"
 PORT = 8001
+# ================= 智能座舱服务器资源 =================
+COCKPIT_VIDEO_DIR = str(ASSET_DIR / "videos")
+COCKPIT_EXPECTED_IMAGE_DIR = str(ASSET_DIR / "expected")
 
+CAN_LOG_DIR = str(ASSET_DIR / "blf")
+CAN_DBC_PATH = str(ASSET_DIR / "dbc")
+CAN_MATRIX_PATH = str(ASSET_DIR / "matrix" / "2028Pch05_整合通信矩阵.xlsx")
+
+CAN_FLOW_MAX_REPLAY_FRAMES = 6000
+# ====================================================
 # cpolar 公网监控页面。随机域名在 cpolar 重启后可能变化。
 PUBLIC_DASHBOARD_URL = "https://icvseclxy.vip.cpolar.cn"
 
@@ -27,8 +39,7 @@ DASHBOARD_ACCESS_TOKEN = "autocan4023"
 
 # 网页点击“CANoe发起篡改攻击”时，由后端自动启动本机CANoe代理。
 # 代理会打开此配置并启动Measurement，无需再单独运行代理终端。
-CANOE_AGENT_AUTOSTART_ON_ATTACK = True
-BASE_DIR = Path(__file__).resolve().parent
+CANOE_AGENT_AUTOSTART_ON_ATTACK = False
 CANOE_CONFIG_PATH = os.getenv(
     "CANOE_CONFIG_PATH",
     str(BASE_DIR / "canoe_gateway" / "canoe_attack.cfg"),
@@ -57,6 +68,15 @@ AMAP_SERVICE_HOST = os.getenv("AMAP_SERVICE_HOST", "")
 # server.py 在导入时读取这些配置，因此必须先设置环境变量。
 os.environ["VEHICLE_INGEST_TOKEN"] = INGEST_TOKEN
 os.environ["DASHBOARD_ACCESS_TOKEN"] = DASHBOARD_ACCESS_TOKEN
+os.environ["COCKPIT_VIDEO_DIR"] = COCKPIT_VIDEO_DIR
+os.environ["COCKPIT_EXPECTED_IMAGE_DIR"] = COCKPIT_EXPECTED_IMAGE_DIR
+
+os.environ["CAN_LOG_DIR"] = CAN_LOG_DIR
+os.environ["CAN_DBC_PATH"] = CAN_DBC_PATH
+os.environ["CAN_MATRIX_PATH"] = CAN_MATRIX_PATH
+os.environ["CAN_FLOW_MAX_REPLAY_FRAMES"] = str(
+    CAN_FLOW_MAX_REPLAY_FRAMES
+)
 os.environ["CANOE_AGENT_AUTOSTART_ON_ATTACK"] = (
     "1" if CANOE_AGENT_AUTOSTART_ON_ATTACK else "0"
 )
@@ -104,6 +124,8 @@ if __name__ == "__main__":
             port=PORT,
             reload=False,
             log_level="info",
+            ws_ping_interval=30.0,
+            ws_ping_timeout=90.0,
         )
     finally:
         if tx_viewer is not None and tx_viewer.poll() is None:

@@ -1,5 +1,4 @@
 import asyncio
-import sqlite3
 import sys
 import types
 
@@ -151,22 +150,24 @@ def test_canoe_attack_sequence_fits_signed_int32(monkeypatch):
     assert state.body_canoe_attack_sequence == 0x7FFFFFFF
 
 
-def test_existing_body_database_is_migrated_for_intrusion_fields(monkeypatch, tmp_path):
-    database = tmp_path / "legacy-body.db"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            """CREATE TABLE body_frames (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id TEXT NOT NULL,
-                sequence INTEGER NOT NULL, can_id TEXT NOT NULL, dlc INTEGER NOT NULL,
-                data_hex TEXT NOT NULL, signals_json TEXT NOT NULL,
-                captured_at_ms INTEGER NOT NULL, received_at_ms INTEGER NOT NULL,
-                valid INTEGER NOT NULL, invalid_reason TEXT NOT NULL,
-                device_id TEXT NOT NULL, interface_path TEXT NOT NULL,
-                source TEXT NOT NULL, is_test INTEGER NOT NULL
-            )"""
-        )
-    monkeypatch.setattr(server, "BODY_DATABASE_PATH", database)
-    server.init_body_database()
-    with sqlite3.connect(database) as connection:
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(body_frames)")}
-    assert {"is_intrusion", "intrusion_type", "intrusion_reason"} <= columns
+def test_body_history_uses_recent_memory_frames(monkeypatch):
+    registry = server.Registry()
+    monkeypatch.setattr(server, "registry", registry)
+    state = registry.get("VHC-CANOE-TEST")
+    for sequence in range(85):
+        state.body_frame_history.appendleft({
+            "sequence": sequence, "can_id": "0x351", "dlc": 8,
+            "data_hex": "01 00 00 00 00 00 05 06",
+            "signal_changes": {"Door_FL": True},
+            "vehicle_time_ms": 500000 + sequence,
+            "cloud_receive_time_ms": 500100 + sequence,
+            "valid": True, "test": False,
+            "is_intrusion": sequence == 84,
+            "intrusion_type": "door_fl_tamper" if sequence == 84 else "",
+        })
+    result = run_async(server.body_history("VHC-CANOE-TEST", limit=1000))
+    assert result["count"] == 80
+    assert result["frames"][0]["sequence"] == 84
+    assert result["frames"][0]["signals"] == {"Door_FL": True}
+    assert result["frames"][0]["is_intrusion"] is True
+    assert result["frames"][-1]["sequence"] == 5

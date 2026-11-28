@@ -42,12 +42,9 @@ def test_event_is_queued_without_fabricating_telemetry(monkeypatch):
     assert snapshot["frame_history"] == []
 
 
-def test_only_matching_k3_can_ack_completes_command(monkeypatch, tmp_path):
+def test_only_matching_k3_can_ack_completes_command(monkeypatch):
     clock = {"now": 200000}
     monkeypatch.setattr(server, "now_ms", lambda: clock["now"])
-    monkeypatch.setattr(server, "persist_body_frame", lambda *_: None)
-    monkeypatch.setattr(server, "BODY_DATABASE_PATH", tmp_path / "body-event.db")
-    server.init_body_database()
     state = make_real_state(clock["now"])
     command = server.queue_body_event_command(state, "low_beam")
     clock["now"] += 100
